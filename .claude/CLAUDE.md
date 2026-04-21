@@ -1,0 +1,53 @@
+## Development Workflow
+
+These principles govern *how* work gets done in this project. They apply to every feature, refactor, and non-trivial bug fix.
+
+### Design First
+
+- **Define data structures and types before logic.** Write the `struct`, `enum`, and trait signatures first. Forcing the data model out early forces the business logic to be thought through, and the interfaces fall out naturally.
+- **Interface before implementation.** Nail down function signatures and module APIs, then fill in the bodies. Contract-first, TDD-adjacent.
+
+### Naming & Structure
+
+- **Self-documenting names.** `get_user_by_email()` beats `get_user2()` by a hundred. Long is fine; vague is not.
+- **Single responsibility per function.** One function, one job. If it exceeds ~30 lines, question whether it should split.
+- **Plan directory layout early.** Decide feature-organized vs. layer-organized up front — moving files later is expensive.
+
+### Development Rhythm
+
+- **Small, frequent commits.** Commit each working increment with a clear message. Future you will `git bisect` and thank past you.
+- **Happy path first, then edges.** Get the main flow working before chasing every edge case or error branch.
+- **Tag `TODO` / `FIXME` consciously.** Mark temporary solutions explicitly — don't let them silently become permanent.
+
+### Validation & Testing
+
+- **Ship a runnable demo early.** The sooner it actually runs, the sooner you catch a wrong direction.
+- **Unit-test the core logic.** Not 100% coverage — but key algorithms and data transformations must have tests.
+- **A bug isn't fixed until you can reproduce it locally.** No guessing. Reproduce, then fix.
+- **Keep Clippy strict.** Run `cargo clippy --all-targets --all-features -- -W clippy::pedantic -D warnings` before closing out Rust changes.
+
+### Defensive Mindset
+
+- **Distrust external input.** API params, user input, third-party responses — validate at the boundary.
+- **Error handling is not an afterthought.** For IO and network calls, design the failure path at the same time as the happy path.
+- **Extract magic numbers into constants.** `const MAX_RETRY: u32 = 3;` beats a bare `3` scattered through the code.
+
+### Documentation & Comments
+
+- **Comments explain *why*, not *what*.** The code says what it does; comments explain the reasoning behind non-obvious choices.
+- **Document counter-intuitive business logic.** If a reader would reasonably ask "why this way?", leave the answer in a comment.
+
+---
+
+## Core Rule — Discuss Design Before Implementation
+
+**Before writing any code for a new feature, you MUST stop and discuss the design with the user first.** Present:
+
+1. The proposed data structures and type definitions.
+2. The proposed function / module interfaces.
+3. Key trade-offs and alternatives considered.
+4. Open questions or assumptions.
+
+**Do not start implementation until the user has confirmed the design is sound and efficient.** Spend ten minutes thinking and talking before you code — it prevents hours of rework.
+
+This rule applies to every new feature and every non-trivial change. Small, localized edits — typo fixes, one-line bug fixes, mechanical refactors — are exempt.

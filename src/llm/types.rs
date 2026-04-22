@@ -1,8 +1,6 @@
 //! Data types exchanged between the agent and an LLM client.
 
-use std::pin::Pin;
-
-use futures::Stream;
+use futures::stream::BoxStream;
 use serde::{Deserialize, Serialize};
 
 use super::error::Result;
@@ -140,9 +138,9 @@ pub struct StreamChunk {
     pub usage: Option<Usage>,
 }
 
-/// A pinned, boxed stream of [`StreamChunk`] items yielded by the
-/// client's streaming entry point.
-pub type ResponseStream = Pin<Box<dyn Stream<Item = Result<StreamChunk>> + Send>>;
+/// A boxed stream of [`StreamChunk`] items yielded by the client's
+/// streaming entry point. Alias for [`futures::stream::BoxStream`].
+pub type ResponseStream = BoxStream<'static, Result<StreamChunk>>;
 
 /// Token accounting for a completion.
 #[derive(Debug, Clone, Copy)]

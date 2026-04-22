@@ -4,5 +4,6 @@
 //! lives in `src/main.rs` and pulls from this crate.
 
 pub mod agent;
+pub mod bus;
 pub mod config;
 pub mod llm;

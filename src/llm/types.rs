@@ -65,32 +65,53 @@ impl Message {
     }
 }
 
-/// Tool schema advertised to the model.
+/// JSON-Schema-described function tool advertised to the model.
 ///
-/// Placeholder — fields defined by the agent module alongside the
-/// tool-use contract. Reserved here so downstream modules share the
-/// same nominal type.
+/// Flat shape: the OpenAI-style `{type:"function", function:{...}}`
+/// wrapper is provider-specific and applied at serialization time by
+/// the provider implementation (see [`super::providers`]).
 #[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct Tool;
+pub struct Tool {
+    /// Identifier the model uses to invoke the tool.
+    pub name: String,
+    /// Human-readable description shown to the model.
+    pub description: String,
+    /// JSON Schema describing the arguments object. Typically produced
+    /// by `schemars` from a parameters struct.
+    pub parameters: serde_json::Value,
+}
 
-/// Tool invocation emitted by the model in response to an available
+/// Tool invocation emitted by the model in response to an advertised
 /// [`Tool`].
-///
-/// Placeholder — fields defined by the agent module.
 #[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct ToolCall;
+pub struct ToolCall {
+    /// Provider-generated identifier; echoed back in the matching
+    /// [`Message::Tool`] reply.
+    pub id: String,
+    /// Name of the invoked tool.
+    pub name: String,
+    /// Raw JSON string as emitted by the model. Preserved verbatim for
+    /// session-history fidelity and parsed at dispatch time.
+    pub arguments: String,
+}
 
-/// Partial [`ToolCall`] fragment emitted during streaming.
+/// Streaming fragment of a [`ToolCall`].
 ///
-/// Placeholder — fields defined by the agent module alongside the
-/// streaming tool-call state machine.
+/// The model may emit multiple tool calls in parallel; `index`
+/// identifies which accumulating call this fragment updates. `id` and
+/// `name` typically appear on the first fragment for an index;
+/// `arguments` is concatenated across fragments as JSON text.
 #[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct ToolCallDelta;
-
-/// Trait implemented by skills that expose a [`Tool`] to the model.
-///
-/// Placeholder — methods defined by the agent module.
-pub trait BaseTool: Send + Sync {}
+pub struct ToolCallDelta {
+    /// Position of the tool call in the emitted batch.
+    pub index: u32,
+    /// Present on the first fragment for this index.
+    pub id: Option<String>,
+    /// Present on the first fragment for this index.
+    pub name: Option<String>,
+    /// Incremental JSON text to append to the accumulating arguments.
+    pub arguments: Option<String>,
+}
 
 /// A completion request.
 ///
@@ -100,6 +121,10 @@ pub trait BaseTool: Send + Sync {}
 pub struct Request {
     /// Conversation so far, in chronological order.
     pub messages: Vec<Message>,
+    /// Tool schemas advertised to the model. Empty means "do not
+    /// advertise tools"; providers that require the field to be absent
+    /// (rather than an empty array) handle that on serialize.
+    pub tools: Vec<Tool>,
     /// Model identifier sent in the request body
     /// (for example `"mistral-small-latest"`).
     pub model_name: String,

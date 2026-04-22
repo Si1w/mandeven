@@ -15,6 +15,11 @@ pub struct AppConfig {
     /// LLM profile catalog.
     pub llm: LLMConfig,
 
+    /// Agent-loop configuration. Entire section is optional in TOML;
+    /// missing fields fall back to [`AgentConfig::default`].
+    #[serde(default)]
+    pub agent: AgentConfig,
+
     /// Filesystem path this config was loaded from.
     ///
     /// Populated by [`AppConfig::from_file`] and [`AppConfig::load`];
@@ -22,6 +27,20 @@ pub struct AppConfig {
     /// derive runtime data locations via [`AppConfig::data_dir`].
     #[serde(skip)]
     pub(crate) source_path: PathBuf,
+}
+
+/// Agent-loop configuration.
+///
+/// Loop-level knobs only. Prompt content (system prompt, title prompt,
+/// etc.) is owned by the future `prompts` module, not here.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct AgentConfig {
+    /// Maximum LLM iterations within a single user turn.
+    ///
+    /// When `None`, the inner loop has no upper bound and runs until
+    /// the model stops invoking tools. Each iteration corresponds to
+    /// one LLM call plus any tool dispatch it triggers.
+    pub max_iterations: Option<u8>,
 }
 
 impl AppConfig {

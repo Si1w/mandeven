@@ -11,4 +11,4 @@ pub mod loader;
 pub mod types;
 
 pub use error::{ConfigError, Result};
-pub use types::{AppConfig, LLMConfig, LLMProfile};
+pub use types::{AgentConfig, AppConfig, LLMConfig, LLMProfile};

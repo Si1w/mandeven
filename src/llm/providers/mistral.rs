@@ -10,7 +10,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::llm::client::BaseLLMClient;
 use crate::llm::error::{Error, Result};
-use crate::llm::types::{Message, Request, Response, ResponseStream, StreamChunk, Usage};
+use crate::llm::types::{
+    Message, Request, Response, ResponseStream, StreamChunk, Tool, ToolCall, ToolCallDelta, Usage,
+};
 use crate::llm::utils::parse_finish_reason;
 
 /// Base URL of the chat-completions endpoint.
@@ -21,6 +23,9 @@ const API_KEY_ENV: &str = "MISTRAL_API_KEY";
 
 /// SSE terminator sent by the API to signal end-of-stream.
 const DONE_MARKER: &str = "[DONE]";
+
+/// Wire-level value of the only tool kind Mistral accepts.
+const TOOL_KIND_FUNCTION: &str = "function";
 
 /// Mistral AI chat-completions client.
 pub struct Mistral {
@@ -57,9 +62,12 @@ impl BaseLLMClient for Mistral {
         let api_key = std::env::var(API_KEY_ENV)
             .map_err(|_| Error::MissingApiKey(API_KEY_ENV.to_string()))?;
 
+        let messages = wire_messages(&req.messages);
+        let tools = wire_tools(&req.tools);
         let body = WireRequest {
             model: &req.model_name,
-            messages: &req.messages,
+            messages: &messages,
+            tools: &tools,
             max_tokens: req.max_tokens,
             temperature: req.temperature,
         };
@@ -91,7 +99,10 @@ impl BaseLLMClient for Mistral {
 
         Ok(Response {
             content: first.message.content,
-            tool_calls: None,
+            tool_calls: first
+                .message
+                .tool_calls
+                .map(|calls| calls.into_iter().map(ToolCall::from).collect()),
             usage: Usage {
                 prompt_tokens: wire.usage.prompt,
                 completion_tokens: wire.usage.completion,
@@ -105,9 +116,12 @@ impl BaseLLMClient for Mistral {
         let api_key = std::env::var(API_KEY_ENV)
             .map_err(|_| Error::MissingApiKey(API_KEY_ENV.to_string()))?;
 
+        let messages = wire_messages(&req.messages);
+        let tools = wire_tools(&req.tools);
         let body = WireStreamRequest {
             model: &req.model_name,
-            messages: &req.messages,
+            messages: &messages,
+            tools: &tools,
             max_tokens: req.max_tokens,
             temperature: req.temperature,
             stream: true,
@@ -174,13 +188,16 @@ fn chunks(resp: reqwest::Response) -> ResponseStream {
 
 /// Map a wire chunk into the public [`StreamChunk`] shape.
 fn convert_stream_chunk(wire: WireStreamChunk) -> StreamChunk {
-    let choice = wire.choices.into_iter().next();
-    let (content_delta, finish_reason) = match choice {
-        Some(c) => (
-            c.delta.content,
-            c.finish_reason.as_deref().map(parse_finish_reason),
-        ),
-        None => (None, None),
+    let (content_delta, tool_call_deltas, finish_reason) = match wire.choices.into_iter().next() {
+        Some(c) => {
+            let finish = c.finish_reason.as_deref().map(parse_finish_reason);
+            let tool_deltas = c
+                .delta
+                .tool_calls
+                .map(|deltas| deltas.into_iter().map(ToolCallDelta::from).collect());
+            (c.delta.content, tool_deltas, finish)
+        }
+        None => (None, None, None),
     };
     let usage = wire.usage.map(|u| Usage {
         prompt_tokens: u.prompt,
@@ -189,16 +206,32 @@ fn convert_stream_chunk(wire: WireStreamChunk) -> StreamChunk {
     });
     StreamChunk {
         content_delta,
-        tool_call_deltas: None,
+        tool_call_deltas,
         finish_reason,
         usage,
     }
 }
 
+/// Project the public [`Message`] slice into the wire-shape the Mistral
+/// API expects (OpenAI-compatible, with the `{type:"function",
+/// function:{...}}` wrapper around tool calls).
+fn wire_messages(messages: &[Message]) -> Vec<WireReqMessage<'_>> {
+    messages.iter().map(WireReqMessage::from).collect()
+}
+
+/// Project the public [`Tool`] slice into the wire-shape Mistral
+/// expects. Empty input yields an empty `Vec`, which the serializer
+/// then omits from the request body.
+fn wire_tools(tools: &[Tool]) -> Vec<WireReqTool<'_>> {
+    tools.iter().map(WireReqTool::from).collect()
+}
+
 #[derive(Serialize)]
 struct WireRequest<'a> {
     model: &'a str,
-    messages: &'a [Message],
+    messages: &'a [WireReqMessage<'a>],
+    #[serde(skip_serializing_if = "<[_]>::is_empty")]
+    tools: &'a [WireReqTool<'a>],
     max_tokens: u32,
     temperature: f32,
 }
@@ -206,7 +239,9 @@ struct WireRequest<'a> {
 #[derive(Serialize)]
 struct WireStreamRequest<'a> {
     model: &'a str,
-    messages: &'a [Message],
+    messages: &'a [WireReqMessage<'a>],
+    #[serde(skip_serializing_if = "<[_]>::is_empty")]
+    tools: &'a [WireReqTool<'a>],
     max_tokens: u32,
     temperature: f32,
     stream: bool,
@@ -216,6 +251,109 @@ struct WireStreamRequest<'a> {
 #[derive(Serialize)]
 struct StreamOptions {
     include_usage: bool,
+}
+
+/// Wire-shape of one request-side message. Mirrors the public
+/// [`Message`] enum but wraps tool calls in the OpenAI-style
+/// `{type:"function", function:{...}}` envelope.
+#[derive(Serialize)]
+#[serde(tag = "role", rename_all = "lowercase")]
+enum WireReqMessage<'a> {
+    System {
+        content: &'a str,
+    },
+    User {
+        content: &'a str,
+    },
+    Assistant {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        content: Option<&'a str>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        tool_calls: Option<Vec<WireReqToolCall<'a>>>,
+    },
+    Tool {
+        content: &'a str,
+        tool_call_id: &'a str,
+    },
+}
+
+impl<'a> From<&'a Message> for WireReqMessage<'a> {
+    fn from(m: &'a Message) -> Self {
+        match m {
+            Message::System { content } => WireReqMessage::System { content },
+            Message::User { content } => WireReqMessage::User { content },
+            Message::Assistant {
+                content,
+                tool_calls,
+            } => WireReqMessage::Assistant {
+                content: content.as_deref(),
+                tool_calls: tool_calls
+                    .as_ref()
+                    .map(|calls| calls.iter().map(WireReqToolCall::from).collect()),
+            },
+            Message::Tool {
+                content,
+                tool_call_id,
+            } => WireReqMessage::Tool {
+                content,
+                tool_call_id,
+            },
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct WireReqToolCall<'a> {
+    id: &'a str,
+    #[serde(rename = "type")]
+    kind: &'static str,
+    function: WireReqFunctionCall<'a>,
+}
+
+impl<'a> From<&'a ToolCall> for WireReqToolCall<'a> {
+    fn from(c: &'a ToolCall) -> Self {
+        Self {
+            id: &c.id,
+            kind: TOOL_KIND_FUNCTION,
+            function: WireReqFunctionCall {
+                name: &c.name,
+                arguments: &c.arguments,
+            },
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct WireReqFunctionCall<'a> {
+    name: &'a str,
+    arguments: &'a str,
+}
+
+#[derive(Serialize)]
+struct WireReqTool<'a> {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    function: WireReqFunctionDef<'a>,
+}
+
+impl<'a> From<&'a Tool> for WireReqTool<'a> {
+    fn from(t: &'a Tool) -> Self {
+        Self {
+            kind: TOOL_KIND_FUNCTION,
+            function: WireReqFunctionDef {
+                name: &t.name,
+                description: &t.description,
+                parameters: &t.parameters,
+            },
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct WireReqFunctionDef<'a> {
+    name: &'a str,
+    description: &'a str,
+    parameters: &'a serde_json::Value,
 }
 
 #[derive(Deserialize)]
@@ -233,6 +371,30 @@ struct WireChoice {
 #[derive(Deserialize)]
 struct WireAssistantMessage {
     content: Option<String>,
+    #[serde(default)]
+    tool_calls: Option<Vec<WireRespToolCall>>,
+}
+
+#[derive(Deserialize)]
+struct WireRespToolCall {
+    id: String,
+    function: WireRespFunctionCall,
+}
+
+#[derive(Deserialize)]
+struct WireRespFunctionCall {
+    name: String,
+    arguments: String,
+}
+
+impl From<WireRespToolCall> for ToolCall {
+    fn from(w: WireRespToolCall) -> Self {
+        Self {
+            id: w.id,
+            name: w.function.name,
+            arguments: w.function.arguments,
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -250,6 +412,40 @@ struct WireStreamChoice {
 #[derive(Deserialize)]
 struct WireDelta {
     content: Option<String>,
+    #[serde(default)]
+    tool_calls: Option<Vec<WireDeltaToolCall>>,
+}
+
+#[derive(Deserialize)]
+struct WireDeltaToolCall {
+    index: u32,
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    function: Option<WireDeltaFunctionCall>,
+}
+
+#[derive(Deserialize)]
+struct WireDeltaFunctionCall {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    arguments: Option<String>,
+}
+
+impl From<WireDeltaToolCall> for ToolCallDelta {
+    fn from(w: WireDeltaToolCall) -> Self {
+        let (name, arguments) = match w.function {
+            Some(f) => (f.name, f.arguments),
+            None => (None, None),
+        };
+        Self {
+            index: w.index,
+            id: w.id,
+            name,
+            arguments,
+        }
+    }
 }
 
 #[derive(Deserialize)]

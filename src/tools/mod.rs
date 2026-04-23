@@ -8,10 +8,20 @@
 //! [`Registry::dispatch`]. Dispatch is infallible: any error the tool
 //! produces is folded into the reply content so the model can see it
 //! on the next turn.
+//!
+//! Built-in tools live in sibling files ([`file`], [`shell`]) and are
+//! registered in bulk via [`register_builtins`].
 
 pub mod error;
+pub mod file;
+pub mod shell;
 
 pub use error::{Error, Result};
+
+/// Hard cap on the byte length of any single tool result sent back to
+/// the model. All built-in tools (see [`register_builtins`]) truncate
+/// at this bound so per-turn context cost stays predictable.
+pub const MAX_TOOL_RESULT_BYTES: usize = 30_000;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -120,11 +130,18 @@ fn parse_arguments(tool: &str, raw: &str) -> Result<serde_json::Value> {
     })
 }
 
-/// Serialize a tool's successful return value. `serde_json::Value` is
-/// always valid JSON by construction, so serialization cannot fail in
-/// practice.
+/// Serialize a tool's successful return value.
+///
+/// Plain string returns are passed through unquoted so the model sees
+/// raw text (e.g. `Wrote 42 bytes to ...`) rather than a JSON-escaped
+/// string (`"Wrote 42 bytes to ..."`). Other [`serde_json::Value`]
+/// shapes are JSON-serialized; the operation cannot fail in practice
+/// because `Value` is always valid JSON by construction.
 fn serialize_result(value: &serde_json::Value) -> String {
-    serde_json::to_string(value).expect("serde_json::Value always serializes")
+    match value {
+        serde_json::Value::String(s) => s.clone(),
+        other => serde_json::to_string(other).expect("serde_json::Value always serializes"),
+    }
 }
 
 /// Wrap an error message as a JSON object the model can parse on the
@@ -132,4 +149,14 @@ fn serialize_result(value: &serde_json::Value) -> String {
 fn error_content(message: &str) -> String {
     serde_json::to_string(&json!({ "error": message }))
         .expect("fixed-shape error object always serializes")
+}
+
+/// Install the built-in tool set ([`file::FileRead`], [`file::FileWrite`],
+/// [`file::FileEdit`], [`shell::Shell`]) into `registry`. Callers who
+/// want a different subset can register tools directly instead.
+pub fn register_builtins(registry: &mut Registry) {
+    registry.register(Arc::new(file::FileRead));
+    registry.register(Arc::new(file::FileWrite));
+    registry.register(Arc::new(file::FileEdit));
+    registry.register(Arc::new(shell::Shell::new()));
 }

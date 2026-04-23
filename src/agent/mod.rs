@@ -71,7 +71,11 @@ pub struct Agent {
 
 impl Agent {
     /// Construct an agent wired to the LLM provider selected by
-    /// `cfg.llm.default`.
+    /// `cfg.llm.default`, using the caller-supplied tool registry.
+    ///
+    /// Callers decide which tools are available — pass
+    /// [`tools::Registry::new`] for an empty one or use
+    /// [`tools::register_builtins`] to install the default set.
     ///
     /// # Errors
     ///
@@ -84,6 +88,7 @@ impl Agent {
     pub fn new(
         cfg: &AppConfig,
         sessions: Arc<session::Manager>,
+        tools: tools::Registry,
         inbox: InboundReceiver,
         out: OutboundSender,
     ) -> Result<Self> {
@@ -111,7 +116,7 @@ impl Agent {
             profile,
             client,
             sessions,
-            tools: tools::Registry::new(),
+            tools,
             inbox,
             out,
             config: cfg.agent.clone(),

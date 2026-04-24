@@ -18,6 +18,7 @@
 //! render task is woken by [`tokio::sync::Notify`] — any mutation
 //! ends with `self.redraw.notify_one()`.
 
+pub mod commands;
 pub mod tui;
 
 use std::io;
@@ -44,6 +45,9 @@ use crate::bus::{
     SessionID,
 };
 use crate::channels::{Channel, Error, Result};
+use crate::command::{self, CommandOutcome, Router};
+
+use self::commands::CliContext;
 
 /// Number of logical lines moved per `PgUp` / `PgDn`. Fixed rather
 /// than "half the visible height" because `handle_event` does not
@@ -139,6 +143,11 @@ pub struct CliChannel {
     session: SessionID,
     state: Arc<Mutex<CliState>>,
     redraw: Arc<Notify>,
+    /// Slash-command registry for commands that affect only this
+    /// channel (overlay toggles, exit, …). Agent-level commands will
+    /// be forwarded to the agent router once that layer lands — for
+    /// now an unknown command is rendered as a transcript error.
+    router: Router<CliContext>,
 }
 
 impl CliChannel {
@@ -146,11 +155,17 @@ impl CliChannel {
     /// state is per-instance.
     #[must_use]
     pub fn new(id: ChannelID, session: SessionID) -> Self {
+        let mut router = Router::<CliContext>::new();
+        router.register(Arc::new(command::builtins::Exit));
+        router.register(Arc::new(command::builtins::Quit));
+        router.register(Arc::new(commands::Help));
+
         Self {
             id,
             session,
             state: Arc::new(Mutex::new(CliState::default())),
             redraw: Arc::new(Notify::new()),
+            router,
         }
     }
 }
@@ -354,7 +369,7 @@ impl CliChannel {
         self.redraw.notify_one();
 
         if let Some(cmd) = command {
-            return Ok(self.dispatch_command(&cmd));
+            return Ok(self.dispatch_command(&cmd).await);
         }
 
         {
@@ -375,30 +390,35 @@ impl CliChannel {
         Ok(true)
     }
 
-    /// Execute one slash command. Returns `false` to exit the REPL
-    /// (`/exit`, `/quit`), `true` to continue.
-    //
-    // TODO(command-router): slash-command dispatch is baked into this
-    // channel. When the `command/` module comes online, extract this
-    // into a shared router that each channel registers its own
-    // handlers into — different channels want different command sets
-    // (e.g. a discord channel's `!status` has nothing to do with
-    // cli's `/exit`). The router should also own unknown-command
-    // feedback (currently pushed to the transcript here).
-    fn dispatch_command(&self, cmd: &str) -> bool {
-        match cmd {
-            "help" => {
-                self.state.lock().unwrap().overlay = Some(Overlay::Help);
+    /// Execute one slash command via the channel-local [`Router`].
+    /// Returns `false` to exit the REPL, `true` to continue.
+    ///
+    /// Unknown commands currently surface as a transcript error. When
+    /// the agent-level router lands (Commit B of the command-router
+    /// work), this arm will instead forward the command body to the
+    /// agent bus as an `InboundPayload::Command`, and the agent's own
+    /// "unknown command" response will flow back through the outbound
+    /// path.
+    async fn dispatch_command(&self, body: &str) -> bool {
+        let ctx = CliContext {
+            state: self.state.clone(),
+            redraw: self.redraw.clone(),
+        };
+        match self.router.dispatch(body, &ctx).await {
+            Some(CommandOutcome::Handled) => true,
+            Some(CommandOutcome::Exit) => false,
+            Some(CommandOutcome::Feedback(msg)) => {
+                self.state.lock().unwrap().transcript.push(Line::Error(msg));
                 self.redraw.notify_one();
                 true
             }
-            "exit" | "quit" => false,
-            other => {
+            None => {
+                let display = body.split_whitespace().next().unwrap_or(body);
                 self.state
                     .lock()
                     .unwrap()
                     .transcript
-                    .push(Line::Error(format!("Unknown command: /{other}")));
+                    .push(Line::Error(format!("Unknown command: /{display}")));
                 self.redraw.notify_one();
                 true
             }

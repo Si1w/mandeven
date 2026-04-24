@@ -72,14 +72,15 @@ impl BaseLLMClient for Mistral {
             temperature: req.temperature,
         };
 
-        let resp = self
+        let mut builder = self
             .http
             .post(format!("{BASE_URL}/chat/completions"))
             .bearer_auth(&api_key)
-            .timeout(Duration::from_secs(req.timeout_secs))
-            .json(&body)
-            .send()
-            .await?;
+            .json(&body);
+        if let Some(secs) = req.timeout_secs {
+            builder = builder.timeout(Duration::from_secs(secs));
+        }
+        let resp = builder.send().await?;
 
         let status = resp.status();
         if !status.is_success() {
@@ -130,14 +131,15 @@ impl BaseLLMClient for Mistral {
             },
         };
 
-        let resp = self
+        let mut builder = self
             .http
             .post(format!("{BASE_URL}/chat/completions"))
             .bearer_auth(&api_key)
-            .timeout(Duration::from_secs(req.timeout_secs))
-            .json(&body)
-            .send()
-            .await?;
+            .json(&body);
+        if let Some(secs) = req.timeout_secs {
+            builder = builder.timeout(Duration::from_secs(secs));
+        }
+        let resp = builder.send().await?;
 
         let status = resp.status();
         if !status.is_success() {
@@ -232,8 +234,10 @@ struct WireRequest<'a> {
     messages: &'a [WireReqMessage<'a>],
     #[serde(skip_serializing_if = "<[_]>::is_empty")]
     tools: &'a [WireReqTool<'a>],
-    max_tokens: u32,
-    temperature: f32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    temperature: Option<f32>,
 }
 
 #[derive(Serialize)]
@@ -242,8 +246,10 @@ struct WireStreamRequest<'a> {
     messages: &'a [WireReqMessage<'a>],
     #[serde(skip_serializing_if = "<[_]>::is_empty")]
     tools: &'a [WireReqTool<'a>],
-    max_tokens: u32,
-    temperature: f32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    temperature: Option<f32>,
     stream: bool,
     stream_options: StreamOptions,
 }

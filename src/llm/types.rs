@@ -128,12 +128,15 @@ pub struct Request {
     /// Model identifier sent in the request body
     /// (for example `"mistral-small-latest"`).
     pub model_name: String,
-    /// Upper bound on completion tokens.
-    pub max_tokens: u32,
-    /// Sampling temperature.
-    pub temperature: f32,
-    /// Per-request timeout in seconds.
-    pub timeout_secs: u64,
+    /// Upper bound on completion tokens. `None` is serialized by
+    /// omission so the provider API applies its own default.
+    pub max_tokens: Option<u32>,
+    /// Sampling temperature. `None` is serialized by omission so the
+    /// provider API applies its own default.
+    pub temperature: Option<f32>,
+    /// Per-request HTTP timeout in seconds. `None` disables the local
+    /// timeout; the request then runs until the remote closes.
+    pub timeout_secs: Option<u64>,
 }
 
 /// Non-streaming completion response.

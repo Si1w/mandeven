@@ -67,6 +67,10 @@ pub struct Agent {
     inbox: InboundReceiver,
     out: OutboundSender,
     config: AgentConfig,
+    /// Global HTTP timeout, cached from
+    /// [`crate::config::LLMConfig::timeout_secs`] so every iteration
+    /// builds its [`Request`] without re-reading the config.
+    timeout_secs: Option<u64>,
 }
 
 impl Agent {
@@ -120,6 +124,7 @@ impl Agent {
             inbox,
             out,
             config: cfg.agent.clone(),
+            timeout_secs: cfg.llm.timeout_secs,
         })
     }
 
@@ -318,8 +323,8 @@ impl Agent {
         // Title generation overrides the profile defaults: no tools
         // advertised, tighter token budget, lower temperature.
         request.tools = Vec::new();
-        request.max_tokens = TITLE_MAX_TOKENS;
-        request.temperature = TITLE_TEMPERATURE;
+        request.max_tokens = Some(TITLE_MAX_TOKENS);
+        request.temperature = Some(TITLE_TEMPERATURE);
         let response = self.client.complete(request).await?;
         Ok(response
             .content
@@ -338,6 +343,10 @@ impl Agent {
 
     /// Fill a fresh [`Request`] from the active profile plus the given
     /// message history and the registry's current tool schemas.
+    ///
+    /// `timeout_secs` is a transport-level concern and therefore pulled
+    /// from the shared [`crate::config::LLMConfig::timeout_secs`] rather
+    /// than the per-profile block.
     fn build_request(&self, messages: Vec<Message>) -> Request {
         Request {
             messages,
@@ -345,7 +354,7 @@ impl Agent {
             model_name: self.profile.model_name.clone(),
             max_tokens: self.profile.max_tokens,
             temperature: self.profile.temperature,
-            timeout_secs: self.profile.timeout_secs,
+            timeout_secs: self.timeout_secs,
         }
     }
 }

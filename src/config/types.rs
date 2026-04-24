@@ -67,14 +67,14 @@ impl AppConfig {
 ///
 /// ```toml
 /// [llm]
-/// default = "mistral/small"
+/// default = "mistral/mistral-small"
+/// # timeout_secs = 30   # optional; applies to every provider call
 ///
-/// [llm.mistral.small]
+/// [llm.mistral.mistral-small]
 /// model_name         = "mistral-small-latest"
 /// max_context_window = 256000
-/// max_tokens         = 4096
-/// temperature        = 0.7
-/// timeout_secs       = 30
+/// # max_tokens / temperature are optional; omit to let the provider
+/// # API apply its own defaults.
 /// ```
 ///
 /// Provider names (`mistral`, `groq`, ...) must match an entry in
@@ -86,6 +86,13 @@ pub struct LLMConfig {
     /// Must point to an existing entry inside `providers`.
     pub default: String,
 
+    /// Per-request HTTP timeout in seconds, shared across every
+    /// provider call. Belongs here rather than on [`LLMProfile`]
+    /// because it is a transport concern, not a per-model tuning
+    /// parameter. `None` disables the local timeout — requests run
+    /// until the remote closes or the process is interrupted.
+    pub timeout_secs: Option<u64>,
+
     /// Provider name -> user-chosen model name -> per-profile settings.
     #[serde(flatten)]
     pub providers: HashMap<String, HashMap<String, LLMProfile>>,
@@ -95,7 +102,9 @@ pub struct LLMConfig {
 ///
 /// The enclosing provider supplies `base_url` and `api_key_env`; this
 /// struct only carries the upstream model identifier plus the per-profile
-/// tuning parameters.
+/// tuning parameters. Sampling parameters are optional so the provider
+/// API can apply its own defaults when the user does not specify one —
+/// we deliberately do not inject client-side fallbacks.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct LLMProfile {
     /// Model identifier sent in the API request body
@@ -105,12 +114,11 @@ pub struct LLMProfile {
     /// Maximum context window of this model, in tokens.
     pub max_context_window: u32,
 
-    /// Upper bound on completion tokens per request.
-    pub max_tokens: u32,
+    /// Upper bound on completion tokens per request. `None` lets the
+    /// provider apply its own default.
+    pub max_tokens: Option<u32>,
 
-    /// Sampling temperature. Valid range: `[0.0, 2.0]`.
-    pub temperature: f32,
-
-    /// Per-request timeout in seconds.
-    pub timeout_secs: u64,
+    /// Sampling temperature. Valid range: `[0.0, 2.0]`. `None` lets
+    /// the provider apply its own default.
+    pub temperature: Option<f32>,
 }

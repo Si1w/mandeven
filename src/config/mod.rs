@@ -6,6 +6,7 @@
 //! added to [`AppConfig`] as the corresponding modules start needing
 //! user-tunable values.
 
+mod bootstrap;
 pub mod error;
 pub mod loader;
 pub mod types;

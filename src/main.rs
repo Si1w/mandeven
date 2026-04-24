@@ -29,7 +29,7 @@ type DynError = Box<dyn std::error::Error + Send + Sync>;
 
 #[tokio::main]
 async fn main() -> Result<(), DynError> {
-    let cfg = AppConfig::load()?;
+    let cfg = AppConfig::bootstrap()?;
     let sessions = Arc::new(session::Manager::new(cfg.data_dir().join(SESSION_SUBDIR)).await?);
 
     let (bus, inbound_rx, outbound_rx) = Bus::new();

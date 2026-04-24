@@ -13,6 +13,7 @@
 //! - [`crate::bus`] — inbound / outbound message transport
 //! - [`crate::tools`] — tool registration and dispatch
 
+pub mod commands;
 pub mod error;
 pub mod types;
 
@@ -26,15 +27,18 @@ use futures::StreamExt;
 use uuid::Uuid;
 
 use crate::bus::{
-    InboundMessage, InboundPayload, InboundReceiver, OutboundMessage, OutboundPayload,
+    ChannelID, InboundMessage, InboundPayload, InboundReceiver, OutboundMessage, OutboundPayload,
     OutboundSender, SessionID,
 };
+use crate::command::{CommandOutcome, Router};
 use crate::config::{AgentConfig, AppConfig, LLMProfile};
 use crate::llm::{
     self, BaseLLMClient, FinishReason, Message, Request, ResponseStream, ToolCall, Usage,
 };
 use crate::session;
 use crate::tools;
+
+use self::commands::AgentCommandCtx;
 
 /// System prompt used to generate a short session title from the first
 /// user message. This lives inline for now and will migrate to the
@@ -71,6 +75,10 @@ pub struct Agent {
     /// [`crate::config::LLMConfig::timeout_secs`] so every iteration
     /// builds its [`Request`] without re-reading the config.
     timeout_secs: Option<u64>,
+    /// Agent-level command router. Channel-local routers fall through
+    /// to this via [`InboundPayload::Command`] when they do not
+    /// recognize a slash command.
+    commands: Router<AgentCommandCtx>,
 }
 
 impl Agent {
@@ -116,6 +124,9 @@ impl Agent {
         let client = llm::providers::client_for(provider_name)
             .ok_or_else(|| Error::UnknownProvider(provider_name.to_string()))?;
 
+        let mut agent_commands = Router::<AgentCommandCtx>::new();
+        agent_commands.register(Arc::new(commands::Ping));
+
         Ok(Self {
             profile,
             client,
@@ -125,6 +136,7 @@ impl Agent {
             out,
             config: cfg.agent.clone(),
             timeout_secs: cfg.llm.timeout_secs,
+            commands: agent_commands,
         })
     }
 
@@ -165,8 +177,57 @@ impl Agent {
                         }
                     }
                 }
+                InboundPayload::Command(body) => {
+                    if self
+                        .dispatch_command(channel, session, &body)
+                        .await
+                        .is_err()
+                    {
+                        // Only failure mode is outbound bus closed → exit loop.
+                        break;
+                    }
+                }
             }
         }
+        Ok(())
+    }
+
+    /// Dispatch one forwarded slash command through the agent-level
+    /// router and send a reply (when applicable) to the originating
+    /// channel. Named to mirror `CliChannel::dispatch_command` — same
+    /// role at a different layer. The only failure path is the
+    /// outbound bus being closed, in which case the caller should
+    /// exit the main loop.
+    async fn dispatch_command(
+        &self,
+        channel: ChannelID,
+        session: SessionID,
+        body: &str,
+    ) -> Result<()> {
+        let ctx = AgentCommandCtx {
+            channel: channel.clone(),
+            session: session.clone(),
+        };
+        let outcome = self.commands.dispatch(body, &ctx).await;
+
+        let payload = match outcome {
+            Some(CommandOutcome::Handled) => return Ok(()),
+            Some(CommandOutcome::Feedback(msg)) => OutboundPayload::Notice(msg),
+            Some(CommandOutcome::Exit) => {
+                // Exit has no meaning at the agent layer (agent can't
+                // shut down a channel). A command that returns it was
+                // registered in the wrong router — log and ignore.
+                eprintln!("[agent] command {body:?} returned Exit at agent layer; ignoring");
+                return Ok(());
+            }
+            None => {
+                let name = body.split_whitespace().next().unwrap_or(body);
+                OutboundPayload::Error(format!("unknown command: /{name}"))
+            }
+        };
+
+        let reply = OutboundMessage::new(channel, session, payload);
+        self.out.send(reply).await?;
         Ok(())
     }
 

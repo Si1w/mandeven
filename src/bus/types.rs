@@ -93,6 +93,11 @@ impl InboundMessage {
 pub enum InboundPayload {
     /// Text typed by the user.
     UserInput(String),
+    /// Slash command the channel did not handle locally, forwarded to
+    /// the agent's router. The string is the command body with the
+    /// leading `/` already stripped (for example `"ping"` or
+    /// `"status verbose"`).
+    Command(String),
 }
 
 /// A message flowing from the agent out to a channel.
@@ -143,4 +148,8 @@ pub enum OutboundPayload {
     },
     /// Error surfaced to the channel for display.
     Error(String),
+    /// Ambient system message from the agent or a command handler —
+    /// neither a model reply nor an error. Used for command feedback
+    /// (`/ping` → `"pong"`) and similar non-conversational notices.
+    Notice(String),
 }

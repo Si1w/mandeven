@@ -47,7 +47,7 @@ use crate::bus::{
 use crate::channels::{Channel, Error, Result};
 use crate::command::{self, CommandOutcome, Router};
 
-use self::commands::CliContext;
+use self::commands::CliCommandCtx;
 
 /// Number of logical lines moved per `PgUp` / `PgDn`. Fixed rather
 /// than "half the visible height" because `handle_event` does not
@@ -147,7 +147,7 @@ pub struct CliChannel {
     /// channel (overlay toggles, exit, …). Agent-level commands will
     /// be forwarded to the agent router once that layer lands — for
     /// now an unknown command is rendered as a transcript error.
-    router: Router<CliContext>,
+    router: Router<CliCommandCtx>,
 }
 
 impl CliChannel {
@@ -155,7 +155,7 @@ impl CliChannel {
     /// state is per-instance.
     #[must_use]
     pub fn new(id: ChannelID, session: SessionID) -> Self {
-        let mut router = Router::<CliContext>::new();
+        let mut router = Router::<CliCommandCtx>::new();
         router.register(Arc::new(command::builtins::Exit));
         router.register(Arc::new(command::builtins::Quit));
         router.register(Arc::new(commands::Help));
@@ -369,7 +369,7 @@ impl CliChannel {
         self.redraw.notify_one();
 
         if let Some(cmd) = command {
-            return Ok(self.dispatch_command(&cmd).await);
+            return Ok(self.dispatch_command(&cmd, inbound).await);
         }
 
         {
@@ -393,14 +393,14 @@ impl CliChannel {
     /// Execute one slash command via the channel-local [`Router`].
     /// Returns `false` to exit the REPL, `true` to continue.
     ///
-    /// Unknown commands currently surface as a transcript error. When
-    /// the agent-level router lands (Commit B of the command-router
-    /// work), this arm will instead forward the command body to the
-    /// agent bus as an `InboundPayload::Command`, and the agent's own
-    /// "unknown command" response will flow back through the outbound
-    /// path.
-    async fn dispatch_command(&self, body: &str) -> bool {
-        let ctx = CliContext {
+    /// A `None` outcome from the channel router means "not one of my
+    /// commands" — we forward the body to the agent as
+    /// [`InboundPayload::Command`], and the agent's own outbound
+    /// reply (either a `Notice` from an agent-level handler or an
+    /// `Error("unknown command: /xxx")`) flows back through the
+    /// normal outbound path.
+    async fn dispatch_command(&self, body: &str, inbound: &InboundSender) -> bool {
+        let ctx = CliCommandCtx {
             state: self.state.clone(),
             redraw: self.redraw.clone(),
         };
@@ -413,14 +413,12 @@ impl CliChannel {
                 true
             }
             None => {
-                let display = body.split_whitespace().next().unwrap_or(body);
-                self.state
-                    .lock()
-                    .unwrap()
-                    .transcript
-                    .push(Line::Error(format!("Unknown command: /{display}")));
-                self.redraw.notify_one();
-                true
+                let forwarded = InboundMessage::new(
+                    self.id.clone(),
+                    self.session.clone(),
+                    InboundPayload::Command(body.to_string()),
+                );
+                inbound.send(forwarded).await.is_ok()
             }
         }
     }
@@ -454,6 +452,13 @@ fn apply_outbound(state: &mut CliState, payload: OutboundPayload) {
             }
             state.transcript.push(Line::Error(err));
             state.mode = Mode::Idle;
+        }
+        OutboundPayload::Notice(text) => {
+            // Ambient system message (e.g. /ping → "pong"). Doesn't
+            // end an in-flight reply and doesn't transition mode —
+            // notices can arrive any time without implying a stream
+            // boundary.
+            state.transcript.push(Line::Assistant(text));
         }
     }
 }

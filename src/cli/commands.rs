@@ -1,6 +1,6 @@
 //! CLI-specific slash commands.
 //!
-//! These commands bind to [`CliContext`] because they mutate the
+//! These commands bind to [`CliCommandCtx`] because they mutate the
 //! channel's UI state (overlay, transcript) rather than producing a
 //! pure textual reply. Cross-channel commands (`/exit`, `/quit`) live
 //! in [`crate::command::builtins`] and are registered alongside these
@@ -21,7 +21,7 @@ use super::{CliState, Overlay};
 /// UI state. Cheap to clone (two `Arc` clones per dispatch) — the
 /// channel constructs one per call rather than caching, to avoid
 /// extra lifetime coupling between command objects and the channel.
-pub struct CliContext {
+pub struct CliCommandCtx {
     /// Shared UI state; commands lock this to push transcript lines,
     /// toggle overlays, and so on.
     pub state: Arc<Mutex<CliState>>,
@@ -34,14 +34,14 @@ pub struct CliContext {
 pub struct Help;
 
 #[async_trait]
-impl Command<CliContext> for Help {
+impl Command<CliCommandCtx> for Help {
     fn name(&self) -> &'static str {
         "help"
     }
     fn describe(&self) -> &'static str {
         "show the help overlay"
     }
-    async fn execute(&self, _args: &str, ctx: &CliContext) -> CommandOutcome {
+    async fn execute(&self, _args: &str, ctx: &CliCommandCtx) -> CommandOutcome {
         ctx.state.lock().unwrap().overlay = Some(Overlay::Help);
         ctx.redraw.notify_one();
         CommandOutcome::Handled

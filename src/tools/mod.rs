@@ -158,5 +158,5 @@ pub fn register_builtins(registry: &mut Registry) {
     registry.register(Arc::new(file::FileRead));
     registry.register(Arc::new(file::FileWrite));
     registry.register(Arc::new(file::FileEdit));
-    registry.register(Arc::new(shell::Shell::new()));
+    registry.register(Arc::new(shell::Shell));
 }

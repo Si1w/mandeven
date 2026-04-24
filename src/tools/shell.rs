@@ -28,6 +28,7 @@
 
 use std::fmt::Write;
 use std::process::Stdio;
+use std::sync::LazyLock;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -54,7 +55,8 @@ const MAX_TIMEOUT_SECS: u64 = 600;
 const PASS_ENV_KEYS: &[&str] = &["HOME", "PATH", "LANG", "TERM", "USER"];
 
 /// Patterns that cause [`Shell::call`] to refuse the command outright.
-/// Matched against the lowercased command.
+/// Matched against the lowercased command. Compiled once into
+/// [`DENY_RE`] on first use.
 const DENY_PATTERNS: &[&str] = &[
     r"\brm\s+-[rf]{1,2}\b",            // rm -r, rm -rf, rm -fr
     r"\bdd\s+if=",                     // dd
@@ -62,6 +64,20 @@ const DENY_PATTERNS: &[&str] = &[
     r":\(\)\s*\{.*\};\s*:",            // classic fork bomb
     r"\b(mkfs|diskpart)\b",            // disk operations
 ];
+
+/// Compiled form of [`DENY_PATTERNS`]. Initialized on first access.
+///
+/// # Panics
+///
+/// Initialization panics if any entry in [`DENY_PATTERNS`] fails to
+/// compile — a build-time invariant: the patterns are static literals
+/// validated on every `cargo check`.
+static DENY_RE: LazyLock<Vec<Regex>> = LazyLock::new(|| {
+    DENY_PATTERNS
+        .iter()
+        .map(|p| Regex::new(p).expect("static deny patterns are valid regex"))
+        .collect()
+});
 
 #[derive(Deserialize, JsonSchema)]
 struct ShellParams {
@@ -77,36 +93,10 @@ struct ShellParams {
 
 /// Execute a command via `sh -c` with a curated environment, deny-list
 /// guard, and bounded output.
-pub struct Shell {
-    deny: Vec<Regex>,
-}
-
-impl Shell {
-    /// Compile the deny-list regex set and return a ready-to-register
-    /// tool instance.
-    ///
-    /// # Panics
-    ///
-    /// Panics if any entry in [`DENY_PATTERNS`] fails to compile as a
-    /// regex. The patterns are static string literals validated on
-    /// every `cargo check`, so this is a build-time invariant in
-    /// practice.
-    #[must_use]
-    pub fn new() -> Self {
-        Self {
-            deny: DENY_PATTERNS
-                .iter()
-                .map(|p| Regex::new(p).expect("static deny patterns are valid regex"))
-                .collect(),
-        }
-    }
-}
-
-impl Default for Shell {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+///
+/// Zero-sized: the regex deny list is a program-wide constant held in
+/// [`DENY_RE`], so no per-instance state is needed.
+pub struct Shell;
 
 #[async_trait]
 impl BaseTool for Shell {
@@ -134,7 +124,7 @@ impl BaseTool for Shell {
             })?;
 
         let lower = p.command.to_lowercase();
-        if let Some(hit) = self.deny.iter().find(|re| re.is_match(&lower)) {
+        if let Some(hit) = DENY_RE.iter().find(|re| re.is_match(&lower)) {
             return Err(exec(format!(
                 "command blocked by deny pattern: {}",
                 hit.as_str()

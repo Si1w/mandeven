@@ -1,6 +1,6 @@
 //! Lightweight Markdown renderer for assistant output.
 //!
-//! The goal is not full CommonMark. It covers the shapes agent replies
+//! The goal is not full `CommonMark`. It covers the shapes agent replies
 //! commonly emit and keeps the presentation close to Codex / Claude
 //! Code: default text first, dim structure, sparse accent color, no
 //! filled message backgrounds.
@@ -11,7 +11,7 @@ use ratatui::text::{Line, Span};
 pub(super) struct Engine;
 
 impl Engine {
-    pub(super) fn render_into<'a>(out: &mut Vec<Line<'a>>, text: &str) {
+    pub(super) fn render_into(out: &mut Vec<Line<'_>>, text: &str) {
         let mut in_code = false;
 
         for raw in text.split('\n') {
@@ -43,7 +43,7 @@ impl Engine {
     }
 }
 
-fn push_markdown_line<'a>(out: &mut Vec<Line<'a>>, raw: &str) {
+fn push_markdown_line(out: &mut Vec<Line<'_>>, raw: &str) {
     let trimmed = raw.trim_start();
     let indent_len = raw.len().saturating_sub(trimmed.len());
     let indent = &raw[..indent_len];
@@ -101,14 +101,14 @@ fn push_markdown_line<'a>(out: &mut Vec<Line<'a>>, raw: &str) {
     out.push(Line::from(spans));
 }
 
-fn push_code_line<'a>(out: &mut Vec<Line<'a>>, raw: &str) {
+fn push_code_line(out: &mut Vec<Line<'_>>, raw: &str) {
     out.push(Line::from(vec![
         Span::styled("  │ ", dim_style()),
         Span::styled(raw.to_string(), code_style()),
     ]));
 }
 
-fn push_code_start<'a>(out: &mut Vec<Line<'a>>, info: &str) {
+fn push_code_start(out: &mut Vec<Line<'_>>, info: &str) {
     let title = if info.is_empty() { "code" } else { info };
     out.push(Line::from(vec![
         Span::styled("  ╭─ ", dim_style()),
@@ -119,11 +119,11 @@ fn push_code_start<'a>(out: &mut Vec<Line<'a>>, info: &str) {
     ]));
 }
 
-fn push_code_end<'a>(out: &mut Vec<Line<'a>>) {
+fn push_code_end(out: &mut Vec<Line<'_>>) {
     out.push(Line::from(vec![Span::styled("  ╰─", dim_style())]));
 }
 
-fn push_prefixed_inline<'a>(out: &mut Vec<Line<'a>>, indent: &str, marker: &str, rest: &str) {
+fn push_prefixed_inline(out: &mut Vec<Line<'_>>, indent: &str, marker: &str, rest: &str) {
     let mut spans = Vec::new();
     push_plain(&mut spans, indent, Style::default());
     spans.push(Span::styled(marker.to_string(), dim_style()));
@@ -228,7 +228,7 @@ fn inline_spans<'a>(text: &str, base: Style) -> Vec<Span<'a>> {
     spans
 }
 
-fn push_plain<'a>(spans: &mut Vec<Span<'a>>, text: &str, style: Style) {
+fn push_plain(spans: &mut Vec<Span<'_>>, text: &str, style: Style) {
     if !text.is_empty() {
         spans.push(Span::styled(text.to_string(), style));
     }

@@ -1,16 +1,14 @@
 //! Ratatui view layer — paints one frame from a [`super::CliState`].
 //!
-//! Layout (vertical):
+//! The layout borrows the calmer conventions used by Codex and Claude
+//! Code TUIs:
 //!
-//! 1. Conversation panel (flex, rounded border, `Conversation` title,
-//!    auto-scrolls to bottom via [`Paragraph::line_count`]).
-//! 2. Status bar (1 row, no border — colored `●` + label).
-//! 3. Input panel (fixed 3 rows, rounded border, no top title, footer
-//!    hint in the bottom title).
-//!
-//! When the help overlay is active, it is rendered over the
-//! conversation rect: full-width, bottom-anchored so the overlay's
-//! bottom border overwrites the conversation's bottom border.
+//! 1. Compact identity header.
+//! 2. Borderless transcript that relies on whitespace and message
+//!    prefixes instead of a full frame.
+//! 3. One-line status strip above the composer.
+//! 4. Bottom composer with top/bottom rounded rules, open sides, and
+//!    dim footer hints.
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Margin, Rect};
@@ -20,21 +18,16 @@ use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap};
 
 use super::{CliState, Line as TranscriptLine, Mode, Overlay};
 
-/// Visual prefix rendered to the left of the textarea inside the
-/// input panel.
-const PROMPT: &str = "> ";
+mod markdown;
 
-/// Footer hint shown in the input panel's bottom border title.
-const FOOTER_HINT: &str = " type / for commands · [Esc]interrupt ";
-
-/// Total content lines inside the help overlay (excluding borders +
-/// internal padding). Updating the help body text requires updating
-/// this constant.
+const PROMPT: &str = "› ";
 const HELP_BODY_LINES: u16 = 11;
+
+const BRAND: Color = Color::Rgb(215, 119, 87);
 
 /// Paint the entire frame from `state`.
 ///
-/// Takes `&mut CliState` because [`render_conversation`] synchronises
+/// Takes `&mut CliState` because [`render_transcript`] synchronises
 /// `state.scroll_offset` with the render-time `max_offset` (so a
 /// subsequent `PgUp` from follow-mode moves relative to the current
 /// bottom, not from zero).
@@ -42,32 +35,74 @@ pub fn render(f: &mut Frame<'_>, state: &mut CliState) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Min(0),    // conversation (flex)
-            Constraint::Length(1), // status bar
-            Constraint::Length(3), // input panel
+            Constraint::Length(2), // identity header
+            Constraint::Min(0),    // transcript
+            Constraint::Length(1), // status strip
+            Constraint::Length(3), // composer
         ])
         .split(f.area());
 
-    render_conversation(f, chunks[0], state);
-    render_status_bar(f, chunks[1], state);
-    render_input(f, chunks[2], state);
+    render_header(f, chunks[0], state);
+    render_transcript(f, chunks[1], state);
+    render_status_line(f, chunks[2], state);
+    render_input(f, chunks[3], state);
 
     if matches!(state.overlay, Some(Overlay::Help)) {
-        render_help_overlay(f, chunks[0]);
+        render_help_overlay(f, chunks[1]);
     }
 }
 
-fn render_conversation(f: &mut Frame<'_>, area: Rect, state: &mut CliState) {
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded);
+fn render_header(f: &mut Frame<'_>, area: Rect, state: &CliState) {
+    if area.height == 0 {
+        return;
+    }
 
-    let inner = block.inner(area);
+    let status = match state.mode {
+        Mode::Idle => "ready",
+        Mode::Replying => "thinking",
+    };
+    let status_style = status_style(state.mode);
+    let view = if state.follow_bottom {
+        "live"
+    } else {
+        "history"
+    };
 
-    // Scroll math first — it only reads line counts (no string
-    // borrows) and mutates state, so it must finish before we take a
-    // shared borrow to build `text`.
-    //
+    let mut lines = vec![Line::from(vec![
+        Span::raw(" "),
+        Span::styled("Mandeven", brand_style()),
+        Span::styled("  local agent", dim_style()),
+        Span::styled("  ·  ", dim_style()),
+        Span::styled("●", status_style),
+        Span::raw(" "),
+        Span::styled(status, status_style),
+        Span::styled("  ·  ", dim_style()),
+        Span::styled(view, dim_style()),
+    ])];
+
+    if area.height > 1 {
+        lines.push(Line::from(vec![
+            Span::raw(" "),
+            Span::styled("/help", accent_style()),
+            Span::styled(" commands   ", dim_style()),
+            Span::styled("PgUp/PgDn", accent_style()),
+            Span::styled(" transcript", dim_style()),
+        ]));
+    }
+
+    f.render_widget(Paragraph::new(Text::from(lines)), area);
+}
+
+fn render_transcript(f: &mut Frame<'_>, area: Rect, state: &mut CliState) {
+    if area.height == 0 {
+        return;
+    }
+
+    let inner = area.inner(Margin {
+        horizontal: 1,
+        vertical: 0,
+    });
+
     // Estimate logical lines ignoring terminal wrapping. At 80+
     // columns most messages fit on one line; under-counts only when
     // content actually wraps, in which case the last wrapped rows
@@ -81,9 +116,9 @@ fn render_conversation(f: &mut Frame<'_>, area: Rect, state: &mut CliState) {
     let max_offset =
         u16::try_from(logical.saturating_sub(inner.height as usize)).unwrap_or(u16::MAX);
 
-    // follow_bottom=true → render at the live bottom and sync
+    // follow_bottom=true -> render at the live bottom and sync
     // scroll_offset to max_offset so a subsequent PgUp starts from
-    // the current bottom view. follow_bottom=false → render at the
+    // the current bottom view. follow_bottom=false -> render at the
     // user-frozen offset, clamped to valid range; if a PgDn pushed
     // offset past max_offset, the clamp snaps it back and re-enters
     // follow mode automatically.
@@ -99,20 +134,39 @@ fn render_conversation(f: &mut Frame<'_>, area: Rect, state: &mut CliState) {
         clamped
     };
 
-    let text = build_transcript(state);
+    if state.transcript.is_empty() && state.streaming.is_none() {
+        render_empty_transcript(f, inner);
+    } else {
+        f.render_widget(
+            Paragraph::new(build_transcript(state))
+                .wrap(Wrap { trim: false })
+                .scroll((scroll, 0)),
+            inner,
+        );
+    }
+}
 
-    f.render_widget(block, area);
-    f.render_widget(
-        Paragraph::new(text)
-            .wrap(Wrap { trim: false })
-            .scroll((scroll, 0)),
-        inner,
-    );
+fn render_empty_transcript(f: &mut Frame<'_>, area: Rect) {
+    let text = Text::from(vec![
+        Line::from(vec![
+            Span::styled("› ", prompt_style()),
+            Span::styled("Ask Mandeven to do anything", dim_style()),
+        ]),
+        Line::raw(""),
+        Line::from(vec![
+            Span::raw("  "),
+            Span::styled("Start with a prompt below, or type ", dim_style()),
+            Span::styled("/help", accent_style()),
+            Span::styled(" for commands.", dim_style()),
+        ]),
+    ]);
+
+    f.render_widget(Paragraph::new(text).wrap(Wrap { trim: false }), area);
 }
 
 /// Count the number of logical lines that [`build_transcript`] will
 /// produce, without accounting for wrapping. Mirrors the same rules
-/// (inter-entry blank lines + per-`\n` line split).
+/// (inter-entry blank lines + Markdown-rendered assistant output).
 fn count_logical_lines(state: &CliState) -> usize {
     let mut count = 0usize;
     for (i, entry) in state.transcript.iter().enumerate() {
@@ -120,47 +174,62 @@ fn count_logical_lines(state: &CliState) -> usize {
             count += 1; // blank separator
         }
         count += match entry {
-            TranscriptLine::User(t) | TranscriptLine::Assistant(t) | TranscriptLine::Error(t) => {
-                t.matches('\n').count() + 1
-            }
+            TranscriptLine::User(t) | TranscriptLine::Error(t) => t.matches('\n').count() + 1,
+            TranscriptLine::Assistant(t) => markdown::Engine::line_count(t),
         };
     }
     if let Some(stream) = &state.streaming {
         if !state.transcript.is_empty() {
             count += 1;
         }
-        count += stream.matches('\n').count() + 1;
+        count += markdown::Engine::line_count(stream);
     }
     count
 }
 
-fn render_status_bar(f: &mut Frame<'_>, area: Rect, state: &CliState) {
-    let (dot_color, label) = match state.mode {
+fn render_status_line(f: &mut Frame<'_>, area: Rect, state: &CliState) {
+    let (dot, label) = match state.mode {
         Mode::Idle => (Color::Green, "Ready"),
-        Mode::Replying => (Color::Yellow, "Thinking..."),
+        Mode::Replying => (Color::Yellow, "Thinking"),
     };
-    let line = Line::from(vec![
+    let detail = if !state.follow_bottom {
+        "history view · PgDn to latest"
+    } else if state.mode == Mode::Replying {
+        "Esc to interrupt"
+    } else {
+        "Enter to send"
+    };
+
+    let mut spans = vec![
         Span::raw(" "),
-        Span::styled("●", Style::default().fg(dot_color)),
+        Span::styled("●", Style::default().fg(dot)),
         Span::raw(" "),
-        Span::styled(label, Style::default().fg(Color::DarkGray)),
-    ]);
-    f.render_widget(Paragraph::new(line), area);
+        Span::styled(label, Style::default().fg(dot).add_modifier(Modifier::BOLD)),
+    ];
+    if area.width > 28 {
+        spans.extend([
+            Span::styled("  ", dim_style()),
+            Span::styled(detail, dim_style()),
+        ]);
+    }
+
+    f.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
 fn render_input(f: &mut Frame<'_>, area: Rect, state: &CliState) {
     let block = Block::default()
-        .borders(Borders::ALL)
+        .borders(Borders::TOP | Borders::BOTTOM)
         .border_type(BorderType::Rounded)
+        .border_style(dim_style())
+        .title(Line::styled(" message ", dim_style()))
         .title_bottom(Line::styled(
-            FOOTER_HINT,
-            Style::default().fg(Color::DarkGray),
+            input_footer(area.width, state.mode),
+            dim_style(),
         ));
 
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    // Split the input line into: `> ` prefix (cyan) + TextArea widget.
     let splits = Layout::horizontal([
         Constraint::Length(u16::try_from(PROMPT.chars().count()).unwrap_or(2)),
         Constraint::Min(0),
@@ -170,7 +239,7 @@ fn render_input(f: &mut Frame<'_>, area: Rect, state: &CliState) {
     let textarea_rect = splits[1];
 
     f.render_widget(
-        Paragraph::new(Line::styled(PROMPT, Style::default().fg(Color::Cyan))),
+        Paragraph::new(Line::styled(PROMPT, prompt_style())),
         prefix_rect,
     );
     // `&TextArea` implements `Widget` directly; `.widget()` is
@@ -198,34 +267,34 @@ fn render_input(f: &mut Frame<'_>, area: Rect, state: &CliState) {
     }
 }
 
-fn render_help_overlay(f: &mut Frame<'_>, conv_area: Rect) {
-    // Height = content + 2 border + 2 vertical padding (inner margin).
-    let desired_h = HELP_BODY_LINES + 4;
-    let clamped_h = desired_h.min(conv_area.height);
+fn input_footer(width: u16, mode: Mode) -> &'static str {
+    match (mode, width) {
+        (Mode::Idle, 0..=45) => " Enter send · /help ",
+        (Mode::Idle, _) => " Enter send · /help commands · PgUp/PgDn scroll ",
+        (Mode::Replying, 0..=45) => " Thinking · Esc ",
+        (Mode::Replying, _) => " Thinking · /help available · Esc interrupt ",
+    }
+}
 
-    // Full-width, bottom-anchored: overlay.bottom == conv_area.bottom,
-    // so overlay's bottom border row overwrites the conversation's
-    // bottom border in the same span.
-    let overlay_rect = Rect {
-        x: conv_area.x,
-        y: conv_area.y + conv_area.height - clamped_h,
-        width: conv_area.width,
-        height: clamped_h,
-    };
+fn render_help_overlay(f: &mut Frame<'_>, area: Rect) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
 
+    let overlay_rect = centered_rect(area, 72, HELP_BODY_LINES + 4);
     f.render_widget(Clear, overlay_rect);
 
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(Color::Cyan))
         .title(Line::styled(
-            " Help ",
-            Style::default().add_modifier(Modifier::BOLD),
+            " help ",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
         ))
-        .title_bottom(Line::styled(
-            " [Esc] dismiss ",
-            Style::default().fg(Color::DarkGray),
-        ));
+        .title_bottom(Line::styled(" Esc dismiss ", dim_style()));
 
     let inner = block.inner(overlay_rect);
     f.render_widget(block, overlay_rect);
@@ -238,6 +307,20 @@ fn render_help_overlay(f: &mut Frame<'_>, conv_area: Rect) {
         Paragraph::new(build_help_text()).wrap(Wrap { trim: false }),
         content_area,
     );
+}
+
+fn centered_rect(area: Rect, width_pct: u16, height: u16) -> Rect {
+    let computed_width = area.width.saturating_mul(width_pct).saturating_div(100);
+    let min_width = area.width.min(44);
+    let width = computed_width.max(min_width).min(area.width);
+    let height = height.min(area.height);
+
+    Rect {
+        x: area.x + area.width.saturating_sub(width) / 2,
+        y: area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    }
 }
 
 fn build_transcript(state: &CliState) -> Text<'_> {
@@ -254,9 +337,7 @@ fn build_transcript(state: &CliState) -> Text<'_> {
         if !state.transcript.is_empty() {
             lines.push(Line::raw(""));
         }
-        for l in stream.split('\n') {
-            lines.push(Line::raw(l));
-        }
+        append_assistant_lines(&mut lines, stream);
     }
 
     Text::from(lines)
@@ -264,45 +345,84 @@ fn build_transcript(state: &CliState) -> Text<'_> {
 
 fn append_transcript_entry<'a>(lines: &mut Vec<Line<'a>>, entry: &'a TranscriptLine) {
     match entry {
-        TranscriptLine::User(text) => {
-            lines.push(Line::from(vec![
-                Span::styled("> ", Style::default().fg(Color::Cyan)),
-                Span::raw(text.as_str()),
-            ]));
-        }
-        TranscriptLine::Assistant(text) => {
-            for l in text.split('\n') {
-                lines.push(Line::raw(l));
-            }
-        }
-        TranscriptLine::Error(text) => {
-            for l in text.split('\n') {
-                lines.push(Line::styled(l, Style::default().fg(Color::Red)));
-            }
-        }
+        TranscriptLine::User(text) => append_user_lines(lines, text),
+        TranscriptLine::Assistant(text) => append_assistant_lines(lines, text),
+        TranscriptLine::Error(text) => append_error_lines(lines, text),
+    }
+}
+
+fn append_user_lines<'a>(lines: &mut Vec<Line<'a>>, text: &'a str) {
+    for (i, line) in text.split('\n').enumerate() {
+        let prefix = if i == 0 { "› " } else { "  " };
+        lines.push(Line::from(vec![
+            Span::styled(prefix, prompt_style()),
+            Span::styled(line, Style::default().add_modifier(Modifier::BOLD)),
+        ]));
+    }
+}
+
+fn append_assistant_lines<'a>(lines: &mut Vec<Line<'a>>, text: &'a str) {
+    markdown::Engine::render_into(lines, text);
+}
+
+fn append_error_lines<'a>(lines: &mut Vec<Line<'a>>, text: &'a str) {
+    for (i, line) in text.split('\n').enumerate() {
+        let prefix = if i == 0 { "• " } else { "  " };
+        lines.push(Line::from(vec![
+            Span::styled(prefix, Style::default().fg(Color::Red)),
+            Span::styled(line, Style::default().fg(Color::Red)),
+        ]));
     }
 }
 
 fn build_help_text() -> Text<'static> {
     Text::from(vec![
-        Line::styled("COMMANDS", Style::default().add_modifier(Modifier::BOLD)),
+        section_header("Commands"),
         Line::raw(""),
-        help_entry("/help", "      show this"),
-        help_entry("/exit", "      quit"),
+        help_entry("/help", "show this panel"),
+        help_entry("/exit", "quit"),
+        help_entry("/quit", "quit"),
         Line::raw(""),
-        Line::styled("KEYS", Style::default().add_modifier(Modifier::BOLD)),
+        section_header("Keys"),
         Line::raw(""),
-        help_entry("Enter", "      send input"),
-        help_entry("Backspace", "  delete char"),
-        help_entry("Esc", "        interrupt · dismiss overlay"),
-        help_entry("Ctrl-D", "     emergency exit"),
+        help_entry("Enter", "send input"),
+        help_entry("PgUp/PgDn", "scroll transcript"),
+        help_entry("Mouse wheel", "scroll transcript"),
     ])
+}
+
+fn section_header(text: &'static str) -> Line<'static> {
+    Line::styled(text, Style::default().add_modifier(Modifier::BOLD))
 }
 
 fn help_entry(key: &'static str, desc: &'static str) -> Line<'static> {
     Line::from(vec![
-        Span::raw("    "),
-        Span::styled(key, Style::default().fg(Color::Cyan)),
-        Span::raw(desc),
+        Span::styled(format!("  {key:<12}"), accent_style()),
+        Span::styled(desc, dim_style()),
     ])
+}
+
+fn brand_style() -> Style {
+    Style::default().fg(BRAND).add_modifier(Modifier::BOLD)
+}
+
+fn prompt_style() -> Style {
+    Style::default()
+        .fg(Color::Cyan)
+        .add_modifier(Modifier::BOLD)
+}
+
+fn accent_style() -> Style {
+    Style::default().fg(Color::Cyan)
+}
+
+fn status_style(mode: Mode) -> Style {
+    match mode {
+        Mode::Idle => Style::default().fg(Color::Green),
+        Mode::Replying => Style::default().fg(Color::Yellow),
+    }
+}
+
+fn dim_style() -> Style {
+    Style::default().fg(Color::DarkGray)
 }

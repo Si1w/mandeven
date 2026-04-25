@@ -36,7 +36,7 @@ use crossterm::terminal::{
 use futures::StreamExt;
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
-use ratatui::style::Style;
+use ratatui::style::{Color, Modifier, Style};
 use ratatui_textarea::TextArea;
 use tokio::sync::Notify;
 
@@ -125,7 +125,10 @@ impl Default for CliState {
         // Default cursor-line style underlines the whole active row;
         // kill it — our textarea is always single-line, the cursor
         // itself is visible enough.
+        input.set_style(Style::default());
+        input.set_cursor_style(Style::default().add_modifier(Modifier::REVERSED));
         input.set_cursor_line_style(Style::default());
+        input.set_selection_style(Style::default().bg(Color::DarkGray));
         Self {
             transcript: Vec::new(),
             streaming: None,

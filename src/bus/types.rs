@@ -85,8 +85,9 @@ pub struct InboundMessage {
     pub channel: ChannelID,
     /// Platform-specific user identity. CLI fills a constant (there
     /// is only one user per terminal); future IM channels fill the
-    /// platform-provided user id. `None` means "the channel has no
-    /// meaningful peer concept" (for example: cron, heartbeat).
+    /// platform-provided user id. `None` is reserved for channels that
+    /// don't carry a meaningful peer concept (broadcast / system
+    /// channels); current code does not exercise it.
     pub peer_id: Option<String>,
     /// Bot / workspace / account identity on multi-tenant platforms.
     /// Unused by the CLI; reserved for tier-3 routing (see claw0's

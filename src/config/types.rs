@@ -9,6 +9,8 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::heartbeat::HeartbeatConfig;
+
 /// Root configuration loaded from `./mandeven.toml`.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct AppConfig {
@@ -41,6 +43,13 @@ pub struct AgentConfig {
     /// the model stops invoking tools. Each iteration corresponds to
     /// one LLM call plus any tool dispatch it triggers.
     pub max_iterations: Option<u8>,
+
+    /// Per-agent heartbeat configuration. Keeping the block on the
+    /// agent rather than at the root mirrors openclaw's
+    /// `agents.defaults.heartbeat` and leaves room for the eventual
+    /// `[agent.list.<name>.heartbeat]` per-agent overrides.
+    #[serde(default)]
+    pub heartbeat: HeartbeatConfig,
 }
 
 impl AppConfig {

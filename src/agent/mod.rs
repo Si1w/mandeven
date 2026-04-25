@@ -26,17 +26,23 @@ use std::sync::Arc;
 use futures::StreamExt;
 use uuid::Uuid;
 
+use tokio::sync::mpsc;
+
 use crate::bus::{
     ChannelID, InboundPayload, OutboundMessage, OutboundPayload, OutboundSender, SessionID,
 };
 use crate::command::{CommandOutcome, Router};
 use crate::config::{AgentConfig, AppConfig, LLMProfile};
-use crate::gateway::{DispatchReceiver, InboundDispatch};
+use crate::gateway::{ActiveSessions, DispatchReceiver, InboundDispatch};
+use crate::heartbeat::{HeartbeatEngine, HeartbeatTick};
 use crate::llm::{
     self, BaseLLMClient, FinishReason, Message, Request, ResponseStream, ToolCall, Usage,
 };
 use crate::session;
 use crate::tools;
+use crate::tools::heartbeat::{
+    HEARTBEAT_DECIDE_TOOL_NAME, HeartbeatDecideArgs, heartbeat_decide_tool,
+};
 
 use self::commands::AgentCommandCtx;
 
@@ -50,13 +56,30 @@ const TITLE_SYSTEM_PROMPT: &str = "Generate a short, descriptive title (max 8 wo
 /// Upper bound on completion tokens for title generation.
 const TITLE_MAX_TOKENS: u32 = 32;
 
-/// Sampling temperature for title generation. Lower than chat defaults
-/// because titles want determinism.
-const TITLE_TEMPERATURE: f32 = 0.3;
-
 /// Character cap on the fallback title derived from the user's first
 /// message when [`Agent::generate_title`] fails or returns empty.
 const FALLBACK_TITLE_MAX_CHARS: usize = 40;
+
+/// Channel that heartbeat phase-2 iterations target. Hard-coded
+/// because `tui` is the only registered channel today.
+//
+// TODO(target-routing): switch to the per-tick target resolved from
+// `HeartbeatConfig.target` once that field lands. See the
+// `target-routing` TODO on `crate::heartbeat::HeartbeatConfig`.
+const HEARTBEAT_TARGET_CHANNEL: &str = "tui";
+
+/// System prompt for heartbeat phase-1. Constrains the model to a
+/// single tool call so the answer is structured rather than free
+/// text.
+const HEARTBEAT_DECIDE_SYSTEM_PROMPT: &str = "You are the heartbeat decision step. \
+    Read the heartbeat checklist provided and call the heartbeat_decide tool exactly once. \
+    Use action=\"skip\" when nothing in the checklist needs attention right now. \
+    Use action=\"run\" with a concise one-or-two-sentence summary in `tasks` when at \
+    least one item should be acted on now.";
+
+/// Token cap for phase-1. Phase-1 only ever emits a tool call payload
+/// (skip/run + a short tasks string), so a tight cap is enough.
+const HEARTBEAT_DECIDE_MAX_TOKENS: u32 = 256;
 
 /// Conversation agent.
 ///
@@ -79,6 +102,39 @@ pub struct Agent {
     /// after traversing the channel router and the gateway router;
     /// the agent is the final fallback.
     commands: Router<AgentCommandCtx>,
+    /// Heartbeat control handle, present iff the engine was wired in.
+    /// Cloned into [`AgentCommandCtx`] so `/heartbeat` subcommands can
+    /// pause / resume / set the interval.
+    heartbeat: Option<Arc<HeartbeatEngine>>,
+    /// Receiver paired with the heartbeat engine. Raced against
+    /// `inbox` in [`Agent::run`].
+    heartbeat_rx: Option<mpsc::Receiver<HeartbeatTick>>,
+    /// Live view of the gateway's per-channel session bindings.
+    /// Heartbeat ticks read this to land in the user's main session
+    /// rather than running isolated; written only by the gateway.
+    active_sessions: ActiveSessions,
+}
+
+/// Options for the optional heartbeat wiring. Constructed by
+/// `main.rs` and threaded into [`Agent::new`].
+pub struct HeartbeatWiring {
+    /// Control handle. Stored on the agent and cloned into
+    /// [`AgentCommandCtx`].
+    pub engine: Arc<HeartbeatEngine>,
+    /// Tick stream from the engine, raced against the dispatch
+    /// queue in the main loop.
+    pub rx: mpsc::Receiver<HeartbeatTick>,
+}
+
+/// Single iteration of the agent's `select!` loop. Names what was
+/// chosen so [`Agent::run`]'s `match` reads as a state machine.
+enum Event {
+    /// Inbound dispatch arrived from the gateway. `None` means the
+    /// dispatch queue closed (clean shutdown).
+    Dispatch(Option<InboundDispatch>),
+    /// Heartbeat tick fired. `None` means the engine dropped its
+    /// sender — the branch is dynamically disabled afterwards.
+    Tick(Option<HeartbeatTick>),
 }
 
 impl Agent {
@@ -103,6 +159,8 @@ impl Agent {
         tools: tools::Registry,
         inbox: DispatchReceiver,
         out: OutboundSender,
+        active_sessions: ActiveSessions,
+        heartbeat: Option<HeartbeatWiring>,
     ) -> Result<Self> {
         let (provider_name, model_name) = cfg
             .llm
@@ -124,11 +182,16 @@ impl Agent {
         let client = llm::providers::client_for(provider_name)
             .ok_or_else(|| Error::UnknownProvider(provider_name.to_string()))?;
 
-        // Empty agent-level command router. Reserved for future
-        // commands that mutate agent-internal state (`/stop`,
-        // `/status`, etc.) — routing / session-level commands live
-        // in the gateway, not here.
-        let agent_commands = Router::<AgentCommandCtx>::new();
+        // Agent-level command router. Routing / session-level
+        // commands (`/new`, `/list`, `/load`) live in the gateway;
+        // commands here mutate agent-internal state.
+        let mut agent_commands = Router::<AgentCommandCtx>::new();
+        agent_commands.register(Arc::new(commands::Heartbeat));
+
+        let (heartbeat_handle, heartbeat_rx) = match heartbeat {
+            Some(HeartbeatWiring { engine, rx }) => (Some(engine), Some(rx)),
+            None => (None, None),
+        };
 
         Ok(Self {
             profile,
@@ -140,6 +203,9 @@ impl Agent {
             config: cfg.agent.clone(),
             timeout_secs: cfg.llm.timeout_secs,
             commands: agent_commands,
+            heartbeat: heartbeat_handle,
+            heartbeat_rx,
+            active_sessions,
         })
     }
 
@@ -156,43 +222,167 @@ impl Agent {
     /// produces an error; the `Result` signature is reserved for
     /// future shutdown-time failures.
     pub async fn run(mut self) -> Result<()> {
-        while let Some(msg) = self.inbox.recv().await {
-            let InboundDispatch {
-                channel,
-                session,
-                payload,
-                ..
-            } = msg;
-            match payload {
-                InboundPayload::UserInput(text) => {
-                    let iter = Iteration {
-                        session: session.clone(),
-                        channel: channel.clone(),
-                    };
-                    if let Err(err) = self.iteration(&iter, text).await {
-                        let reply = OutboundMessage::new(
-                            channel,
-                            session,
-                            OutboundPayload::Error(err.to_string()),
-                        );
-                        if self.out.send(reply).await.is_err() {
-                            break;
-                        }
+        loop {
+            // Split mut borrows so `tokio::select!` can race two
+            // queues without a whole-self conflict. The selected
+            // branch's `await` ends before any `&self` method call
+            // below (NLL releases `inbox` / `heartbeat_rx` borrows),
+            // so subsequent calls into `self.handle_*` are clean.
+            let inbox = &mut self.inbox;
+            let event = match self.heartbeat_rx.as_mut() {
+                Some(hb) => tokio::select! {
+                    biased;
+                    msg = inbox.recv() => Event::Dispatch(msg),
+                    tick = hb.recv() => Event::Tick(tick),
+                },
+                None => Event::Dispatch(inbox.recv().await),
+            };
+
+            match event {
+                Event::Dispatch(None) => return Ok(()),
+                Event::Dispatch(Some(msg)) => {
+                    if !self.handle_dispatch(msg).await? {
+                        return Ok(());
                     }
                 }
-                InboundPayload::Command(body) => {
-                    if self
-                        .dispatch_command(channel, session, &body)
-                        .await
-                        .is_err()
-                    {
-                        // Only failure mode is outbound bus closed → exit loop.
-                        break;
-                    }
+                Event::Tick(None) => {
+                    // Engine dropped its sender — disable the branch.
+                    self.heartbeat_rx = None;
                 }
+                Event::Tick(Some(tick)) => self.handle_tick(tick).await?,
             }
         }
+    }
+
+    /// Process one inbound dispatch. Returns `Ok(true)` to continue
+    /// looping, `Ok(false)` when the outbound bus closed and the
+    /// caller should exit.
+    async fn handle_dispatch(&self, msg: InboundDispatch) -> Result<bool> {
+        let InboundDispatch {
+            channel,
+            session,
+            payload,
+            ..
+        } = msg;
+        match payload {
+            InboundPayload::UserInput(text) => {
+                let iter = Iteration {
+                    session: session.clone(),
+                    channel: channel.clone(),
+                };
+                if let Err(err) = self.iteration(&iter, text).await {
+                    let reply = OutboundMessage::new(
+                        channel,
+                        session,
+                        OutboundPayload::Error(err.to_string()),
+                    );
+                    if self.out.send(reply).await.is_err() {
+                        return Ok(false);
+                    }
+                }
+                Ok(true)
+            }
+            InboundPayload::Command(body) => {
+                // Only failure mode is outbound bus closed → tell the
+                // caller to exit.
+                Ok(self.dispatch_command(channel, session, &body).await.is_ok())
+            }
+        }
+    }
+
+    /// Handle a heartbeat tick.
+    ///
+    /// Resolves the user's main session via `active_sessions[tui]`,
+    /// runs a phase-1 decide call (gated to the `heartbeat_decide`
+    /// tool), and on `run` continues into a full phase-2 iteration
+    /// whose outbound stream goes back to the `tui` channel. Skips
+    /// silently when:
+    ///
+    /// - the user has no active main session yet (no `/new` or first
+    ///   message), so there is no place to land the heartbeat output
+    ///   without spinning up an isolated session;
+    /// - phase-1 returns `skip` (or any malformed answer);
+    /// - phase-2 errors — the error is rendered as an
+    ///   [`OutboundPayload::Error`] on the same target channel.
+    async fn handle_tick(&self, tick: HeartbeatTick) -> Result<()> {
+        let target = ChannelID::new(HEARTBEAT_TARGET_CHANNEL);
+        let session = {
+            let map = self.active_sessions.lock().await;
+            map.get(&target).cloned()
+        };
+        let Some(session) = session else {
+            return Ok(());
+        };
+
+        let prompt = match self.heartbeat_decide(&tick).await {
+            Ok(HeartbeatDecision::Run { prompt }) => prompt,
+            Ok(HeartbeatDecision::Skip) => return Ok(()),
+            Err(err) => {
+                eprintln!("[heartbeat] phase-1 failed: {err}");
+                return Ok(());
+            }
+        };
+
+        let iter = Iteration {
+            session: session.clone(),
+            channel: target.clone(),
+        };
+        if let Err(err) = self.iteration(&iter, prompt).await {
+            let reply =
+                OutboundMessage::new(target, session, OutboundPayload::Error(err.to_string()));
+            // Outbound bus closed during error reporting just means
+            // the channel layer is gone — same shutdown signal the
+            // dispatch path treats as `Ok(false)`. Heartbeat ticks
+            // can't propagate that, so drop and move on.
+            let _ = self.out.send(reply).await;
+        }
         Ok(())
+    }
+
+    /// Phase-1: ask the model to call `heartbeat_decide` and report
+    /// `skip` or `run`. Any non-conforming response (no tool call,
+    /// wrong tool name, malformed JSON, `run` without `tasks`) is
+    /// folded into [`HeartbeatDecision::Skip`] so a confused model
+    /// errs on the side of staying silent.
+    async fn heartbeat_decide(&self, tick: &HeartbeatTick) -> Result<HeartbeatDecision> {
+        let request = Request {
+            messages: vec![
+                Message::System {
+                    content: HEARTBEAT_DECIDE_SYSTEM_PROMPT.into(),
+                },
+                Message::User {
+                    content: format!(
+                        "Current time: {}\n\nHEARTBEAT.md contents:\n\n{}",
+                        tick.at, tick.content
+                    ),
+                },
+            ],
+            tools: vec![heartbeat_decide_tool()],
+            model_name: self.profile.model_name.clone(),
+            max_tokens: Some(HEARTBEAT_DECIDE_MAX_TOKENS),
+            // Temperature deliberately left unset — see the title
+            // generation comment for the reasoning.
+            temperature: None,
+            timeout_secs: self.timeout_secs,
+        };
+
+        let response = self.client.complete(request).await?;
+        let Some(call) = response
+            .tool_calls
+            .into_iter()
+            .flatten()
+            .find(|c| c.name == HEARTBEAT_DECIDE_TOOL_NAME)
+        else {
+            return Ok(HeartbeatDecision::Skip);
+        };
+
+        let args: HeartbeatDecideArgs = serde_json::from_str(&call.arguments).unwrap_or_default();
+        match args.action.as_str() {
+            "run" if !args.tasks.trim().is_empty() => {
+                Ok(HeartbeatDecision::Run { prompt: args.tasks })
+            }
+            _ => Ok(HeartbeatDecision::Skip),
+        }
     }
 
     /// Dispatch one forwarded slash command through the agent-level
@@ -210,6 +400,7 @@ impl Agent {
         let ctx = AgentCommandCtx {
             channel: channel.clone(),
             session: session.clone(),
+            heartbeat: self.heartbeat.clone(),
         };
         let outcome = self.commands.dispatch(body, &ctx).await;
 
@@ -387,10 +578,13 @@ impl Agent {
             },
         ]);
         // Title generation overrides the profile defaults: no tools
-        // advertised, tighter token budget, lower temperature.
+        // advertised, tighter token budget. Temperature is left to
+        // the provider — not every API honors it (DeepSeek's
+        // thinking mode silently drops it, for instance), and a
+        // bare title is short enough that sampling jitter doesn't
+        // matter.
         request.tools = Vec::new();
         request.max_tokens = Some(TITLE_MAX_TOKENS);
-        request.temperature = Some(TITLE_TEMPERATURE);
         let response = self.client.complete(request).await?;
         Ok(response
             .content
@@ -471,4 +665,15 @@ fn fallback_title(text: &str) -> String {
     } else {
         truncated
     }
+}
+
+/// Outcome of heartbeat phase-1.
+enum HeartbeatDecision {
+    /// Model said "nothing to do" (or returned a malformed answer
+    /// that the agent folds into the same branch — better silent
+    /// than wrong).
+    Skip,
+    /// Model said "run" and produced a `tasks` summary; that summary
+    /// becomes the phase-2 user message.
+    Run { prompt: String },
 }

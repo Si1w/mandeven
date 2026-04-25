@@ -9,14 +9,18 @@
 //! Requires `MISTRAL_API_KEY` in the environment and `./mandeven.toml`
 //! in the working directory.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
-use mandeven::agent::Agent;
+use tokio::sync::Mutex;
+
+use mandeven::agent::{Agent, HeartbeatWiring};
 use mandeven::bus::{Bus, ChannelID};
 use mandeven::channels::Manager;
 use mandeven::cli::CliChannel;
 use mandeven::config::AppConfig;
 use mandeven::gateway::{Gateway, dispatch_channel};
+use mandeven::heartbeat::HeartbeatEngine;
 use mandeven::session;
 use mandeven::tools;
 
@@ -46,15 +50,39 @@ async fn main() -> Result<(), DynError> {
 
     let mut tool_registry = tools::Registry::new();
     tools::register_builtins(&mut tool_registry);
+
+    // Shared per-channel session map: gateway is the writer, the
+    // agent reads it (heartbeat tick path) so heartbeat ticks land in
+    // the user's main session rather than spinning up an isolated one.
+    let active_sessions = Arc::new(Mutex::new(HashMap::new()));
+
+    let heartbeat_wiring = if cfg.agent.heartbeat.enabled {
+        let data_dir = cfg.data_dir();
+        let (engine, rx) = HeartbeatEngine::new(cfg.agent.heartbeat.clone(), &data_dir);
+        let engine = Arc::new(engine);
+        engine.start();
+        Some(HeartbeatWiring { engine, rx })
+    } else {
+        None
+    };
+
     let agent = Agent::new(
         &cfg,
         sessions.clone(),
         tool_registry,
         dispatch_rx,
         outbound_tx.clone(),
+        active_sessions.clone(),
+        heartbeat_wiring,
     )?;
 
-    let gateway = Gateway::new(inbound_rx, dispatch_tx, outbound_tx, sessions.clone());
+    let gateway = Gateway::new(
+        inbound_rx,
+        dispatch_tx,
+        outbound_tx,
+        sessions.clone(),
+        active_sessions,
+    );
 
     let mut manager = Manager::new(outbound_rx);
     manager.register(Arc::new(CliChannel::new(

@@ -14,6 +14,7 @@
 
 pub mod error;
 pub mod file;
+pub mod heartbeat;
 pub mod shell;
 
 pub use error::{Error, Result};

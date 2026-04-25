@@ -77,12 +77,19 @@ pub fn dispatch_channel() -> (DispatchSender, DispatchReceiver) {
     (Sender::from_raw(tx), Receiver::from_raw(rx))
 }
 
+/// Bindings from a channel to its currently active storage session.
+/// Owned by the gateway as the binding authority but cloned out to
+/// other subsystems (e.g. [`crate::heartbeat`], so a heartbeat tick
+/// can run inside the user's main session rather than spinning up an
+/// isolated one). `/new` and `/load` mutate the map; readers see the
+/// switch automatically through the shared `Arc`.
+pub type ActiveSessions = Arc<Mutex<HashMap<ChannelID, SessionID>>>;
+
 /// Gateway — owns the inbound routing loop plus the session
 /// binding table.
 pub struct Gateway {
-    /// Bindings from a channel to the currently active storage
-    /// session. `/new` and `/load` mutate this map.
-    active_sessions: Arc<Mutex<HashMap<ChannelID, SessionID>>>,
+    /// See [`ActiveSessions`].
+    active_sessions: ActiveSessions,
     /// Per-channel snapshot of the most recent `/list` output, used
     /// by `/load <n>` to map a numeric index to a `SessionID`.
     last_listed: Arc<Mutex<HashMap<ChannelID, Vec<SessionID>>>>,
@@ -114,6 +121,7 @@ impl Gateway {
         forward: DispatchSender,
         outbound: OutboundSender,
         sessions: Arc<session::Manager>,
+        active_sessions: ActiveSessions,
     ) -> Self {
         let mut router = Router::<GatewayCommandCtx>::new();
         router.register(Arc::new(commands::New));
@@ -121,7 +129,7 @@ impl Gateway {
         router.register(Arc::new(commands::Load));
 
         Self {
-            active_sessions: Arc::new(Mutex::new(HashMap::new())),
+            active_sessions,
             last_listed: Arc::new(Mutex::new(HashMap::new())),
             sessions,
             commands: router,

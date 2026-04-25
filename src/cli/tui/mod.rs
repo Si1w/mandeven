@@ -21,7 +21,7 @@ use super::{CliState, Line as TranscriptLine, Mode, Overlay};
 mod markdown;
 
 const PROMPT: &str = "› ";
-const HELP_BODY_LINES: u16 = 11;
+const HELP_BODY_LINES: u16 = 12;
 
 const BRAND: Color = Color::Rgb(215, 119, 87);
 
@@ -134,15 +134,15 @@ fn render_transcript(f: &mut Frame<'_>, area: Rect, state: &mut CliState) {
         clamped
     };
 
-    if state.transcript.is_empty() && state.streaming.is_none() {
-        render_empty_transcript(f, inner);
-    } else {
+    if has_transcript_content(state) {
         f.render_widget(
             Paragraph::new(build_transcript(state))
                 .wrap(Wrap { trim: false })
                 .scroll((scroll, 0)),
             inner,
         );
+    } else {
+        render_empty_transcript(f, inner);
     }
 }
 
@@ -164,6 +164,10 @@ fn render_empty_transcript(f: &mut Frame<'_>, area: Rect) {
     f.render_widget(Paragraph::new(text).wrap(Wrap { trim: false }), area);
 }
 
+fn has_transcript_content(state: &CliState) -> bool {
+    !state.transcript.is_empty() || state.streaming_thinking.is_some() || state.streaming.is_some()
+}
+
 /// Count the number of logical lines that [`build_transcript`] will
 /// produce, without accounting for wrapping. Mirrors the same rules
 /// (inter-entry blank lines + Markdown-rendered assistant output).
@@ -174,9 +178,10 @@ fn count_logical_lines(state: &CliState) -> usize {
             count += 1; // blank separator
         }
         count += match entry {
-            TranscriptLine::User(t) | TranscriptLine::Error(t) | TranscriptLine::Thinking(t) => {
-                t.matches('\n').count() + 1
-            }
+            TranscriptLine::User(t)
+            | TranscriptLine::Error(t)
+            | TranscriptLine::Thinking(t)
+            | TranscriptLine::Compact(t) => t.matches('\n').count() + 1,
             TranscriptLine::Assistant(t) => markdown::Engine::line_count(t),
         };
     }
@@ -200,7 +205,9 @@ fn render_status_line(f: &mut Frame<'_>, area: Rect, state: &CliState) {
         Mode::Idle => (Color::Green, "Ready"),
         Mode::Replying => (Color::Yellow, "Thinking"),
     };
-    let detail = if !state.follow_bottom {
+    let detail = if state.overlay.is_some() {
+        "Esc dismiss overlay"
+    } else if !state.follow_bottom {
         "history view · PgDn to latest"
     } else if state.mode == Mode::Replying {
         "Esc to interrupt"
@@ -230,10 +237,7 @@ fn render_input(f: &mut Frame<'_>, area: Rect, state: &CliState) {
         .border_type(BorderType::Rounded)
         .border_style(dim_style())
         .title(Line::styled(" message ", dim_style()))
-        .title_bottom(Line::styled(
-            input_footer(area.width, state.mode),
-            dim_style(),
-        ));
+        .title_bottom(Line::styled(input_footer(area.width, state), dim_style()));
 
     let inner = block.inner(area);
     f.render_widget(block, area);
@@ -275,8 +279,12 @@ fn render_input(f: &mut Frame<'_>, area: Rect, state: &CliState) {
     }
 }
 
-fn input_footer(width: u16, mode: Mode) -> &'static str {
-    match (mode, width) {
+fn input_footer(width: u16, state: &CliState) -> &'static str {
+    if state.overlay.is_some() {
+        return " Esc dismiss overlay ";
+    }
+
+    match (state.mode, width) {
         (Mode::Idle, 0..=45) => " Enter send · /help ",
         (Mode::Idle, _) => " Enter send · /help commands · PgUp/PgDn scroll ",
         (Mode::Replying, 0..=45) => " Thinking · Esc ",
@@ -289,20 +297,18 @@ fn render_help_overlay(f: &mut Frame<'_>, area: Rect) {
         return;
     }
 
-    let overlay_rect = centered_rect(area, 72, HELP_BODY_LINES + 4);
+    let overlay_rect = full_width_rect(area, HELP_BODY_LINES + 4);
     f.render_widget(Clear, overlay_rect);
 
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(Color::Cyan))
-        .title(Line::styled(
-            " help ",
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        ))
-        .title_bottom(Line::styled(" Esc dismiss ", dim_style()));
+        .border_style(dim_style())
+        .title(Line::styled(" help ", brand_style()))
+        .title_bottom(Line::styled(
+            overlay_footer(overlay_rect.width),
+            dim_style(),
+        ));
 
     let inner = block.inner(overlay_rect);
     f.render_widget(block, overlay_rect);
@@ -317,16 +323,21 @@ fn render_help_overlay(f: &mut Frame<'_>, area: Rect) {
     );
 }
 
-fn centered_rect(area: Rect, width_pct: u16, height: u16) -> Rect {
-    let computed_width = area.width.saturating_mul(width_pct).saturating_div(100);
-    let min_width = area.width.min(44);
-    let width = computed_width.max(min_width).min(area.width);
+fn overlay_footer(width: u16) -> &'static str {
+    if width < 54 {
+        " Esc dismiss "
+    } else {
+        " Esc dismiss · transcript scroll resumes after close "
+    }
+}
+
+fn full_width_rect(area: Rect, height: u16) -> Rect {
     let height = height.min(area.height);
 
     Rect {
-        x: area.x + area.width.saturating_sub(width) / 2,
+        x: area.x,
         y: area.y + area.height.saturating_sub(height) / 2,
-        width,
+        width: area.width,
         height,
     }
 }
@@ -362,7 +373,21 @@ fn append_transcript_entry<'a>(lines: &mut Vec<Line<'a>>, entry: &'a TranscriptL
         TranscriptLine::User(text) => append_user_lines(lines, text),
         TranscriptLine::Assistant(text) => append_assistant_lines(lines, text),
         TranscriptLine::Thinking(text) => append_thinking_lines(lines, text),
+        TranscriptLine::Compact(text) => append_compact_lines(lines, text),
         TranscriptLine::Error(text) => append_error_lines(lines, text),
+    }
+}
+
+/// Compact summary boundary, rendered in Codex's `• `-prefixed info
+/// style (see `agent-examples/codex/codex-rs/tui/src/history_cell.rs`'s
+/// `new_info_event`). Continuation rows align under the message text.
+fn append_compact_lines<'a>(lines: &mut Vec<Line<'a>>, text: &'a str) {
+    for (i, line) in text.split('\n').enumerate() {
+        let prefix = if i == 0 { "• " } else { "  " };
+        lines.push(Line::from(vec![
+            Span::styled(prefix, dim_style()),
+            Span::styled(line, dim_style().add_modifier(Modifier::ITALIC)),
+        ]));
     }
 }
 
@@ -415,8 +440,9 @@ fn build_help_text() -> Text<'static> {
         section_header("Keys"),
         Line::raw(""),
         help_entry("Enter", "send input"),
-        help_entry("PgUp/PgDn", "scroll transcript"),
-        help_entry("Mouse wheel", "scroll transcript"),
+        help_entry("PgUp/PgDn", "scroll transcript when closed"),
+        help_entry("Mouse wheel", "scroll transcript when closed"),
+        help_entry("Esc", "dismiss this overlay"),
     ])
 }
 

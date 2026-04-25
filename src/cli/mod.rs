@@ -79,6 +79,10 @@ pub enum Line {
     // the user can toggle visibility per-turn or globally — the TUI
     // currently always renders the full trace inline.
     Thinking(String),
+    /// Compact-pipeline summary boundary — replaces a swath of older
+    /// history. Rendered with a distinct prefix so the user can see
+    /// where the conversation was condensed.
+    Compact(String),
     /// Error surfaced via the bus, a tool failure, or an unknown
     /// slash command.
     Error(String),
@@ -563,6 +567,12 @@ fn push_record_as_line(transcript: &mut Vec<Line>, msg: Message) {
             if let Some(text) = content {
                 transcript.push(Line::Assistant(text));
             }
+        }
+        Message::Compact(boundary) => {
+            // Render the summary inline so the user sees what was
+            // injected. Future work could add a folding control;
+            // see the `Line::Thinking` precedent.
+            transcript.push(Line::Compact(boundary.summary));
         }
         Message::System { .. } | Message::Tool { .. } => {}
     }

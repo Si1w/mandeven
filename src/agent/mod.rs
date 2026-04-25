@@ -13,7 +13,8 @@
 //! - [`crate::bus`] — inbound / outbound message transport
 //! - [`crate::tools`] — tool registration and dispatch
 
-pub mod commands;
+pub mod command;
+pub mod compact;
 pub mod error;
 pub mod types;
 
@@ -26,8 +27,10 @@ use std::sync::Arc;
 use futures::StreamExt;
 use uuid::Uuid;
 
+use tokio::sync::Mutex as AsyncMutex;
 use tokio::sync::mpsc;
 
+use self::compact::{CompactConfig, CompactState};
 use crate::bus::{
     ChannelID, InboundPayload, OutboundMessage, OutboundPayload, OutboundSender, SessionID,
 };
@@ -36,7 +39,8 @@ use crate::config::{AgentConfig, AppConfig, LLMProfile};
 use crate::gateway::{ActiveSessions, DispatchReceiver, InboundDispatch};
 use crate::heartbeat::{HeartbeatEngine, HeartbeatTick};
 use crate::llm::{
-    self, BaseLLMClient, FinishReason, Message, Request, ResponseStream, Thinking, ToolCall, Usage,
+    self, BaseLLMClient, CompactTrigger, FinishReason, Message, Request, ResponseStream, Thinking,
+    ToolCall, Usage,
 };
 use crate::session;
 use crate::tools;
@@ -44,7 +48,9 @@ use crate::tools::heartbeat::{
     HEARTBEAT_DECIDE_TOOL_NAME, HeartbeatDecideArgs, heartbeat_decide_tool,
 };
 
-use self::commands::AgentCommandCtx;
+use self::command::{
+    AgentCommandCtx, CompactCmdMatch, format_compact_report, parse_compact_command,
+};
 
 /// System prompt used to generate a short session title from the first
 /// user message. This lives inline for now and will migrate to the
@@ -101,7 +107,7 @@ pub struct Agent {
     /// Agent-level command router. Unknown commands reach the agent
     /// after traversing the channel router and the gateway router;
     /// the agent is the final fallback.
-    commands: Router<AgentCommandCtx>,
+    command: Router<AgentCommandCtx>,
     /// Heartbeat control handle, present iff the engine was wired in.
     /// Cloned into [`AgentCommandCtx`] so `/heartbeat` subcommands can
     /// pause / resume / set the interval.
@@ -113,6 +119,15 @@ pub struct Agent {
     /// Heartbeat ticks read this to land in the user's main session
     /// rather than running isolated; written only by the gateway.
     active_sessions: ActiveSessions,
+    /// Window-relative compact thresholds. Cloned from the config
+    /// so the agent doesn't refer back to the full `AppConfig` for
+    /// every iteration.
+    compact_config: CompactConfig,
+    /// Mutable compact state — currently just the circuit-breaker
+    /// counter. `Mutex` because both the auto-trigger path
+    /// ([`Agent::iteration`]) and the manual `/compact` command
+    /// (`dispatch_command`) bump it from `&self` async contexts.
+    compact_state: Arc<AsyncMutex<CompactState>>,
 }
 
 /// Options for the optional heartbeat wiring. Constructed by
@@ -185,8 +200,8 @@ impl Agent {
         // Agent-level command router. Routing / session-level
         // commands (`/new`, `/list`, `/load`) live in the gateway;
         // commands here mutate agent-internal state.
-        let mut agent_commands = Router::<AgentCommandCtx>::new();
-        agent_commands.register(Arc::new(commands::Heartbeat));
+        let mut agent_command = Router::<AgentCommandCtx>::new();
+        agent_command.register(Arc::new(command::Heartbeat));
 
         let (heartbeat_handle, heartbeat_rx) = match heartbeat {
             Some(HeartbeatWiring { engine, rx }) => (Some(engine), Some(rx)),
@@ -202,10 +217,12 @@ impl Agent {
             out,
             config: cfg.agent.clone(),
             timeout_secs: cfg.llm.timeout_secs,
-            commands: agent_commands,
+            command: agent_command,
             heartbeat: heartbeat_handle,
             heartbeat_rx,
             active_sessions,
+            compact_config: cfg.agent.compact.clone(),
+            compact_state: Arc::new(AsyncMutex::new(CompactState::new())),
         })
     }
 
@@ -404,12 +421,27 @@ impl Agent {
         session: SessionID,
         body: &str,
     ) -> Result<()> {
+        // `/compact [focus]` is special-cased rather than registered
+        // on the router because its execution needs an `&self` LLM
+        // call + session write — neither fits the static
+        // `Command<AgentCommandCtx>` trait shape (which returns a
+        // synchronous `CommandOutcome`).
+        match parse_compact_command(body) {
+            CompactCmdMatch::Bare => return self.run_compact_command(channel, session, None).await,
+            CompactCmdMatch::Focused(focus) => {
+                return self
+                    .run_compact_command(channel, session, Some(focus))
+                    .await;
+            }
+            CompactCmdMatch::None => {}
+        }
+
         let ctx = AgentCommandCtx {
             channel: channel.clone(),
             session: session.clone(),
             heartbeat: self.heartbeat.clone(),
         };
-        let outcome = self.commands.dispatch(body, &ctx).await;
+        let outcome = self.command.dispatch(body, &ctx).await;
 
         let payload = match outcome {
             Some(CommandOutcome::Handled) => return Ok(()),
@@ -432,6 +464,115 @@ impl Agent {
         Ok(())
     }
 
+    /// Auto-compact gate. Called by [`Self::iteration`] just before
+    /// each LLM call. Returns the (possibly compacted) message list
+    /// the call should use. Auto compaction is silent on success per
+    /// the agreed UX — a `Notice` is only emitted when the breaker
+    /// trips or the summarize call fails outright.
+    async fn maybe_auto_compact(
+        &self,
+        iter: &Iteration,
+        messages: Vec<Message>,
+    ) -> Result<Vec<Message>> {
+        if !compact::should_compact(&messages, &self.profile, &self.compact_config) {
+            return Ok(messages);
+        }
+        let mut state = self.compact_state.lock().await;
+        if state.is_circuit_open(&self.compact_config) {
+            // Don't drop the breaker by retrying — tell the user
+            // once and let the LLM call fall through (it will
+            // produce its own context-too-long error if applicable).
+            self.send_notice(
+                iter,
+                "context full and compact circuit breaker open — start a fresh session with /new",
+            )
+            .await;
+            return Ok(messages);
+        }
+
+        match compact::compact_messages(
+            messages.clone(),
+            &self.profile,
+            self.client.as_ref(),
+            &self.compact_config,
+            &mut state,
+            CompactTrigger::Auto,
+            None,
+            self.timeout_secs,
+        )
+        .await
+        {
+            Ok((compacted, _report)) => {
+                self.sessions
+                    .replace_messages(&iter.session, compacted.clone())
+                    .await?;
+                Ok(compacted)
+            }
+            Err(err) => {
+                self.send_notice(iter, &format!("auto-compact failed: {err}"))
+                    .await;
+                // Fall through with the original messages so the
+                // user's turn still gets attempted; the LLM may
+                // succeed or surface a clearer error.
+                Ok(messages)
+            }
+        }
+    }
+
+    /// Manual `/compact [focus]` handler. Reachable only via
+    /// [`Self::dispatch_command`]'s special case. Reports the
+    /// outcome through a single `Notice` (success) or `Error`
+    /// (failure) on the originating channel.
+    async fn run_compact_command(
+        &self,
+        channel: ChannelID,
+        session: SessionID,
+        focus: Option<String>,
+    ) -> Result<()> {
+        let messages = self.load_history(&session).await?;
+        let mut state = self.compact_state.lock().await;
+        let result = compact::compact_messages(
+            messages,
+            &self.profile,
+            self.client.as_ref(),
+            &self.compact_config,
+            &mut state,
+            CompactTrigger::Manual,
+            focus.as_deref(),
+            self.timeout_secs,
+        )
+        .await;
+        // Drop the lock before any outbound send — `send` can take a
+        // while if the channel is congested, no need to hold state
+        // across it.
+        drop(state);
+
+        let payload = match result {
+            Ok((compacted, report)) => {
+                self.sessions.replace_messages(&session, compacted).await?;
+                OutboundPayload::Notice(format_compact_report(&report))
+            }
+            Err(err) => OutboundPayload::Error(format!("/compact failed: {err}")),
+        };
+        let reply = OutboundMessage::new(channel, session, payload);
+        self.out.send(reply).await?;
+        Ok(())
+    }
+
+    /// Send an agent-originated `Notice` to the channel that
+    /// triggered the current iteration. Failures (outbound bus
+    /// closed) are swallowed — the caller has already chosen to
+    /// continue, and there is nothing useful to do with the error
+    /// at this granularity.
+    async fn send_notice(&self, iter: &Iteration, text: &str) {
+        let msg = OutboundMessage::new(
+            iter.channel.clone(),
+            iter.session.clone(),
+            OutboundPayload::Notice(text.to_string()),
+        );
+        let _ = self.out.send(msg).await;
+    }
+
     /// Execute one conversation iteration — from a user message to the
     /// persisted assistant reply, covering any number of LLM↔tool
     /// calls.
@@ -450,6 +591,7 @@ impl Agent {
             }
 
             let messages = self.load_history(&iter.session).await?;
+            let messages = self.maybe_auto_compact(iter, messages).await?;
             let outcome = self.call(iter, messages).await?;
             let CallOutcome {
                 content,

@@ -1,12 +1,21 @@
 //! Agent-level slash commands — operate on agent-internal state
-//! (heartbeat controls today; `/stop`, `/status`, context compact, …
-//! to come). Routing / session-level commands (`/new`, `/list`,
-//! `/load`) live in [`crate::gateway::commands`] instead.
+//! (heartbeat controls, `/compact`; `/stop`, `/status`, … to come).
+//! Routing / session-level commands (`/new`, `/list`, `/load`) live
+//! in [`crate::gateway::commands`] instead.
+//!
+//! Most commands plug into the trait-based router used elsewhere
+//! ([`crate::command::Command`]). `/compact` is the exception: its
+//! work needs the agent's `&self` (LLM client, session store) and
+//! is async, so it is special-cased on the
+//! [`super::Agent::dispatch_command`] path. The parsing helper
+//! [`parse_compact_command`] sits here so all command logic lives
+//! together.
 
 use std::sync::Arc;
 
 use async_trait::async_trait;
 
+use super::compact::CompactReport;
 use crate::bus::{ChannelID, SessionID};
 use crate::command::{Command, CommandOutcome};
 use crate::heartbeat::{HeartbeatEngine, HeartbeatStatus};
@@ -107,4 +116,90 @@ fn format_status(status: &HeartbeatStatus) -> String {
         "heartbeat: {state} · interval={}s · last_tick={last} · next_tick_in={next}",
         status.interval_secs
     )
+}
+
+/// Outcome of [`parse_compact_command`].
+///
+/// Used in lieu of `Option<Option<String>>` so the three states are
+/// named at the call site.
+#[derive(Debug)]
+pub enum CompactCmdMatch {
+    /// Body wasn't a `/compact` request — caller falls through to
+    /// the regular trait-based router.
+    None,
+    /// `/compact` with no focus argument.
+    Bare,
+    /// `/compact <focus>` with non-empty focus text.
+    Focused(String),
+}
+
+/// Recognize `/compact` and `/compact <focus...>` command bodies.
+///
+/// `body` is the trimmed substring after the leading `/`. Anything
+/// that isn't a compact request returns [`CompactCmdMatch::None`].
+#[must_use]
+pub fn parse_compact_command(body: &str) -> CompactCmdMatch {
+    let trimmed = body.trim();
+    if trimmed == "compact" {
+        return CompactCmdMatch::Bare;
+    }
+    let Some(rest) = trimmed.strip_prefix("compact") else {
+        return CompactCmdMatch::None;
+    };
+    if !rest.starts_with(char::is_whitespace) {
+        return CompactCmdMatch::None;
+    }
+    let focus = rest.trim();
+    if focus.is_empty() {
+        CompactCmdMatch::Bare
+    } else {
+        CompactCmdMatch::Focused(focus.to_string())
+    }
+}
+
+/// One-line success summary rendered to the user after `/compact`.
+#[must_use]
+pub fn format_compact_report(report: &CompactReport) -> String {
+    format!(
+        "compacted {} → {} messages (≈{} → {} tokens)",
+        report.messages_before,
+        report.messages_after,
+        report.estimated_tokens_before,
+        report.estimated_tokens_after,
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_compact_recognizes_bare_and_focused_forms() {
+        assert!(matches!(
+            parse_compact_command("compact"),
+            CompactCmdMatch::Bare
+        ));
+        assert!(matches!(
+            parse_compact_command("compact   "),
+            CompactCmdMatch::Bare
+        ));
+        match parse_compact_command("compact recent file edits") {
+            CompactCmdMatch::Focused(s) => assert_eq!(s, "recent file edits"),
+            other => panic!("expected Focused, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_compact_rejects_non_compact_bodies() {
+        assert!(matches!(
+            parse_compact_command("help"),
+            CompactCmdMatch::None
+        ));
+        // "compactor" must NOT match — prefix-only collision.
+        assert!(matches!(
+            parse_compact_command("compactor"),
+            CompactCmdMatch::None
+        ));
+        assert!(matches!(parse_compact_command(""), CompactCmdMatch::None));
+    }
 }

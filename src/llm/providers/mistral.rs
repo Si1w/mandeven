@@ -313,6 +313,11 @@ impl<'a> From<&'a Message> for WireReqMessage<'a> {
                 content,
                 tool_call_id,
             },
+            // Compact boundary degrades to a system message — the
+            // wire has no summary role.
+            Message::Compact(boundary) => WireReqMessage::System {
+                content: &boundary.summary,
+            },
         }
     }
 }

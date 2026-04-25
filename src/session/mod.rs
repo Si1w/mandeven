@@ -200,6 +200,43 @@ impl Manager {
         self.write_state(id, &state).await
     }
 
+    /// Replace the entire message log of a session in one shot.
+    ///
+    /// Used by [`crate::agent::compact`]: a successful compaction produces a
+    /// new `Vec<Message>` (system prompts + summary boundary +
+    /// preserve region) that is meant to **overwrite** the JSONL
+    /// rather than append to it. All records share a single
+    /// timestamp because the compaction is one logical event.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::NotFound`] when the session file doesn't
+    /// exist (call [`Self::create`] first), and [`Error::Io`],
+    /// [`Error::Json`], or [`Error::InvalidFormat`] on filesystem or
+    /// parsing failure.
+    pub async fn replace_messages(&self, id: &SessionID, messages: Vec<Message>) -> Result<()> {
+        let lock = self.lock_for(id).await;
+        let _guard = lock.lock().await;
+
+        let path = self.session_path(id);
+        if !tokio::fs::try_exists(&path).await? {
+            return Err(Error::NotFound(id.clone()));
+        }
+
+        let mut state = self.read_state(&path).await?;
+        let now = Utc::now();
+        state.records = messages
+            .into_iter()
+            .map(|message| Record {
+                message,
+                timestamp: now,
+            })
+            .collect();
+        state.metadata.updated_at = now;
+
+        self.write_state(id, &state).await
+    }
+
     /// Load the full chronological history of a session.
     ///
     /// Returns an empty `Vec` when the session file is absent.

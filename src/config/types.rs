@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::agent::compact::CompactConfig;
 use crate::heartbeat::HeartbeatConfig;
 
 /// Root configuration loaded from `./mandeven.toml`.
@@ -50,6 +51,14 @@ pub struct AgentConfig {
     /// `[agent.list.<name>.heartbeat]` per-agent overrides.
     #[serde(default)]
     pub heartbeat: HeartbeatConfig,
+
+    /// Conversation-compaction configuration. Sets the auto-trigger
+    /// thresholds, preserve-region budgets, and circuit-breaker
+    /// limits used by [`crate::agent::compact`]. All fields are
+    /// percent-of-window so a single config scales across providers
+    /// with very different `max_context_window` values.
+    #[serde(default)]
+    pub compact: CompactConfig,
 }
 
 impl AppConfig {

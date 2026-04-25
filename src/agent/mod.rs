@@ -27,11 +27,11 @@ use futures::StreamExt;
 use uuid::Uuid;
 
 use crate::bus::{
-    ChannelID, InboundMessage, InboundPayload, InboundReceiver, OutboundMessage, OutboundPayload,
-    OutboundSender, SessionID,
+    ChannelID, InboundPayload, OutboundMessage, OutboundPayload, OutboundSender, SessionID,
 };
 use crate::command::{CommandOutcome, Router};
 use crate::config::{AgentConfig, AppConfig, LLMProfile};
+use crate::gateway::{DispatchReceiver, InboundDispatch};
 use crate::llm::{
     self, BaseLLMClient, FinishReason, Message, Request, ResponseStream, ToolCall, Usage,
 };
@@ -68,16 +68,16 @@ pub struct Agent {
     client: Arc<dyn BaseLLMClient>,
     sessions: Arc<session::Manager>,
     tools: tools::Registry,
-    inbox: InboundReceiver,
+    inbox: DispatchReceiver,
     out: OutboundSender,
     config: AgentConfig,
     /// Global HTTP timeout, cached from
     /// [`crate::config::LLMConfig::timeout_secs`] so every iteration
     /// builds its [`Request`] without re-reading the config.
     timeout_secs: Option<u64>,
-    /// Agent-level command router. Channel-local routers fall through
-    /// to this via [`InboundPayload::Command`] when they do not
-    /// recognize a slash command.
+    /// Agent-level command router. Unknown commands reach the agent
+    /// after traversing the channel router and the gateway router;
+    /// the agent is the final fallback.
     commands: Router<AgentCommandCtx>,
 }
 
@@ -101,7 +101,7 @@ impl Agent {
         cfg: &AppConfig,
         sessions: Arc<session::Manager>,
         tools: tools::Registry,
-        inbox: InboundReceiver,
+        inbox: DispatchReceiver,
         out: OutboundSender,
     ) -> Result<Self> {
         let (provider_name, model_name) = cfg
@@ -124,8 +124,11 @@ impl Agent {
         let client = llm::providers::client_for(provider_name)
             .ok_or_else(|| Error::UnknownProvider(provider_name.to_string()))?;
 
-        let mut agent_commands = Router::<AgentCommandCtx>::new();
-        agent_commands.register(Arc::new(commands::Ping));
+        // Empty agent-level command router. Reserved for future
+        // commands that mutate agent-internal state (`/stop`,
+        // `/status`, etc.) — routing / session-level commands live
+        // in the gateway, not here.
+        let agent_commands = Router::<AgentCommandCtx>::new();
 
         Ok(Self {
             profile,
@@ -154,7 +157,7 @@ impl Agent {
     /// future shutdown-time failures.
     pub async fn run(mut self) -> Result<()> {
         while let Some(msg) = self.inbox.recv().await {
-            let InboundMessage {
+            let InboundDispatch {
                 channel,
                 session,
                 payload,
@@ -366,7 +369,9 @@ impl Agent {
             Ok(t) if !t.is_empty() => t,
             _ => fallback_title(first_text),
         };
-        self.sessions.create(&iter.session, title).await?;
+        self.sessions
+            .create(&iter.session, title, iter.channel.clone())
+            .await?;
         Ok(())
     }
 

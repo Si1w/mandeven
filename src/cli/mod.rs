@@ -42,10 +42,11 @@ use tokio::sync::Notify;
 
 use crate::bus::{
     ChannelID, InboundMessage, InboundPayload, InboundSender, OutboundMessage, OutboundPayload,
-    SessionID,
 };
 use crate::channels::{Channel, Error, Result};
 use crate::command::{self, CommandOutcome, Router};
+use crate::llm::Message;
+use crate::session;
 
 use self::commands::CliCommandCtx;
 
@@ -137,24 +138,45 @@ impl Default for CliState {
     }
 }
 
+/// Constant peer id stamped on every inbound message from the local
+/// CLI — there is exactly one user per terminal, so the peer
+/// dimension is fixed. Future IM channels fill this with the
+/// platform-provided user id.
+const CLI_PEER_ID: &str = "cli-user";
+
 /// Terminal UI channel.
+///
+/// The channel no longer owns a `SessionID`; the gateway is the
+/// session authority. The channel tags inbound messages with its
+/// [`ChannelID`] and [`CLI_PEER_ID`] identity, and the gateway
+/// looks up (or creates) the bound session before the message
+/// reaches the agent.
+///
+/// The channel holds a read-capable handle to the session store
+/// ([`sessions`](Self::sessions)) so it can rebuild its transcript
+/// when the gateway announces a session switch via
+/// [`OutboundPayload::SessionSwitched`].
 pub struct CliChannel {
     id: ChannelID,
-    session: SessionID,
     state: Arc<Mutex<CliState>>,
     redraw: Arc<Notify>,
     /// Slash-command registry for commands that affect only this
-    /// channel (overlay toggles, exit, …). Agent-level commands will
-    /// be forwarded to the agent router once that layer lands — for
-    /// now an unknown command is rendered as a transcript error.
+    /// channel (overlay toggles, exit). Unknown commands fall
+    /// through to the gateway via [`InboundPayload::Command`].
     router: Router<CliCommandCtx>,
+    /// Session store handle. The channel only reads from this (to
+    /// replay history on [`OutboundPayload::SessionSwitched`]); the
+    /// gateway and agent are the write authorities.
+    sessions: Arc<session::Manager>,
 }
 
 impl CliChannel {
-    /// Construct a channel tagged with the given ids. All transcript
-    /// state is per-instance.
+    /// Construct a channel tagged with the given id.
+    ///
+    /// `sessions` is used to replay history when the gateway
+    /// announces a session switch; the CLI does not write to it.
     #[must_use]
-    pub fn new(id: ChannelID, session: SessionID) -> Self {
+    pub fn new(id: ChannelID, sessions: Arc<session::Manager>) -> Self {
         let mut router = Router::<CliCommandCtx>::new();
         router.register(Arc::new(command::builtins::Exit));
         router.register(Arc::new(command::builtins::Quit));
@@ -162,10 +184,10 @@ impl CliChannel {
 
         Self {
             id,
-            session,
             state: Arc::new(Mutex::new(CliState::default())),
             redraw: Arc::new(Notify::new()),
             router,
+            sessions,
         }
     }
 }
@@ -213,7 +235,7 @@ impl Channel for CliChannel {
     }
 
     async fn send(&self, msg: OutboundMessage) -> Result<()> {
-        apply_outbound(&mut self.state.lock().unwrap(), msg.payload);
+        apply_outbound(&self.state, &self.sessions, msg.payload).await?;
         self.redraw.notify_one();
         Ok(())
     }
@@ -379,9 +401,9 @@ impl CliChannel {
         }
         self.redraw.notify_one();
 
-        let msg = InboundMessage::new(
+        let msg = InboundMessage::with_peer(
             self.id.clone(),
-            self.session.clone(),
+            CLI_PEER_ID,
             InboundPayload::UserInput(payload),
         );
         if inbound.send(msg).await.is_err() {
@@ -413,9 +435,9 @@ impl CliChannel {
                 true
             }
             None => {
-                let forwarded = InboundMessage::new(
+                let forwarded = InboundMessage::with_peer(
                     self.id.clone(),
-                    self.session.clone(),
+                    CLI_PEER_ID,
                     InboundPayload::Command(body.to_string()),
                 );
                 inbound.send(forwarded).await.is_ok()
@@ -425,7 +447,33 @@ impl CliChannel {
 }
 
 /// Fold one outbound payload into the UI state.
-fn apply_outbound(state: &mut CliState, payload: OutboundPayload) {
+///
+/// Async because [`OutboundPayload::SessionSwitched`] requires
+/// reading session history off disk before updating the transcript.
+/// All other variants are synchronous over the held lock.
+async fn apply_outbound(
+    state: &Arc<Mutex<CliState>>,
+    sessions: &Arc<session::Manager>,
+    payload: OutboundPayload,
+) -> Result<()> {
+    // SessionSwitched is the only async arm; handle it separately so
+    // the sync arms can hold the `std::sync::Mutex` guard without
+    // ever crossing an `.await` boundary (tokio warns about that,
+    // and it would deadlock if the lock were ever contended from
+    // inside the render task).
+    if let OutboundPayload::SessionSwitched(id) = payload {
+        let records = sessions.load(&id).await?;
+        let mut st = state.lock().unwrap();
+        st.transcript.clear();
+        st.streaming = None;
+        st.mode = Mode::Idle;
+        for record in records {
+            push_record_as_line(&mut st.transcript, record.message);
+        }
+        return Ok(());
+    }
+
+    let mut state = state.lock().unwrap();
     match payload {
         OutboundPayload::ReplyDelta { delta, .. } => {
             state
@@ -454,12 +502,32 @@ fn apply_outbound(state: &mut CliState, payload: OutboundPayload) {
             state.mode = Mode::Idle;
         }
         OutboundPayload::Notice(text) => {
-            // Ambient system message (e.g. /ping → "pong"). Doesn't
-            // end an in-flight reply and doesn't transition mode —
-            // notices can arrive any time without implying a stream
-            // boundary.
+            // Ambient system message (e.g. gateway command feedback).
+            // Doesn't end an in-flight reply and doesn't transition
+            // mode — notices can arrive any time without implying a
+            // stream boundary.
             state.transcript.push(Line::Assistant(text));
         }
+        OutboundPayload::SessionSwitched(_) => {
+            // Handled above. Unreachable by construction.
+        }
+    }
+    Ok(())
+}
+
+/// Project one persisted [`Message`] into the transcript. System
+/// prompts and raw tool exchanges are omitted because they are
+/// internal plumbing — the transcript shows the user-visible
+/// conversation only. An assistant message that carries no text
+/// (only tool calls) is also skipped to avoid empty bubbles.
+fn push_record_as_line(transcript: &mut Vec<Line>, msg: Message) {
+    match msg {
+        Message::User { content } => transcript.push(Line::User(content)),
+        Message::Assistant {
+            content: Some(text),
+            ..
+        } => transcript.push(Line::Assistant(text)),
+        Message::System { .. } | Message::Tool { .. } | Message::Assistant { .. } => {}
     }
 }
 

@@ -1,6 +1,7 @@
 //! Message and identifier types carried on the bus.
 
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 /// UUID-based identifier for a single message on the bus.
@@ -43,7 +44,12 @@ impl Default for SessionID {
 
 /// Human-readable identifier for a channel (for example `"cli"`,
 /// `"tui"`, `"cron"`).
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+///
+/// `#[serde(transparent)]` so session-metadata JSONL stores the
+/// channel as a bare string (`"channel": "tui"`) rather than a
+/// wrapper object.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Deserialize, Serialize)]
+#[serde(transparent)]
 pub struct ChannelID(pub String);
 
 impl ChannelID {
@@ -59,7 +65,16 @@ impl ChannelID {
     }
 }
 
-/// A message flowing from a channel into the agent.
+/// A message flowing from a channel into the gateway.
+///
+/// Carries only **identity** fields — no `SessionID`. The gateway is
+/// the session authority: it derives or looks up the binding between
+/// `(channel, peer, account, guild)` and a concrete `SessionID`
+/// before forwarding the message into the agent loop as a
+/// [`crate::gateway::ResolvedInboundMessage`]. This mirrors the
+/// routing model used in `agent-examples/claw0` — channels know
+/// *who* sent the message, not *which historical session* it belongs
+/// to.
 #[derive(Debug, Clone)]
 pub struct InboundMessage {
     /// Unique identifier, also serves as a stable ordering key.
@@ -68,23 +83,52 @@ pub struct InboundMessage {
     pub timestamp: DateTime<Utc>,
     /// Channel that produced this message.
     pub channel: ChannelID,
-    /// Conversation this message belongs to.
-    pub session: SessionID,
+    /// Platform-specific user identity. CLI fills a constant (there
+    /// is only one user per terminal); future IM channels fill the
+    /// platform-provided user id. `None` means "the channel has no
+    /// meaningful peer concept" (for example: cron, heartbeat).
+    pub peer_id: Option<String>,
+    /// Bot / workspace / account identity on multi-tenant platforms.
+    /// Unused by the CLI; reserved for tier-3 routing (see claw0's
+    /// `BindingTable`).
+    pub account_id: Option<String>,
+    /// Guild / server identity on platforms that group chats into
+    /// guilds (Discord servers, Slack workspaces). Reserved for
+    /// tier-2 routing.
+    pub guild_id: Option<String>,
     /// Variant-specific payload.
     pub payload: InboundPayload,
 }
 
 impl InboundMessage {
     /// Construct an inbound message with a fresh id and timestamp.
+    /// Identity fields beyond `channel` default to `None`; callers
+    /// that know who the peer is should use [`Self::with_peer`].
     #[must_use]
-    pub fn new(channel: ChannelID, session: SessionID, payload: InboundPayload) -> Self {
+    pub fn new(channel: ChannelID, payload: InboundPayload) -> Self {
         Self {
             id: MessageID::new(),
             timestamp: Utc::now(),
             channel,
-            session,
+            peer_id: None,
+            account_id: None,
+            guild_id: None,
             payload,
         }
+    }
+
+    /// Construct an inbound message tagged with a peer identity.
+    /// Used by the CLI channel (peer = a constant representing the
+    /// local user) and future IM channels (peer = platform user id).
+    #[must_use]
+    pub fn with_peer(
+        channel: ChannelID,
+        peer_id: impl Into<String>,
+        payload: InboundPayload,
+    ) -> Self {
+        let mut msg = Self::new(channel, payload);
+        msg.peer_id = Some(peer_id.into());
+        msg
     }
 }
 
@@ -150,6 +194,13 @@ pub enum OutboundPayload {
     Error(String),
     /// Ambient system message from the agent or a command handler —
     /// neither a model reply nor an error. Used for command feedback
-    /// (`/ping` → `"pong"`) and similar non-conversational notices.
+    /// and similar non-conversational notices.
     Notice(String),
+    /// The channel's active session binding has changed (for example
+    /// after `/new` or `/load`). The channel is expected to re-render
+    /// its transcript against the new session — typically by reading
+    /// history from its [`crate::session::Manager`] handle. A
+    /// separate `Notice` is usually sent alongside to explain the
+    /// switch to the user.
+    SessionSwitched(SessionID),
 }

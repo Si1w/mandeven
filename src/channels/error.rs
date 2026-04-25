@@ -16,6 +16,12 @@ pub enum Error {
     /// Propagated from publishing on the bus.
     #[error("bus error: {0}")]
     Bus(#[from] bus::Error),
+
+    /// Propagated when a channel reads session history (for
+    /// example rebuilding its transcript after a gateway-announced
+    /// session switch).
+    #[error("session error: {0}")]
+    Session(#[from] crate::session::Error),
 }
 
 /// Result alias for the `channels` module.

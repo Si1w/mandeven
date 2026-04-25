@@ -36,18 +36,33 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
-use crate::bus::SessionID;
+use crate::bus::{ChannelID, SessionID};
 use crate::llm::Message;
 
 /// Marker emitted on the metadata line's `_type` field.
 const METADATA_MARKER: &str = "metadata";
 
 /// Session-level metadata stored as the first line of the file.
+///
+/// Schema note: the `channel` field is non-optional — every session
+/// must record which channel produced it, so `/list`-style commands
+/// can filter accurately once multiple channels coexist. Session
+/// files written before this field was introduced will fail to
+/// parse; callers are expected to delete them (the `sessions/`
+/// directory is gitignored and holds only local state).
+//
+// TODO(multi-peer):   peer_id:  Option<String>
+// TODO(multi-agent):  agent_id: Option<String>
+// TODO(compaction):   summary:  Option<String>, last_consolidated: usize
+// TODO(tagging):      tags:     Vec<String>
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Metadata {
     /// Human-readable title, typically generated from the first user
     /// query by the agent.
     pub title: String,
+    /// Channel that produced this session. Used by the gateway's
+    /// `/list` to scope output to a single channel's sessions.
+    pub channel: ChannelID,
     /// When the session was first created.
     pub created_at: DateTime<Utc>,
     /// When the session was last modified (bumped on every append).
@@ -113,14 +128,15 @@ impl Manager {
         })
     }
 
-    /// Write a fresh session file with the given title and no
-    /// messages. Overwrites any existing file for the same id.
+    /// Write a fresh session file with the given title, originating
+    /// channel, and no messages. Overwrites any existing file for
+    /// the same id.
     ///
     /// # Errors
     ///
     /// Returns [`Error::Io`] or [`Error::Json`] on filesystem or
     /// serialization failure.
-    pub async fn create(&self, id: &SessionID, title: String) -> Result<()> {
+    pub async fn create(&self, id: &SessionID, title: String, channel: ChannelID) -> Result<()> {
         let lock = self.lock_for(id).await;
         let _guard = lock.lock().await;
 
@@ -128,6 +144,7 @@ impl Manager {
         let state = State {
             metadata: Metadata {
                 title,
+                channel,
                 created_at: now,
                 updated_at: now,
             },

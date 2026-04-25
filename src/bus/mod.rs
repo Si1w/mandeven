@@ -59,6 +59,14 @@ impl<T> Sender<T> {
     pub async fn send(&self, msg: T) -> Result<()> {
         self.tx.send(msg).await.map_err(|_| Error::Closed)
     }
+
+    /// Wrap a raw `tokio::mpsc::Sender` in the crate's thin
+    /// directional newtype. Crate-internal because the wrapping is
+    /// an implementation detail — external callers always get a
+    /// `Sender` already typed for a specific direction.
+    pub(crate) fn from_raw(tx: mpsc::Sender<T>) -> Self {
+        Self { tx }
+    }
 }
 
 impl<T> Receiver<T> {
@@ -68,6 +76,12 @@ impl<T> Receiver<T> {
     /// direction have been dropped), signalling end-of-stream.
     pub async fn recv(&mut self) -> Option<T> {
         self.rx.recv().await
+    }
+
+    /// Wrap a raw `tokio::mpsc::Receiver` in the crate's thin
+    /// directional newtype. Counterpart to [`Sender::from_raw`].
+    pub(crate) fn from_raw(rx: mpsc::Receiver<T>) -> Self {
+        Self { rx }
     }
 }
 

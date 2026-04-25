@@ -6,6 +6,7 @@
 //! extending [`client_for`], and appending the new name to
 //! [`REGISTERED`].
 
+pub mod deepseek;
 pub mod mistral;
 
 use std::sync::Arc;
@@ -19,7 +20,7 @@ use super::client::BaseLLMClient;
 /// (notably the interactive bootstrap in `config::bootstrap`) reads
 /// this list to enumerate provider choices without hard-coding a
 /// specific name.
-pub const REGISTERED: &[&str] = &["mistral"];
+pub const REGISTERED: &[&str] = &["mistral", "deepseek"];
 
 /// Return a shared client instance for the given provider name.
 ///
@@ -29,6 +30,7 @@ pub const REGISTERED: &[&str] = &["mistral"];
 pub fn client_for(name: &str) -> Option<Arc<dyn BaseLLMClient>> {
     match name {
         "mistral" => Some(Arc::new(mistral::Mistral::new())),
+        "deepseek" => Some(Arc::new(deepseek::DeepSeek::new())),
         _ => None,
     }
 }

@@ -29,6 +29,12 @@ pub struct CallOutcome {
     /// Text accumulated from the stream; empty if the model only
     /// invoked tools without emitting any text.
     pub content: String,
+    /// Reasoning trace accumulated from the stream when the call
+    /// asked for thinking and the provider supports it. Stored on
+    /// the persisted `Message::Assistant` so subsequent turns can
+    /// replay it back to the API (`DeepSeek` requires this on tool
+    /// turns).
+    pub thinking: Option<String>,
     /// Tool invocations emitted by this call, if any.
     pub tool_calls: Option<Vec<ToolCall>>,
     /// Why the model stopped (`FinishReason::ToolCalls` for

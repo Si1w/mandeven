@@ -71,6 +71,14 @@ pub enum Line {
     /// [`OutboundPayload::ReplyDelta`] and
     /// [`OutboundPayload::ReplyEnd`].
     Assistant(String),
+    /// Reasoning trace from a thinking-capable model, finalized after
+    /// the same `ReplyEnd` that closes its paired `Assistant` entry.
+    /// Rendered dimmed inline above the assistant reply.
+    //
+    // TODO(reasoning-folding): expose `/show-reasoning` or similar so
+    // the user can toggle visibility per-turn or globally — the TUI
+    // currently always renders the full trace inline.
+    Thinking(String),
     /// Error surfaced via the bus, a tool failure, or an unknown
     /// slash command.
     Error(String),
@@ -100,6 +108,10 @@ pub struct CliState {
     pub transcript: Vec<Line>,
     /// Streaming assistant content in progress.
     pub streaming: Option<String>,
+    /// Streaming chain-of-thought in progress, fed by
+    /// [`OutboundPayload::ThinkingDelta`]. Rendered above the in-flight
+    /// `streaming` reply, dimmed.
+    pub streaming_thinking: Option<String>,
     /// What the user is currently typing. Backed by
     /// [`TextArea`] for proper cursor + editing behavior.
     pub input: TextArea<'static>,
@@ -132,6 +144,7 @@ impl Default for CliState {
         Self {
             transcript: Vec::new(),
             streaming: None,
+            streaming_thinking: None,
             input,
             mode: Mode::default(),
             overlay: None,
@@ -478,6 +491,12 @@ async fn apply_outbound(
 
     let mut state = state.lock().unwrap();
     match payload {
+        OutboundPayload::ThinkingDelta { delta, .. } => {
+            state
+                .streaming_thinking
+                .get_or_insert_with(String::new)
+                .push_str(&delta);
+        }
         OutboundPayload::ReplyDelta { delta, .. } => {
             state
                 .streaming
@@ -485,12 +504,18 @@ async fn apply_outbound(
                 .push_str(&delta);
         }
         OutboundPayload::ReplyEnd { .. } => {
+            if let Some(thinking) = state.streaming_thinking.take() {
+                state.transcript.push(Line::Thinking(thinking));
+            }
             if let Some(content) = state.streaming.take() {
                 state.transcript.push(Line::Assistant(content));
             }
             state.mode = Mode::Idle;
         }
         OutboundPayload::Reply(text) => {
+            if let Some(thinking) = state.streaming_thinking.take() {
+                state.transcript.push(Line::Thinking(thinking));
+            }
             if let Some(content) = state.streaming.take() {
                 state.transcript.push(Line::Assistant(content));
             }
@@ -498,6 +523,9 @@ async fn apply_outbound(
             state.mode = Mode::Idle;
         }
         OutboundPayload::Error(err) => {
+            if let Some(thinking) = state.streaming_thinking.take() {
+                state.transcript.push(Line::Thinking(thinking));
+            }
             if let Some(content) = state.streaming.take() {
                 state.transcript.push(Line::Assistant(content));
             }
@@ -527,10 +555,16 @@ fn push_record_as_line(transcript: &mut Vec<Line>, msg: Message) {
     match msg {
         Message::User { content } => transcript.push(Line::User(content)),
         Message::Assistant {
-            content: Some(text),
-            ..
-        } => transcript.push(Line::Assistant(text)),
-        Message::System { .. } | Message::Tool { .. } | Message::Assistant { .. } => {}
+            content, reasoning, ..
+        } => {
+            if let Some(thinking) = reasoning {
+                transcript.push(Line::Thinking(thinking));
+            }
+            if let Some(text) = content {
+                transcript.push(Line::Assistant(text));
+            }
+        }
+        Message::System { .. } | Message::Tool { .. } => {}
     }
 }
 

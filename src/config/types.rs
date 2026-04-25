@@ -130,4 +130,12 @@ pub struct LLMProfile {
     /// Sampling temperature. Valid range: `[0.0, 2.0]`. `None` lets
     /// the provider apply its own default.
     pub temperature: Option<f32>,
+
+    /// Whether to ask the model for its chain-of-thought trace.
+    /// `None` leaves the field unset and lets the provider apply its
+    /// per-model default (`DeepSeek` defaults `extra_body.thinking`
+    /// to `enabled` on thinking-capable models). Set `Some(true)` to
+    /// force-enable, `Some(false)` to force-disable. Providers
+    /// without thinking support ignore the field entirely.
+    pub thinking: Option<bool>,
 }

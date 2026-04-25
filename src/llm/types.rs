@@ -42,6 +42,19 @@ pub enum Message {
         /// Tool invocations, if any.
         #[serde(skip_serializing_if = "Option::is_none")]
         tool_calls: Option<Vec<ToolCall>>,
+        /// Chain-of-thought trace from a reasoning-capable model
+        /// (`DeepSeek`'s `reasoning_content`, Anthropic's thinking
+        /// blocks, `OpenAI` o-series reasoning, …). Always `None` for
+        /// providers that do not surface reasoning.
+        ///
+        /// **Must be preserved across turns** when the message also
+        /// contains `tool_calls` — `DeepSeek` requires the exact
+        /// `reasoning_content` to be replayed in subsequent requests
+        /// or it returns 400. Storing it on the assistant message is
+        /// what makes [`crate::session`] persistence + agent replay
+        /// transparently correct.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reasoning: Option<String>,
     },
     /// Reply to an earlier [`Self::Assistant`] tool invocation.
     Tool {
@@ -67,7 +80,7 @@ impl Message {
 
 /// JSON-Schema-described function tool advertised to the model.
 ///
-/// Flat shape: the OpenAI-style `{type:"function", function:{...}}`
+/// Flat shape: the `OpenAI`-style `{type:"function", function:{...}}`
 /// wrapper is provider-specific and applied at serialization time by
 /// the provider implementation (see [`super::providers`]).
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -113,6 +126,45 @@ pub struct ToolCallDelta {
     pub arguments: Option<String>,
 }
 
+/// Optional effort hint inside a [`Thinking`] block.
+///
+/// The field name `reasoning_effort` matches `OpenAI` o-series and the
+/// equivalent knob in openclaw / `DeepSeek`'s Anthropic-format
+/// `output_config.effort`. The `OpenAI`-format `DeepSeek` endpoint has
+/// no effort knob, so providers using that wire format drop the hint
+/// on serialize. `None` lets the provider pick its default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReasoningEffort {
+    Low,
+    High,
+    Max,
+}
+
+/// Thinking-mode configuration for one request.
+///
+/// Field shape mirrors `DeepSeek`'s `extra_body.thinking` block: an
+/// explicit on/off switch (`enabled`) plus an optional effort level.
+/// Carrying it as `Option<Thinking>` on [`Request`] gives three
+/// distinct call sites:
+///
+/// - `None` — caller has no opinion; the provider uses its default
+///   for the model in question (some models default to thinking on,
+///   some to off).
+/// - `Some(Thinking { enabled: false, .. })` — explicitly disable on
+///   a model that would otherwise think.
+/// - `Some(Thinking { enabled: true, .. })` — explicitly enable on a
+///   model that would otherwise stay silent.
+///
+/// Providers that don't support thinking ignore the field entirely —
+/// the resulting [`Response::thinking`] will simply be `None`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Thinking {
+    /// Whether to request a thinking trace.
+    pub enabled: bool,
+    /// Optional effort level. See [`ReasoningEffort`].
+    pub reasoning_effort: Option<ReasoningEffort>,
+}
+
 /// A completion request.
 ///
 /// Provider and profile resolution is the caller's job; this struct
@@ -137,6 +189,9 @@ pub struct Request {
     /// Per-request HTTP timeout in seconds. `None` disables the local
     /// timeout; the request then runs until the remote closes.
     pub timeout_secs: Option<u64>,
+    /// Thinking-mode configuration. `None` means "leave the field
+    /// unset and let the provider's per-model default apply".
+    pub thinking: Option<Thinking>,
 }
 
 /// Non-streaming completion response.
@@ -150,6 +205,11 @@ pub struct Response {
     pub usage: Usage,
     /// Why the model stopped producing tokens.
     pub finish_reason: FinishReason,
+    /// Chain-of-thought trace, when the provider emitted one and the
+    /// caller asked for it via [`Request::thinking`]. `None` for
+    /// providers that don't support thinking, for non-thinking calls,
+    /// and for thinking calls that simply produced no reasoning.
+    pub thinking: Option<String>,
 }
 
 /// One incremental chunk in a streaming response.
@@ -158,6 +218,10 @@ pub struct StreamChunk {
     /// Incremental text fragment; `None` on chunks that carry only
     /// finish metadata.
     pub content_delta: Option<String>,
+    /// Incremental thinking-trace fragment from a reasoning-capable
+    /// provider. Wire-mapped from `delta.reasoning_content` for
+    /// `DeepSeek`; always `None` for providers without thinking.
+    pub thinking_delta: Option<String>,
     /// Per-tool-call partial updates, if present in this chunk.
     pub tool_call_deltas: Option<Vec<ToolCallDelta>>,
     /// Populated only on the final chunk.

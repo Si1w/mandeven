@@ -104,6 +104,9 @@ impl BaseLLMClient for Mistral {
                 .message
                 .tool_calls
                 .map(|calls| calls.into_iter().map(ToolCall::from).collect()),
+            // Mistral has no thinking-mode capability; reasoning is
+            // always absent in their wire response.
+            thinking: None,
             usage: Usage {
                 prompt_tokens: wire.usage.prompt,
                 completion_tokens: wire.usage.completion,
@@ -208,6 +211,9 @@ fn convert_stream_chunk(wire: WireStreamChunk) -> StreamChunk {
     });
     StreamChunk {
         content_delta,
+        // Mistral has no thinking-mode capability; thinking_delta is
+        // always None on this wire path.
+        thinking_delta: None,
         tool_call_deltas,
         finish_reason,
         usage,
@@ -288,9 +294,12 @@ impl<'a> From<&'a Message> for WireReqMessage<'a> {
         match m {
             Message::System { content } => WireReqMessage::System { content },
             Message::User { content } => WireReqMessage::User { content },
+            // Mistral wire format has no slot for `reasoning`; the
+            // field is dropped on serialize.
             Message::Assistant {
                 content,
                 tool_calls,
+                reasoning: _,
             } => WireReqMessage::Assistant {
                 content: content.as_deref(),
                 tool_calls: tool_calls

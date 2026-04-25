@@ -16,6 +16,6 @@ mod utils;
 pub use client::BaseLLMClient;
 pub use error::{Error, Result};
 pub use types::{
-    FinishReason, Message, Request, Response, ResponseStream, Role, StreamChunk, Tool, ToolCall,
-    ToolCallDelta, Usage,
+    FinishReason, Message, ReasoningEffort, Request, Response, ResponseStream, Role, StreamChunk,
+    Thinking, Tool, ToolCall, ToolCallDelta, Usage,
 };

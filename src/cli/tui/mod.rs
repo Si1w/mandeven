@@ -174,12 +174,20 @@ fn count_logical_lines(state: &CliState) -> usize {
             count += 1; // blank separator
         }
         count += match entry {
-            TranscriptLine::User(t) | TranscriptLine::Error(t) => t.matches('\n').count() + 1,
+            TranscriptLine::User(t) | TranscriptLine::Error(t) | TranscriptLine::Thinking(t) => {
+                t.matches('\n').count() + 1
+            }
             TranscriptLine::Assistant(t) => markdown::Engine::line_count(t),
         };
     }
-    if let Some(stream) = &state.streaming {
+    if let Some(thinking) = &state.streaming_thinking {
         if !state.transcript.is_empty() {
+            count += 1;
+        }
+        count += thinking.matches('\n').count() + 1;
+    }
+    if let Some(stream) = &state.streaming {
+        if !state.transcript.is_empty() || state.streaming_thinking.is_some() {
             count += 1;
         }
         count += markdown::Engine::line_count(stream);
@@ -333,8 +341,14 @@ fn build_transcript(state: &CliState) -> Text<'_> {
         append_transcript_entry(&mut lines, entry);
     }
 
-    if let Some(stream) = &state.streaming {
+    if let Some(thinking) = &state.streaming_thinking {
         if !state.transcript.is_empty() {
+            lines.push(Line::raw(""));
+        }
+        append_thinking_lines(&mut lines, thinking);
+    }
+    if let Some(stream) = &state.streaming {
+        if !state.transcript.is_empty() || state.streaming_thinking.is_some() {
             lines.push(Line::raw(""));
         }
         append_assistant_lines(&mut lines, stream);
@@ -347,7 +361,22 @@ fn append_transcript_entry<'a>(lines: &mut Vec<Line<'a>>, entry: &'a TranscriptL
     match entry {
         TranscriptLine::User(text) => append_user_lines(lines, text),
         TranscriptLine::Assistant(text) => append_assistant_lines(lines, text),
+        TranscriptLine::Thinking(text) => append_thinking_lines(lines, text),
         TranscriptLine::Error(text) => append_error_lines(lines, text),
+    }
+}
+
+fn append_thinking_lines<'a>(lines: &mut Vec<Line<'a>>, text: &'a str) {
+    for (i, line) in text.split('\n').enumerate() {
+        let prefix = if i == 0 {
+            "  thinking · "
+        } else {
+            "             "
+        };
+        lines.push(Line::from(vec![
+            Span::styled(prefix, dim_style().add_modifier(Modifier::ITALIC)),
+            Span::styled(line, dim_style().add_modifier(Modifier::ITALIC)),
+        ]));
     }
 }
 

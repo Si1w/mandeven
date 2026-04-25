@@ -11,7 +11,8 @@ use serde::{Deserialize, Serialize};
 use crate::llm::client::BaseLLMClient;
 use crate::llm::error::{Error, Result};
 use crate::llm::types::{
-    Message, Request, Response, ResponseStream, StreamChunk, Tool, ToolCall, ToolCallDelta, Usage,
+    Message, Request, Response, ResponseStream, StreamChunk, Thinking, Tool, ToolCall,
+    ToolCallDelta, Usage,
 };
 use crate::llm::utils::parse_finish_reason;
 
@@ -70,6 +71,7 @@ impl BaseLLMClient for DeepSeek {
             tools: &tools,
             max_tokens: req.max_tokens,
             temperature: req.temperature,
+            thinking: req.thinking.map(WireThinking::from),
         };
 
         let mut builder = self
@@ -104,6 +106,7 @@ impl BaseLLMClient for DeepSeek {
                 .message
                 .tool_calls
                 .map(|calls| calls.into_iter().map(ToolCall::from).collect()),
+            thinking: first.message.reasoning_content,
             usage: Usage {
                 prompt_tokens: wire.usage.prompt,
                 completion_tokens: wire.usage.completion,
@@ -125,6 +128,7 @@ impl BaseLLMClient for DeepSeek {
             tools: &tools,
             max_tokens: req.max_tokens,
             temperature: req.temperature,
+            thinking: req.thinking.map(WireThinking::from),
             stream: true,
             stream_options: StreamOptions {
                 include_usage: true,
@@ -190,17 +194,23 @@ fn chunks(resp: reqwest::Response) -> ResponseStream {
 
 /// Map a wire chunk into the public [`StreamChunk`] shape.
 fn convert_stream_chunk(wire: WireStreamChunk) -> StreamChunk {
-    let (content_delta, tool_call_deltas, finish_reason) = match wire.choices.into_iter().next() {
-        Some(c) => {
-            let finish = c.finish_reason.as_deref().map(parse_finish_reason);
-            let tool_deltas = c
-                .delta
-                .tool_calls
-                .map(|deltas| deltas.into_iter().map(ToolCallDelta::from).collect());
-            (c.delta.content, tool_deltas, finish)
-        }
-        None => (None, None, None),
-    };
+    let (content_delta, thinking_delta, tool_call_deltas, finish_reason) =
+        match wire.choices.into_iter().next() {
+            Some(c) => {
+                let finish = c.finish_reason.as_deref().map(parse_finish_reason);
+                let tool_deltas = c
+                    .delta
+                    .tool_calls
+                    .map(|deltas| deltas.into_iter().map(ToolCallDelta::from).collect());
+                (
+                    c.delta.content,
+                    c.delta.reasoning_content,
+                    tool_deltas,
+                    finish,
+                )
+            }
+            None => (None, None, None, None),
+        };
     let usage = wire.usage.map(|u| Usage {
         prompt_tokens: u.prompt,
         completion_tokens: u.completion,
@@ -208,6 +218,7 @@ fn convert_stream_chunk(wire: WireStreamChunk) -> StreamChunk {
     });
     StreamChunk {
         content_delta,
+        thinking_delta,
         tool_call_deltas,
         finish_reason,
         usage,
@@ -238,6 +249,11 @@ struct WireRequest<'a> {
     max_tokens: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     temperature: Option<f32>,
+    /// Surfaces as `extra_body.thinking` on the OpenAI-compatible
+    /// endpoint. `None` omits the block so the model uses its
+    /// default behavior.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thinking: Option<WireThinking>,
 }
 
 #[derive(Serialize)]
@@ -250,8 +266,30 @@ struct WireStreamRequest<'a> {
     max_tokens: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     temperature: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thinking: Option<WireThinking>,
     stream: bool,
     stream_options: StreamOptions,
+}
+
+/// Wire shape of `extra_body.thinking` on the `OpenAI`-format
+/// `DeepSeek` endpoint. `type` is the only field `DeepSeek` currently
+/// honors here; the Anthropic-format endpoint's `output_config.effort`
+/// would need a different wire struct on a different request path,
+/// so [`crate::llm::types::ReasoningEffort`] is dropped on serialize
+/// for this provider.
+#[derive(Serialize)]
+struct WireThinking {
+    #[serde(rename = "type")]
+    kind: &'static str,
+}
+
+impl From<Thinking> for WireThinking {
+    fn from(t: Thinking) -> Self {
+        Self {
+            kind: if t.enabled { "enabled" } else { "disabled" },
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -276,6 +314,12 @@ enum WireReqMessage<'a> {
         content: Option<&'a str>,
         #[serde(skip_serializing_if = "Option::is_none")]
         tool_calls: Option<Vec<WireReqToolCall<'a>>>,
+        /// `DeepSeek` requires the prior turn's `reasoning_content` to
+        /// be replayed when that turn included tool calls; omitting
+        /// it produces a 400. We always replay when present (cheap
+        /// and harmless on non-tool turns).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        reasoning_content: Option<&'a str>,
     },
     Tool {
         content: &'a str,
@@ -291,11 +335,13 @@ impl<'a> From<&'a Message> for WireReqMessage<'a> {
             Message::Assistant {
                 content,
                 tool_calls,
+                reasoning,
             } => WireReqMessage::Assistant {
                 content: content.as_deref(),
                 tool_calls: tool_calls
                     .as_ref()
                     .map(|calls| calls.iter().map(WireReqToolCall::from).collect()),
+                reasoning_content: reasoning.as_deref(),
             },
             Message::Tool {
                 content,
@@ -379,6 +425,8 @@ struct WireAssistantMessage {
     content: Option<String>,
     #[serde(default)]
     tool_calls: Option<Vec<WireRespToolCall>>,
+    #[serde(default)]
+    reasoning_content: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -418,6 +466,8 @@ struct WireStreamChoice {
 #[derive(Deserialize)]
 struct WireDelta {
     content: Option<String>,
+    #[serde(default)]
+    reasoning_content: Option<String>,
     #[serde(default)]
     tool_calls: Option<Vec<WireDeltaToolCall>>,
 }

@@ -195,6 +195,7 @@ mod tests {
                 max_context_window: 128_000,
                 max_tokens: Some(2048),
                 temperature: None,
+                thinking: Some(true),
             },
         );
         let mut providers = HashMap::new();

@@ -186,6 +186,16 @@ pub enum OutboundPayload {
         /// Incremental text fragment.
         delta: String,
     },
+    /// Streaming chain-of-thought fragment from a thinking-capable
+    /// model. Shares its `stream_id` with the matching
+    /// [`Self::ReplyDelta`] sequence so a channel can group both
+    /// streams under the same turn.
+    ThinkingDelta {
+        /// Same `stream_id` as the matching `ReplyDelta` / `ReplyEnd`.
+        stream_id: Uuid,
+        /// Incremental reasoning fragment.
+        delta: String,
+    },
     /// End marker for a streaming response.
     ReplyEnd {
         /// Identifier of the finished stream; matches its deltas.

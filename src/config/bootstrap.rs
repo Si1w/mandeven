@@ -65,6 +65,10 @@ pub(super) fn interactive() -> Result<AppConfig> {
         max_context_window,
         max_tokens,
         temperature,
+        // Bootstrap doesn't prompt for `thinking`: it's a niche
+        // knob that only matters on a subset of providers. Users
+        // who want it edit `mandeven.toml` after first run.
+        thinking: None,
     };
     let mut models = HashMap::new();
     models.insert(profile_alias.clone(), profile);

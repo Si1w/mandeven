@@ -36,7 +36,7 @@ use crate::config::{AgentConfig, AppConfig, LLMProfile};
 use crate::gateway::{ActiveSessions, DispatchReceiver, InboundDispatch};
 use crate::heartbeat::{HeartbeatEngine, HeartbeatTick};
 use crate::llm::{
-    self, BaseLLMClient, FinishReason, Message, Request, ResponseStream, ToolCall, Usage,
+    self, BaseLLMClient, FinishReason, Message, Request, ResponseStream, Thinking, ToolCall, Usage,
 };
 use crate::session;
 use crate::tools;
@@ -364,6 +364,13 @@ impl Agent {
             // generation comment for the reasoning.
             temperature: None,
             timeout_secs: self.timeout_secs,
+            // Phase-1 is a structured tool call; the reasoning trace
+            // would be discarded anyway. Leave thinking off so even
+            // a thinking-capable model returns just the tool call.
+            thinking: Some(Thinking {
+                enabled: false,
+                reasoning_effort: None,
+            }),
         };
 
         let response = self.client.complete(request).await?;
@@ -446,6 +453,7 @@ impl Agent {
             let outcome = self.call(iter, messages).await?;
             let CallOutcome {
                 content,
+                thinking,
                 tool_calls,
                 ..
             } = outcome;
@@ -456,6 +464,7 @@ impl Agent {
                     Message::Assistant {
                         content: (!content.is_empty()).then_some(content),
                         tool_calls: tool_calls.clone(),
+                        reasoning: thinking,
                     },
                 )
                 .await?;
@@ -494,12 +503,23 @@ impl Agent {
     ) -> Result<CallOutcome> {
         let stream_id = Uuid::now_v7();
         let mut content = String::new();
+        let mut thinking = String::new();
         let mut partial: HashMap<u32, PartialToolCall> = HashMap::new();
         let mut finish_reason: Option<FinishReason> = None;
         let mut usage: Option<Usage> = None;
 
         while let Some(chunk) = src.next().await {
             let chunk = chunk?;
+
+            if let Some(delta) = chunk.thinking_delta {
+                thinking.push_str(&delta);
+                let msg = OutboundMessage::new(
+                    iter.channel.clone(),
+                    iter.session.clone(),
+                    OutboundPayload::ThinkingDelta { stream_id, delta },
+                );
+                self.out.send(msg).await?;
+            }
 
             if let Some(delta) = chunk.content_delta {
                 content.push_str(&delta);
@@ -543,6 +563,7 @@ impl Agent {
 
         Ok(CallOutcome {
             content,
+            thinking: (!thinking.is_empty()).then_some(thinking),
             tool_calls: materialize_tool_calls(partial)?,
             finish_reason: finish_reason.unwrap_or(FinishReason::Stop),
             usage,
@@ -608,6 +629,20 @@ impl Agent {
     /// from the shared [`crate::config::LLMConfig::timeout_secs`] rather
     /// than the per-profile block.
     fn build_request(&self, messages: Vec<Message>) -> Request {
+        // Translate the per-profile `thinking: Option<bool>` knob
+        // into a wire-shape `Option<Thinking>`:
+        //
+        // - `None`        → leave `extra_body.thinking` unset; the
+        //                   provider applies its per-model default
+        //                   (DeepSeek's docs: thinking-capable models
+        //                   default to `enabled`).
+        // - `Some(true)`  → explicit enable.
+        // - `Some(false)` → explicit disable on a model that would
+        //                   otherwise think (avoids surprise cost).
+        let thinking = self.profile.thinking.map(|enabled| Thinking {
+            enabled,
+            reasoning_effort: None,
+        });
         Request {
             messages,
             tools: self.tools.schemas(),
@@ -615,6 +650,7 @@ impl Agent {
             max_tokens: self.profile.max_tokens,
             temperature: self.profile.temperature,
             timeout_secs: self.timeout_secs,
+            thinking,
         }
     }
 }

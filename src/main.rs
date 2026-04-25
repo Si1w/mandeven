@@ -58,7 +58,7 @@ async fn main() -> Result<(), DynError> {
 
     let heartbeat_wiring = if cfg.agent.heartbeat.enabled {
         let data_dir = cfg.data_dir();
-        let (engine, rx) = HeartbeatEngine::new(cfg.agent.heartbeat.clone(), &data_dir);
+        let (engine, rx) = HeartbeatEngine::new(&cfg.agent.heartbeat, &data_dir);
         let engine = Arc::new(engine);
         engine.start();
         Some(HeartbeatWiring { engine, rx })

@@ -18,8 +18,6 @@ pub mod engine;
 
 pub use engine::{HeartbeatEngine, HeartbeatStatus, HeartbeatTick};
 
-use std::path::PathBuf;
-
 use serde::{Deserialize, Serialize};
 
 /// Default tick period in seconds (30 minutes), aligned with both
@@ -27,9 +25,12 @@ use serde::{Deserialize, Serialize};
 /// `agents.defaults.heartbeat.every: "30m"` default.
 const DEFAULT_INTERVAL_SECS: u64 = 1800;
 
-/// Default prompt-file name resolved relative to the workspace root,
-/// matching nanobot / openclaw's `HEARTBEAT.md` convention.
-const DEFAULT_PROMPT_FILE: &str = "HEARTBEAT.md";
+/// Well-known filename for the heartbeat checklist, resolved against
+/// [`crate::config::AppConfig::data_dir`] (the directory holding
+/// `mandeven.toml`). Matches nanobot / openclaw's `HEARTBEAT.md`
+/// convention; not user-configurable on purpose — same status as
+/// `CLAUDE.md` / `README.md`.
+pub const HEARTBEAT_FILENAME: &str = "HEARTBEAT.md";
 
 /// User-tunable knobs for the heartbeat engine.
 ///
@@ -62,14 +63,10 @@ pub struct HeartbeatConfig {
     /// `mandeven.toml`.
     #[serde(default = "default_interval_secs")]
     pub interval_secs: u64,
-
-    /// Path of the prompt source, resolved against the workspace root
-    /// ([`crate::config::AppConfig::data_dir`]). The file's contents
-    /// become the phase-2 user message. A missing or effectively-empty
-    /// file causes the tick to be skipped (matches openclaw's
-    /// `reason=empty-heartbeat-file` behavior).
-    #[serde(default = "default_prompt_file")]
-    pub prompt_file: PathBuf,
+    //
+    // The heartbeat prompt source is fixed at [`HEARTBEAT_FILENAME`]
+    // (next to `mandeven.toml`). Treated as a well-known file rather
+    // than a config field — same precedent as `CLAUDE.md` / `README.md`.
     //
     // TODO(model-override): phase-1 (decide tool) and phase-2 (full
     // iteration) currently both reuse the agent's main `[llm.default]`
@@ -94,7 +91,6 @@ impl Default for HeartbeatConfig {
         Self {
             enabled: default_enabled(),
             interval_secs: default_interval_secs(),
-            prompt_file: default_prompt_file(),
         }
     }
 }
@@ -105,8 +101,4 @@ fn default_enabled() -> bool {
 
 fn default_interval_secs() -> u64 {
     DEFAULT_INTERVAL_SECS
-}
-
-fn default_prompt_file() -> PathBuf {
-    PathBuf::from(DEFAULT_PROMPT_FILE)
 }

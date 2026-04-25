@@ -32,7 +32,7 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio::time::sleep;
 
-use super::HeartbeatConfig;
+use super::{HEARTBEAT_FILENAME, HeartbeatConfig};
 
 /// Capacity of the engine → agent tick queue. Ticks are rare events
 /// (default 30-minute period); a tiny buffer is plenty and any
@@ -104,7 +104,10 @@ impl HeartbeatEngine {
     /// receiver half goes to the agent loop, which races it against
     /// its inbound dispatch queue.
     #[must_use]
-    pub fn new(config: HeartbeatConfig, workspace: &Path) -> (Self, mpsc::Receiver<HeartbeatTick>) {
+    pub fn new(
+        config: &HeartbeatConfig,
+        workspace: &Path,
+    ) -> (Self, mpsc::Receiver<HeartbeatTick>) {
         let (tick_tx, tick_rx) = mpsc::channel(TICK_QUEUE_CAPACITY);
         let state = EngineState {
             interval: Duration::from_secs(config.interval_secs),
@@ -117,7 +120,9 @@ impl HeartbeatEngine {
         let engine = Self {
             state: Arc::new(Mutex::new(state)),
             wake: Arc::new(Notify::new()),
-            workspace: workspace.join(config.prompt_file),
+            // Resolve the well-known prompt file once at
+            // construction time, against the agent's data directory.
+            workspace: workspace.join(HEARTBEAT_FILENAME),
             tick_tx,
         };
         (engine, tick_rx)
@@ -305,9 +310,8 @@ mod tests {
         let cfg = HeartbeatConfig {
             enabled,
             interval_secs,
-            prompt_file: PathBuf::from("HEARTBEAT.md"),
         };
-        let (engine, _rx) = HeartbeatEngine::new(cfg, Path::new("/tmp"));
+        let (engine, _rx) = HeartbeatEngine::new(&cfg, Path::new("/tmp"));
         Arc::new(engine)
     }
 

@@ -25,7 +25,6 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use chrono::Utc;
 use futures::StreamExt;
 use uuid::Uuid;
 
@@ -765,7 +764,6 @@ impl Agent {
     /// prompts and must not see the iteration system block.
     fn prepend_iteration_system(&self, mut messages: Vec<Message>) -> Vec<Message> {
         let ctx = PromptContext {
-            now: Utc::now(),
             model_id: &self.profile.model_name,
             cwd: &self.cwd,
         };

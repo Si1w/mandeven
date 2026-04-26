@@ -1,30 +1,30 @@
-//! Boot-time and per-call context that fills the volatile tail of an
+//! Boot-time and per-call content that fills the dynamic tail of an
 //! assembled [`crate::prompt::SystemPrompt`].
 //!
 //! Two distinct flavors of "context" — kept in one module because
-//! they share the same architectural slot (everything in here goes
-//! AFTER the cached static block):
+//! they share the same architectural slot (everything in here is
+//! emitted AFTER the static template block):
 //!
 //! 1. **Boot-time** — `AGENTS.md`, read once by
 //!    [`crate::prompt::PromptEngine::load`] and kept in memory for
-//!    the lifetime of the engine. Stable for the run, so it could
-//!    arguably be cached, but is marked `cache_break: true` because
-//!    the future `/reload-prompt` path will swap the in-memory copy
-//!    without invalidating individual sections.
-//! 2. **Per-call** — `env_info` (current time, model id, cwd). Always
-//!    `cache_break: true` because `now` mutates every call.
+//!    the lifetime of the engine.
+//! 2. **Run-stable** — `env_info` (model id, cwd). Computed each call
+//!    from arguments, but the inputs do not change for a given run,
+//!    so the rendered bytes go through [`crate::prompt::SectionCache`]
+//!    and are byte-stable.
 //!
 //! Mirrors Claude Code's split between
 //! [`getUserContext`](agent-examples/claude-code-analysis/src/context.ts#L155)
 //! (CLAUDE.md + currentDate) and
 //! [`getSystemContext`](agent-examples/claude-code-analysis/src/context.ts#L116)
 //! (git status + cache breaker), simplified to what mandeven needs
-//! today.
+//! today. Notably we do **not** carry a current-time field — Claude
+//! Code keeps it in a separate `userContext` channel that is also
+//! memoized to date-only granularity, but mandeven defers the
+//! feature entirely until a concrete need appears.
 
 use std::fs;
 use std::path::Path;
-
-use chrono::{DateTime, Utc};
 
 use super::error::{Error, Result};
 use super::section::Section;
@@ -62,12 +62,9 @@ pub fn load_agents_md(data_dir: &Path) -> Result<Option<String>> {
     }
 }
 
-/// Wrap `AGENTS.md` content in a [`Section`].
-///
-/// Uses `cache_break: true` so the future `/reload-prompt` path can
-/// swap [`crate::prompt::PromptEngine`]'s in-memory copy without
-/// also invalidating the [`crate::prompt::SectionCache`] — see the
-/// module docstring for the broader reasoning.
+/// Wrap `AGENTS.md` content in a [`Section`] under a fixed Markdown
+/// header so the model can tell instructions apart from the rest of
+/// the prompt.
 #[must_use]
 pub fn agents_md_section(content: &str) -> Section {
     Section {
@@ -76,27 +73,24 @@ pub fn agents_md_section(content: &str) -> Section {
             "# Project Instructions (AGENTS.md)\n\n{}",
             content.trim_end()
         ),
-        cache_break: true,
     }
 }
 
-/// Build the `env_info` section: current time, model id, cwd.
+/// Build the `env_info` section: model id and working directory.
 ///
 /// Mirrors Claude Code's `computeSimpleEnvInfo` (see
 /// [`agent-examples/claude-code-analysis/src/constants/prompts.ts:651`])
-/// stripped to the three fields a v1 agent actually uses. `now` is an
-/// argument rather than `Utc::now()` so tests can pin the timestamp.
+/// stripped to the two fields that actually matter for a v1 agent.
+/// Does not carry a timestamp — see the module docstring.
 #[must_use]
-pub fn env_info_section(now: DateTime<Utc>, model_id: &str, cwd: &Path) -> Section {
+pub fn env_info_section(model_id: &str, cwd: &Path) -> Section {
     let content = format!(
-        "# Environment\n- Current time: {now}\n- Model: {model_id}\n- Working directory: {cwd}",
-        now = now.format("%Y-%m-%d %H:%M:%S UTC"),
+        "# Environment\n- Model: {model_id}\n- Working directory: {cwd}",
         cwd = cwd.display(),
     );
     Section {
         name: ENV_INFO_NAME,
         content,
-        cache_break: true,
     }
 }
 
@@ -132,18 +126,14 @@ mod tests {
         let s = agents_md_section("project says X\n\n");
         assert!(s.content.starts_with("# Project Instructions"));
         assert!(s.content.ends_with("project says X"));
-        assert!(s.cache_break);
     }
 
     #[test]
-    fn env_info_includes_time_model_and_cwd() {
-        let now = DateTime::parse_from_rfc3339("2026-04-26T08:00:00Z")
-            .unwrap()
-            .with_timezone(&Utc);
-        let s = env_info_section(now, "deepseek-v4-flash", Path::new("/tmp/foo"));
-        assert!(s.content.contains("2026-04-26 08:00:00 UTC"));
+    fn env_info_includes_model_and_cwd_no_timestamp() {
+        let s = env_info_section("deepseek-v4-flash", Path::new("/tmp/foo"));
         assert!(s.content.contains("deepseek-v4-flash"));
         assert!(s.content.contains("/tmp/foo"));
-        assert!(s.cache_break);
+        // Must not carry a timestamp — that defeats the prefix cache.
+        assert!(!s.content.contains("Current time"));
     }
 }

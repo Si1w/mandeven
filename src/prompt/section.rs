@@ -1,23 +1,23 @@
 //! Section primitives — the building blocks of an assembled
 //! [`SystemPrompt`].
 //!
-//! Mirrors Claude Code's `systemPromptSection` /
-//! `DANGEROUS_uncachedSystemPromptSection` design (see
-//! [`agent-examples/claude-code-analysis/src/constants/systemPromptSections.ts`])
+//! Loosely modeled on Claude Code's `systemPromptSection` /
+//! `clearSystemPromptSections` design (see
+//! [`agent-examples/claude-code-analysis/src/constants/systemPromptSections.ts`]),
 //! pared down to what mandeven needs today:
 //!
 //! - One named slice of system-prompt text per [`Section`].
-//! - A `cache_break` flag marking sections expected to vary across
-//!   turns.
-//! - A [`SectionCache`] that memoizes stable section content so the
+//! - A [`SectionCache`] that memoizes section content by name so the
 //!   bytes fed to the model are byte-identical turn after turn,
 //!   keeping `DeepSeek`'s prefix cache hot.
 //!
-//! There is no on-the-wire boundary marker (Claude Code's
-//! `__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__`): the `cache_break` field
-//! itself plus the ordering invariant enforced in [`SystemPrompt::push`]
-//! carry the same information without polluting the prompt with a
-//! sentinel string the model would have to read.
+//! Every section is cacheable; explicit invalidation goes through
+//! [`SectionCache::clear`], wired to `/compact` so the cache rebuilds
+//! against the new prefix. There is no per-section "bypass cache" flag
+//! — Claude Code's `DANGEROUS_uncachedSystemPromptSection` exists to
+//! handle MCP servers that connect/disconnect mid-session, and
+//! mandeven has no equivalent volatile state. Reintroduce one if a
+//! genuinely-mid-run-mutating section appears.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -28,12 +28,7 @@ use crate::llm::Message;
 ///
 /// `name` is `&'static str` so cache lookups are pointer-equality
 /// fast and so every section's identity is unambiguous in
-/// `/context`-style introspection. `cache_break` is informational at
-/// the type level and load-bearing at the assembly layer:
-/// [`SystemPrompt::push`] forbids placing a stable section after a
-/// volatile one, which is what gives downstream prefix caches
-/// (`DeepSeek`, future `Anthropic` with `cache_control`) something
-/// contiguous to anchor on.
+/// `/context`-style introspection.
 #[derive(Clone, Debug)]
 pub struct Section {
     /// Stable identifier for cache lookup and `/context` accounting.
@@ -41,9 +36,6 @@ pub struct Section {
     /// Rendered text. Joined into the final system message with
     /// `\n\n` separators.
     pub content: String,
-    /// `true` ⇒ content is expected to vary across calls and must be
-    /// placed AFTER all stable sections.
-    pub cache_break: bool,
 }
 
 /// Ordered, named sections that compose into a single system message.
@@ -54,11 +46,6 @@ pub struct Section {
 #[derive(Debug, Default)]
 pub struct SystemPrompt {
     sections: Vec<Section>,
-    /// Latches once any `cache_break: true` section has been pushed.
-    /// Subsequent pushes of `cache_break: false` violate the
-    /// stable-prefix-then-volatile-suffix discipline and are caught
-    /// by [`Self::push`]'s debug assertion.
-    has_volatile: bool,
 }
 
 impl SystemPrompt {
@@ -68,25 +55,9 @@ impl SystemPrompt {
         Self::default()
     }
 
-    /// Append `section`. Panics in debug builds when the ordering
-    /// invariant ("stable sections precede every volatile section")
-    /// is violated — release builds accept the ordering and let the
-    /// degraded prefix cache hit be the only consequence.
-    ///
-    /// The invariant is invariant rather than soft because a single
-    /// out-of-order push pushes the cache miss point all the way to
-    /// the start of the offending section, throwing away every
-    /// downstream `cache_break: true` slot's stability guarantee.
+    /// Append `section`. Sections are emitted in insertion order;
+    /// callers control the ordering at the build site.
     pub fn push(&mut self, section: Section) {
-        debug_assert!(
-            !self.has_volatile || section.cache_break,
-            "stable section {:?} pushed after a volatile section — \
-             violates the prefix-cache discipline",
-            section.name,
-        );
-        if section.cache_break {
-            self.has_volatile = true;
-        }
         self.sections.push(section);
     }
 
@@ -129,10 +100,6 @@ impl SystemPrompt {
 /// match Claude Code's
 /// [`clearSystemPromptSections`](https://github.com/anthropic/claude-code/blob/main/src/constants/systemPromptSections.ts)
 /// timing.
-///
-/// `cache_break: true` sections always bypass the cache — that's the
-/// whole point of the flag — so mutating-state callers don't need to
-/// reach for `clear()` after each volatile recompute.
 #[derive(Debug, Default)]
 pub struct SectionCache {
     inner: Mutex<HashMap<&'static str, String>>,
@@ -146,22 +113,17 @@ impl SectionCache {
     }
 
     /// Return the cached content for `name`, computing it via
-    /// `compute` on a miss. When `cache_break` is `true` the cache
-    /// is bypassed entirely — `compute` runs and the result is not
-    /// stored.
+    /// `compute` on a miss.
     ///
     /// # Panics
     ///
     /// Panics if the cache mutex was poisoned by a prior compute
     /// call. Computes are pure formatting + I/O; a panic inside one
     /// is irrecoverable and the surfacing here is the honest answer.
-    pub fn get_or_compute<F>(&self, name: &'static str, cache_break: bool, compute: F) -> String
+    pub fn get_or_compute<F>(&self, name: &'static str, compute: F) -> String
     where
         F: FnOnce() -> String,
     {
-        if cache_break {
-            return compute();
-        }
         let mut map = self.inner.lock().expect("section cache poisoned");
         if let Some(v) = map.get(name) {
             return v.clone();
@@ -186,27 +148,18 @@ impl SectionCache {
 mod tests {
     use super::*;
 
-    fn stable(name: &'static str, content: &str) -> Section {
+    fn section(name: &'static str, content: &str) -> Section {
         Section {
             name,
             content: content.into(),
-            cache_break: false,
-        }
-    }
-
-    fn volatile(name: &'static str, content: &str) -> Section {
-        Section {
-            name,
-            content: content.into(),
-            cache_break: true,
         }
     }
 
     #[test]
     fn into_message_joins_sections_with_double_newlines() {
         let mut p = SystemPrompt::new();
-        p.push(stable("a", "alpha"));
-        p.push(stable("b", "bravo"));
+        p.push(section("a", "alpha"));
+        p.push(section("b", "bravo"));
         let Message::System { content } = p.into_message() else {
             panic!("expected system message");
         };
@@ -216,9 +169,9 @@ mod tests {
     #[test]
     fn iter_named_yields_insertion_order() {
         let mut p = SystemPrompt::new();
-        p.push(stable("first", "1"));
-        p.push(stable("second", "2"));
-        p.push(volatile("third", "3"));
+        p.push(section("first", "1"));
+        p.push(section("second", "2"));
+        p.push(section("third", "3"));
         let names: Vec<_> = p.iter_named().map(|(n, _)| n).collect();
         assert_eq!(names, vec!["first", "second", "third"]);
     }
@@ -234,24 +187,14 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "violates the prefix-cache discipline")]
-    fn push_stable_after_volatile_panics_in_debug() {
-        let mut p = SystemPrompt::new();
-        p.push(volatile("env", "now=..."));
-        // Should panic: would push a stable section after a volatile
-        // one, breaking the prefix-cache discipline.
-        p.push(stable("intro", "..."));
-    }
-
-    #[test]
     fn cache_returns_stored_value_on_second_lookup() {
         let cache = SectionCache::new();
         let mut calls = 0;
-        let _ = cache.get_or_compute("intro", false, || {
+        let _ = cache.get_or_compute("intro", || {
             calls += 1;
             "first".to_string()
         });
-        let v = cache.get_or_compute("intro", false, || {
+        let v = cache.get_or_compute("intro", || {
             calls += 1;
             "second".to_string()
         });
@@ -260,28 +203,11 @@ mod tests {
     }
 
     #[test]
-    fn cache_break_bypasses_storage() {
-        let cache = SectionCache::new();
-        let mut calls = 0;
-        let _ = cache.get_or_compute("env", true, || {
-            calls += 1;
-            "first".to_string()
-        });
-        let v = cache.get_or_compute("env", true, || {
-            calls += 1;
-            "second".to_string()
-        });
-        // Both computes ran; second value was returned.
-        assert_eq!(v, "second");
-        assert_eq!(calls, 2);
-    }
-
-    #[test]
     fn clear_drops_cached_entries() {
         let cache = SectionCache::new();
-        let _ = cache.get_or_compute("intro", false, || "before".to_string());
+        let _ = cache.get_or_compute("intro", || "before".to_string());
         cache.clear();
-        let v = cache.get_or_compute("intro", false, || "after".to_string());
+        let v = cache.get_or_compute("intro", || "after".to_string());
         assert_eq!(v, "after");
     }
 }

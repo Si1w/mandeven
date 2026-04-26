@@ -3,9 +3,8 @@
 //!
 //! The engine owns:
 //!
-//! - The boot-time [`AGENTS.md`] string (read once at
-//!   [`Self::load`]).
-//! - A [`SectionCache`] keyed by section name so the static block of
+//! - The boot-time `AGENTS.md` string (read once at [`Self::load`]).
+//! - A [`SectionCache`] keyed by section name so every section of
 //!   [`Self::iteration_system`] is byte-identical from one call to
 //!   the next, keeping `DeepSeek`'s prefix cache hot.
 //!
@@ -22,13 +21,15 @@ use chrono::{DateTime, Utc};
 
 use crate::llm::Message;
 
-use super::context::{agents_md_section, env_info_section, load_agents_md};
+use super::context::{
+    AGENTS_MD_NAME, ENV_INFO_NAME, agents_md_section, env_info_section, load_agents_md,
+};
 use super::error::Result;
 use super::section::{Section, SectionCache, SystemPrompt};
 use super::specialized;
 use super::templates::{INTRO, INTRO_NAME, SYSTEM_RULES, SYSTEM_RULES_NAME, TONE, TONE_NAME};
 
-/// Per-call dynamic inputs threaded into [`PromptEngine::iteration_system`].
+/// Per-call inputs threaded into [`PromptEngine::iteration_system`].
 ///
 /// Kept narrow — every field is required by at least one current
 /// section. Adding a field here should be paired with the section
@@ -36,9 +37,6 @@ use super::templates::{INTRO, INTRO_NAME, SYSTEM_RULES, SYSTEM_RULES_NAME, TONE,
 /// bag whose callers all populate with `Default::default()`.
 #[derive(Debug, Clone, Copy)]
 pub struct PromptContext<'a> {
-    /// Wall-clock time used by the `env_info` section. Argument rather
-    /// than `Utc::now()` so tests can pin the value.
-    pub now: DateTime<Utc>,
     /// Upstream model identifier (e.g. `"deepseek-v4-flash"`).
     pub model_id: &'a str,
     /// Working directory the agent process was launched from. Already
@@ -82,30 +80,36 @@ impl PromptEngine {
     /// module:
     ///
     /// ```text
-    /// intro                cache_break=false
-    /// system_rules         cache_break=false
-    /// tone                 cache_break=false
-    /// ───── prefix-cache boundary ─────
-    /// agents_md (optional) cache_break=true
-    /// env_info             cache_break=true
+    /// intro                  ← static, cached
+    /// system_rules           ← static, cached
+    /// tone                   ← static, cached
+    /// agents_md (optional)   ← dynamic input, cached at first call
+    /// env_info               ← dynamic input, cached at first call
     /// ```
     ///
-    /// The static block is fed through [`SectionCache`] so the bytes
-    /// before the boundary are byte-identical turn after turn — that
-    /// is what makes a server-side prefix cache (`DeepSeek` today,
-    /// Anthropic via `cache_control` later) hit reliably.
+    /// Every section flows through [`SectionCache`] so the rendered
+    /// bytes are stable for the lifetime of the engine — the
+    /// load-bearing invariant for `DeepSeek`'s automatic prefix
+    /// cache. [`Self::clear_cache`] is the one explicit invalidation
+    /// path, called from `/compact` after the conversation prefix
+    /// has been rewritten.
     #[must_use]
     pub fn iteration_system(&self, ctx: &PromptContext<'_>) -> SystemPrompt {
         let mut prompt = SystemPrompt::new();
 
-        prompt.push(self.cached_static(INTRO_NAME, INTRO));
-        prompt.push(self.cached_static(SYSTEM_RULES_NAME, SYSTEM_RULES));
-        prompt.push(self.cached_static(TONE_NAME, TONE));
+        prompt.push(self.cached(INTRO_NAME, || INTRO.to_string()));
+        prompt.push(self.cached(SYSTEM_RULES_NAME, || SYSTEM_RULES.to_string()));
+        prompt.push(self.cached(TONE_NAME, || TONE.to_string()));
 
         if let Some(content) = &self.agents_md {
-            prompt.push(agents_md_section(content));
+            let body = content.clone();
+            prompt.push(self.cached(AGENTS_MD_NAME, move || agents_md_section(&body).content));
         }
-        prompt.push(env_info_section(ctx.now, ctx.model_id, ctx.cwd));
+        let model_id = ctx.model_id.to_string();
+        let cwd = ctx.cwd.to_path_buf();
+        prompt.push(self.cached(ENV_INFO_NAME, move || {
+            env_info_section(&model_id, &cwd).content
+        }));
 
         prompt
     }
@@ -131,20 +135,22 @@ impl PromptEngine {
     }
 
     /// Drop every cached section. Wired up to `/compact` so a
-    /// post-compaction run rebuilds its static block — same timing
-    /// as Claude Code's `clearSystemPromptSections()`.
+    /// post-compaction run rebuilds its sections — same timing as
+    /// Claude Code's `clearSystemPromptSections()`.
     pub fn clear_cache(&self) {
         self.cache.clear();
     }
 
-    /// Build a stable section by funneling its `&'static str` body
-    /// through the cache. The first call computes and stores;
-    /// subsequent calls return the stored clone.
-    fn cached_static(&self, name: &'static str, body: &'static str) -> Section {
+    /// Build a section by funneling its content through the cache.
+    /// First call computes and stores; subsequent calls return the
+    /// stored clone.
+    fn cached<F>(&self, name: &'static str, compute: F) -> Section
+    where
+        F: FnOnce() -> String,
+    {
         Section {
             name,
-            content: self.cache.get_or_compute(name, false, || body.to_string()),
-            cache_break: false,
+            content: self.cache.get_or_compute(name, compute),
         }
     }
 }
@@ -164,16 +170,13 @@ mod tests {
 
     fn ctx(cwd: &Path) -> PromptContext<'_> {
         PromptContext {
-            now: DateTime::parse_from_rfc3339("2026-04-26T08:00:00Z")
-                .unwrap()
-                .with_timezone(&Utc),
             model_id: "deepseek-v4-flash",
             cwd,
         }
     }
 
     #[test]
-    fn iteration_system_orders_static_then_volatile() {
+    fn iteration_system_emits_expected_section_order() {
         let dir = tempdir();
         let engine = PromptEngine::load(&dir).unwrap();
         let prompt = engine.iteration_system(&ctx(&dir));
@@ -197,16 +200,17 @@ mod tests {
     }
 
     #[test]
-    fn iteration_system_static_block_is_byte_stable_across_calls() {
+    fn iteration_system_is_byte_stable_across_calls() {
+        // Whole-prompt byte stability is the load-bearing invariant
+        // for DeepSeek's automatic prefix cache — every section,
+        // not just the static head, must reproduce identically.
         let dir = tempdir();
         let engine = PromptEngine::load(&dir).unwrap();
         let p1 = engine.iteration_system(&ctx(&dir));
         let p2 = engine.iteration_system(&ctx(&dir));
 
-        // Static block (first 3 sections) must be identical for the
-        // prefix cache to ever hit.
-        let s1: Vec<_> = p1.iter_named().take(3).collect();
-        let s2: Vec<_> = p2.iter_named().take(3).collect();
+        let s1: Vec<_> = p1.iter_named().collect();
+        let s2: Vec<_> = p2.iter_named().collect();
         assert_eq!(s1, s2);
     }
 
@@ -222,8 +226,8 @@ mod tests {
         engine.clear_cache();
         let after = engine.iteration_system(&ctx(&dir));
 
-        let b: Vec<_> = before.iter_named().take(3).map(|(_, c)| c).collect();
-        let a: Vec<_> = after.iter_named().take(3).map(|(_, c)| c).collect();
+        let b: Vec<_> = before.iter_named().map(|(_, c)| c.to_string()).collect();
+        let a: Vec<_> = after.iter_named().map(|(_, c)| c.to_string()).collect();
         assert_eq!(b, a);
     }
 }

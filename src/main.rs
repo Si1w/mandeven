@@ -6,8 +6,8 @@
 //! [`agent`](mandeven::agent) for the iteration loop,
 //! [`channels`](mandeven::channels) for the channel registry + router,
 //! and [`cli`](mandeven::cli) as the currently-registered TUI channel.
-//! Requires `MISTRAL_API_KEY` in the environment and `./mandeven.toml`
-//! in the working directory.
+//! Requires the configured provider's API key in the environment and
+//! `~/.mandeven/mandeven.toml` (or the path under `$MANDEVEN_HOME`).
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -18,15 +18,12 @@ use mandeven::agent::{Agent, CronWiring, HeartbeatWiring};
 use mandeven::bus::{Bus, ChannelID};
 use mandeven::channels::Manager;
 use mandeven::cli::CliChannel;
-use mandeven::config::AppConfig;
+use mandeven::config::{self, AppConfig};
 use mandeven::cron::CronEngine;
 use mandeven::gateway::{Gateway, dispatch_channel};
 use mandeven::heartbeat::HeartbeatEngine;
 use mandeven::session;
 use mandeven::tools;
-
-/// Directory under the config's `data_dir` where session files live.
-const SESSION_SUBDIR: &str = "sessions";
 
 /// Identifier for the built-in TUI channel.
 const TUI_CHANNEL: &str = "tui";
@@ -37,7 +34,13 @@ type DynError = Box<dyn std::error::Error + Send + Sync>;
 #[tokio::main]
 async fn main() -> Result<(), DynError> {
     let cfg = AppConfig::bootstrap()?;
-    let sessions = Arc::new(session::Manager::new(cfg.data_dir().join(SESSION_SUBDIR)).await?);
+
+    // Sessions are scoped per-project: capture the launch cwd once and
+    // sanitize it into a bucket name under `~/.mandeven/projects/`.
+    // Same shape as Claude Code's `~/.claude/projects/<sanitized-cwd>/`
+    // — see agent-examples/claude-code-analysis/src/utils/sessionStoragePortable.ts.
+    let cwd = std::env::current_dir()?;
+    let sessions = Arc::new(session::Manager::new(config::project_bucket(&cwd)).await?);
 
     // Three queues:
     //   channels → gateway  (InboundMessage, identity-only)

@@ -1,19 +1,20 @@
-//! Configuration data types deserialized from `./mandeven.toml`.
+//! Configuration data types deserialized from `~/.mandeven/mandeven.toml`.
 //!
 //! Top-level sections are added here as the corresponding modules start
 //! needing user-tunable values. Fields that are internal invariants live
 //! as `const` in their owning module, not here.
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+use super::paths;
 use crate::agent::compact::CompactConfig;
 use crate::cron::CronConfig;
 use crate::heartbeat::HeartbeatConfig;
 
-/// Root configuration loaded from `./mandeven.toml`.
+/// Root configuration loaded from `~/.mandeven/mandeven.toml`.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct AppConfig {
     /// LLM profile catalog.
@@ -24,11 +25,10 @@ pub struct AppConfig {
     #[serde(default)]
     pub agent: AgentConfig,
 
-    /// Filesystem path this config was loaded from.
-    ///
-    /// Populated by [`AppConfig::from_file`] and [`AppConfig::load`];
-    /// empty for in-memory construction. Not serialized — only used to
-    /// derive runtime data locations via [`AppConfig::data_dir`].
+    /// Filesystem path this config was loaded from. Populated by
+    /// [`AppConfig::from_file`] / [`AppConfig::load`], empty for
+    /// in-memory construction. Diagnostic only — runtime data
+    /// directories resolve through [`paths::home_dir`] regardless.
     #[serde(skip)]
     pub(crate) source_path: PathBuf,
 }
@@ -62,27 +62,28 @@ pub struct AgentConfig {
     pub compact: CompactConfig,
 
     /// Per-agent cron configuration. Just the on/off switch — job
-    /// definitions live in `<data_dir>/cron/jobs.json` so they can
+    /// definitions live in `~/.mandeven/cron/jobs.json` so they can
     /// be added or removed at runtime without editing `mandeven.toml`.
     #[serde(default)]
     pub cron: CronConfig,
 }
 
 impl AppConfig {
-    /// Instance-level data directory for this config.
+    /// Per-user data directory.
     ///
-    /// Follows the convention that the data directory is the parent
-    /// directory of the config file. Session, cron, and log subdirectories
-    /// are derived from this root by downstream modules.
+    /// Always resolves through [`paths::home_dir`] (i.e.
+    /// `$MANDEVEN_HOME` if set, else `~/.mandeven/`). All
+    /// agent-managed state — `AGENTS.md`, `HEARTBEAT.md`,
+    /// `cron/jobs.json`, and the per-project `projects/<bucket>/`
+    /// session directories — lives under this root.
     ///
-    /// Falls back to the current working directory (`.`) when the source
-    /// path has no parent (for example, when it is empty or `"/"`).
+    /// Independent of `source_path`: the config file location is for
+    /// diagnostics only. This guarantees `data_dir()` is consistent
+    /// even when the config has been hand-loaded from an unusual path
+    /// (tests, migrations).
     #[must_use]
     pub fn data_dir(&self) -> PathBuf {
-        self.source_path
-            .parent()
-            .unwrap_or_else(|| Path::new("."))
-            .to_path_buf()
+        paths::home_dir()
     }
 }
 

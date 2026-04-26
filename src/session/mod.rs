@@ -1,7 +1,14 @@
 //! Session persistence — one JSONL file per session, rewritten
 //! atomically on every change.
 //!
-//! File layout:
+//! Sessions are scoped per launch directory, so the canonical location
+//! of `<base_dir>` is the project bucket
+//! `~/.mandeven/projects/<sanitized-cwd>/` (see
+//! [`crate::config::project_bucket`]). One mandeven install therefore
+//! tracks every project's sessions side-by-side without their files
+//! ever colliding.
+//!
+//! File layout inside the bucket:
 //!
 //! ```text
 //! <base_dir>/<uuid>.jsonl:

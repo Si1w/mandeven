@@ -1,6 +1,6 @@
-//! Interactive first-run bootstrap for `./mandeven.toml`.
+//! Interactive first-run bootstrap for `~/.mandeven/mandeven.toml`.
 //!
-//! When the canonical config file is missing and stdin is attached to
+//! When the per-user config file is missing and stdin is attached to
 //! a terminal, [`interactive`] walks the user through a minimal set of
 //! prompts (provider selection, upstream model name, profile alias,
 //! context window, plus three optional sampling / transport knobs) and
@@ -44,7 +44,11 @@ pub(super) fn interactive() -> Result<AppConfig> {
     let stdin = io::stdin();
     let mut stdin = stdin.lock();
 
-    writeln!(stdout, "No mandeven.toml found — let's create one.")?;
+    writeln!(
+        stdout,
+        "No mandeven.toml found at {} — let's create one.",
+        super::paths::config_path().display()
+    )?;
     writeln!(stdout)?;
 
     let provider = prompt_provider(&mut stdin, &mut stdout)?;

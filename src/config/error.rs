@@ -34,14 +34,15 @@ pub enum ConfigError {
     #[error("failed to serialize config to TOML: {0}")]
     Serialize(#[from] toml::ser::Error),
 
-    /// `./mandeven.toml` was not found in the current working directory.
-    #[error("./mandeven.toml not found in current working directory")]
-    NotFound,
+    /// The per-user config file at `~/.mandeven/mandeven.toml` (or
+    /// the path pointed to by `$MANDEVEN_HOME`) was not found.
+    #[error("mandeven.toml not found at {0} — set $MANDEVEN_HOME to override")]
+    NotFound(PathBuf),
 
     /// Interactive bootstrap was required but stdin is not a terminal.
     #[error(
-        "./mandeven.toml not found and stdin is not a tty; \
-         create the file manually or run in a terminal"
+        "mandeven.toml not found and stdin is not a tty; \
+         create the file manually under ~/.mandeven/ or run in a terminal"
     )]
     NotInteractive,
 

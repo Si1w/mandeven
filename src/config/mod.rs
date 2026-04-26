@@ -1,15 +1,23 @@
-//! Configuration loading from `./mandeven.toml`.
+//! Configuration loading from `~/.mandeven/mandeven.toml`.
 //!
-//! The canonical entry points are [`AppConfig::load`] (read
-//! `./mandeven.toml` from the current working directory) and
-//! [`AppConfig::from_file`] (explicit path). New top-level sections are
+//! The canonical entry points are [`AppConfig::load`] (read the
+//! per-user config file) and [`AppConfig::from_file`] (explicit path,
+//! used by tests and migration tools). New top-level sections are
 //! added to [`AppConfig`] as the corresponding modules start needing
 //! user-tunable values.
+//!
+//! See [`paths`] for the on-disk layout — the same module owns every
+//! well-known path under [`paths::home_dir`].
 
 mod bootstrap;
 pub mod error;
 pub mod loader;
+pub mod paths;
 pub mod types;
 
 pub use error::{ConfigError, Result};
+pub use paths::{
+    CONFIG_FILENAME, HOME_ENV_VAR, HOME_SUBDIR, PROJECTS_SUBDIR, config_path, home_dir,
+    project_bucket, projects_dir,
+};
 pub use types::{AgentConfig, AppConfig, LLMConfig, LLMProfile};

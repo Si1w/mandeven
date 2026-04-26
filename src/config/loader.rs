@@ -5,10 +5,8 @@ use std::path::{Path, PathBuf};
 
 use super::bootstrap;
 use super::error::{ConfigError, Result};
+use super::paths;
 use super::types::AppConfig;
-
-/// File name looked up in the current working directory by [`AppConfig::load`].
-const DEFAULT_CONFIG_FILENAME: &str = "mandeven.toml";
 
 /// Separator between provider and model name in `LLMConfig::default`.
 const DEFAULT_MODEL_SEPARATOR: char = '/';
@@ -40,7 +38,7 @@ impl AppConfig {
         Ok(cfg)
     }
 
-    /// Load from `./mandeven.toml` in the current working directory.
+    /// Load from the per-user config file at [`paths::config_path`].
     ///
     /// # Errors
     ///
@@ -48,16 +46,16 @@ impl AppConfig {
     /// [`Self::from_file`] for the remaining failure modes once the
     /// file is located.
     pub fn load() -> Result<Self> {
-        let path = PathBuf::from(DEFAULT_CONFIG_FILENAME);
+        let path = paths::config_path();
         if !path.exists() {
-            return Err(ConfigError::NotFound);
+            return Err(ConfigError::NotFound(path));
         }
         Self::from_file(path)
     }
 
-    /// Canonical entry point for `main`: load `./mandeven.toml` when it
-    /// exists, otherwise run the interactive first-run bootstrap and
-    /// persist the result.
+    /// Canonical entry point for `main`: load the per-user config when
+    /// it exists, otherwise run the interactive first-run bootstrap
+    /// and persist the result to [`paths::config_path`].
     ///
     /// # Errors
     ///
@@ -69,7 +67,7 @@ impl AppConfig {
     /// [`ConfigError::Write`] / [`ConfigError::Serialize`] when
     /// persisting the new config fails.
     pub fn bootstrap() -> Result<Self> {
-        let path = PathBuf::from(DEFAULT_CONFIG_FILENAME);
+        let path = paths::config_path();
         if path.exists() {
             return Self::from_file(path);
         }
@@ -87,6 +85,11 @@ impl AppConfig {
     /// observes either the old file or the fully-written new file —
     /// never a torn state.
     ///
+    /// Creates the parent directory recursively when missing — the
+    /// canonical bootstrap path writes to `~/.mandeven/mandeven.toml`
+    /// on a host that has never run mandeven before, so the
+    /// `~/.mandeven/` directory itself often does not exist yet.
+    ///
     /// Comment preservation is not handled; a `save()` that was
     /// preceded by a user-edited file will round-trip the semantic
     /// values but drop comments. This is acceptable for now because
@@ -99,12 +102,21 @@ impl AppConfig {
     /// - [`ConfigError::Serialize`] when `AppConfig` cannot be rendered
     ///   as TOML (shouldn't happen for a validated config, but the
     ///   serde contract surfaces the error).
-    /// - [`ConfigError::Write`] on any underlying I/O failure (write,
-    ///   rename, or missing parent directory).
+    /// - [`ConfigError::Write`] on any underlying I/O failure (parent
+    ///   `mkdir`, write, or rename).
     pub fn save(&self) -> Result<()> {
         let text = toml::to_string_pretty(self)?;
 
         let path = &self.source_path;
+        if let Some(parent) = path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            fs::create_dir_all(parent).map_err(|source| ConfigError::Write {
+                path: parent.to_path_buf(),
+                source,
+            })?;
+        }
+
         let mut tmp = path.as_os_str().to_owned();
         tmp.push(TMP_SAVE_SUFFIX);
         let tmp = PathBuf::from(tmp);

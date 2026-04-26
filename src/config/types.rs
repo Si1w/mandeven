@@ -13,6 +13,7 @@ use super::paths;
 use crate::agent::compact::CompactConfig;
 use crate::cron::CronConfig;
 use crate::heartbeat::HeartbeatConfig;
+use crate::hook::HookConfig;
 use crate::skill::SkillConfig;
 
 /// Root configuration loaded from `~/.mandeven/mandeven.toml`.
@@ -73,6 +74,12 @@ pub struct AgentConfig {
     /// and are discovered at boot. Same pattern as cron.
     #[serde(default)]
     pub skill: SkillConfig,
+
+    /// Per-agent hook configuration. Just the on/off switch — hook
+    /// definitions live in `~/.mandeven/hooks.json` and are loaded
+    /// at boot. Same pattern as cron and skill.
+    #[serde(default)]
+    pub hook: HookConfig,
 }
 
 impl AppConfig {

@@ -22,6 +22,7 @@ use mandeven::config::{self, AppConfig};
 use mandeven::cron::CronEngine;
 use mandeven::gateway::{Gateway, dispatch_channel};
 use mandeven::heartbeat::HeartbeatEngine;
+use mandeven::hook::HookEngine;
 use mandeven::prompt::PromptEngine;
 use mandeven::session;
 use mandeven::skill::{self, SkillIndex};
@@ -57,6 +58,12 @@ async fn main() -> Result<(), DynError> {
     // borrows the skill index for the skills_index section. The
     // section cache fills lazily as iteration_system is called.
     let prompts = Arc::new(PromptEngine::load(&cfg.data_dir(), &skill_index)?);
+
+    // Hook engine reads ~/.mandeven/hooks.json once at boot. When
+    // the file is absent or `[agent.hook] enabled = false`, the
+    // engine becomes a no-op — every fire() returns immediately
+    // without spawning anything.
+    let hooks = Arc::new(HookEngine::load(cfg.agent.hook.enabled, &cfg.data_dir())?);
 
     // Three queues:
     //   channels → gateway  (InboundMessage, identity-only)
@@ -109,6 +116,7 @@ async fn main() -> Result<(), DynError> {
         heartbeat_wiring,
         cron_wiring,
         prompts,
+        hooks,
         cwd,
     )?;
 

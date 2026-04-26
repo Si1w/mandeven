@@ -136,32 +136,43 @@ impl Registry {
     /// object). Tools that return [`ToolOutcome::Inject`] additionally
     /// splice the extra messages **after** their own tool reply, so
     /// the output `Vec` may be longer than `calls.len()`.
+    ///
+    /// Used by callers that don't need per-call hook orchestration.
+    /// The agent loop instead drives one call at a time through
+    /// [`Self::invoke_to_messages`] so it can fire `PreToolUse` /
+    /// `PostToolUse` hooks around each invocation.
     pub async fn dispatch(&self, calls: Vec<ToolCall>) -> Vec<Message> {
         let mut out = Vec::with_capacity(calls.len());
         for call in calls {
-            match self.invoke(&call).await {
-                Ok(ToolOutcome::Result(value)) => {
-                    out.push(Message::Tool {
-                        content: serialize_result(&value),
-                        tool_call_id: call.id,
-                    });
-                }
-                Ok(ToolOutcome::Inject { result, messages }) => {
-                    out.push(Message::Tool {
-                        content: serialize_result(&result),
-                        tool_call_id: call.id,
-                    });
-                    out.extend(messages);
-                }
-                Err(err) => {
-                    out.push(Message::Tool {
-                        content: error_content(&err.to_string()),
-                        tool_call_id: call.id,
-                    });
-                }
-            }
+            out.extend(self.invoke_to_messages(call).await);
         }
         out
+    }
+
+    /// Run one tool call and translate the outcome into the agent's
+    /// [`Message`] sequence. Mirrors the per-call branch of
+    /// [`Self::dispatch`] but exposed as a public single-call entry
+    /// point so the agent layer can interleave hook firings.
+    pub async fn invoke_to_messages(&self, call: ToolCall) -> Vec<Message> {
+        match self.invoke(&call).await {
+            Ok(ToolOutcome::Result(value)) => vec![Message::Tool {
+                content: serialize_result(&value),
+                tool_call_id: call.id,
+            }],
+            Ok(ToolOutcome::Inject { result, messages }) => {
+                let mut out = Vec::with_capacity(messages.len() + 1);
+                out.push(Message::Tool {
+                    content: serialize_result(&result),
+                    tool_call_id: call.id,
+                });
+                out.extend(messages);
+                out
+            }
+            Err(err) => vec![Message::Tool {
+                content: error_content(&err.to_string()),
+                tool_call_id: call.id,
+            }],
+        }
     }
 
     async fn invoke(&self, call: &ToolCall) -> Result<ToolOutcome> {

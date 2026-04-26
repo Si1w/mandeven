@@ -40,6 +40,7 @@ use crate::config::{AgentConfig, AppConfig, LLMProfile};
 use crate::cron;
 use crate::gateway::{ActiveSessions, DispatchReceiver, InboundDispatch};
 use crate::heartbeat::{HeartbeatEngine, HeartbeatTick};
+use crate::hook::{HookEngine, HookEvent};
 use crate::llm::{
     self, BaseLLMClient, CompactTrigger, FinishReason, Message, Request, ResponseStream, Thinking,
     ToolCall, Usage,
@@ -128,10 +129,17 @@ pub struct Agent {
     /// through it so future per-task prompt changes only touch one
     /// module.
     prompt: Arc<PromptEngine>,
+    /// Hook engine. Fired at every lifecycle event (`UserPromptSubmit`,
+    /// `Pre/PostToolUse`, `SessionStart`, `Stop`, `Pre/PostCompact`,
+    /// `HeartbeatTick`, `CronTick`). When `enabled = false` or no
+    /// `hooks.json` exists, every fire becomes a no-op so the
+    /// orchestration adds zero overhead.
+    hook: Arc<HookEngine>,
     /// Process launch directory captured once in `main`. Surfaces in
-    /// the per-call `PromptContext.cwd` for `iteration_system`.
-    /// Mandeven keeps this stable for the lifetime of the run — the
-    /// agent never `cd`s — matching Claude Code's `getOriginalCwd`.
+    /// the per-call `PromptContext.cwd` for `iteration_system` and
+    /// in every hook's `MANDEVEN_CWD` env var. Mandeven keeps this
+    /// stable for the lifetime of the run — the agent never `cd`s —
+    /// matching Claude Code's `getOriginalCwd`.
     cwd: PathBuf,
 }
 
@@ -200,6 +208,7 @@ impl Agent {
         heartbeat: Option<HeartbeatWiring>,
         cron: Option<CronWiring>,
         prompt: Arc<PromptEngine>,
+        hook: Arc<HookEngine>,
         cwd: PathBuf,
     ) -> Result<Self> {
         let (provider_name, model_name) = cfg
@@ -256,6 +265,7 @@ impl Agent {
             compact_config: cfg.agent.compact.clone(),
             compact_state: Arc::new(AsyncMutex::new(CompactState::new())),
             prompt,
+            hook,
             cwd,
         })
     }
@@ -389,6 +399,23 @@ impl Agent {
             }
         };
 
+        // HeartbeatTick hook fires once per phase-2-bound tick. A
+        // blocked hook drops the iteration so heartbeat-driven turns
+        // can be selectively muted (e.g. business-hours-only audit).
+        let pre = self
+            .hook
+            .fire(
+                HookEvent::HeartbeatTick,
+                None,
+                serde_json::json!({ "tick_at": tick.at.to_rfc3339() }),
+                &session.0.to_string(),
+                &self.cwd,
+            )
+            .await;
+        if pre.is_blocked() {
+            return Ok(());
+        }
+
         let iter = Iteration {
             session: session.clone(),
             channel: target.clone(),
@@ -432,6 +459,32 @@ impl Agent {
             }
             return Ok(());
         };
+
+        // CronTick hook fires before the iteration. Matcher targets
+        // the job name so users can scope hooks per-job (`matcher:
+        // "daily-summary"`). A blocked hook reports `Skipped` to the
+        // engine so consecutive-error tracking doesn't fire.
+        let pre = self
+            .hook
+            .fire(
+                HookEvent::CronTick,
+                Some(&tick.job_name),
+                serde_json::json!({
+                    "job_id": tick.job_id,
+                    "job_name": tick.job_name,
+                }),
+                &session.0.to_string(),
+                &self.cwd,
+            )
+            .await;
+        if pre.is_blocked() {
+            if let Some(engine) = self.cron.as_ref() {
+                engine
+                    .report_outcome(&tick.job_id, cron::RunStatus::Skipped, None)
+                    .await;
+            }
+            return Ok(());
+        }
 
         let iter = Iteration {
             session: session.clone(),
@@ -595,6 +648,16 @@ impl Agent {
         }
 
         let summary_system = self.prompt.compact_summary_system(None);
+        let _ = self
+            .hook
+            .fire(
+                HookEvent::PreCompact,
+                None,
+                serde_json::json!({ "trigger": "auto" }),
+                &iter.session.0.to_string(),
+                &self.cwd,
+            )
+            .await;
         match compact::compact_messages(
             messages.clone(),
             &self.profile,
@@ -617,6 +680,16 @@ impl Agent {
                 // to mirror Claude Code's `clearSystemPromptSections`
                 // behavior — same reasoning, same timing.
                 self.prompt.clear_cache();
+                let _ = self
+                    .hook
+                    .fire(
+                        HookEvent::PostCompact,
+                        None,
+                        serde_json::json!({ "trigger": "auto" }),
+                        &iter.session.0.to_string(),
+                        &self.cwd,
+                    )
+                    .await;
                 Ok(compacted)
             }
             Err(err) => {
@@ -642,6 +715,16 @@ impl Agent {
     ) -> Result<()> {
         let messages = self.load_history(&session).await?;
         let summary_system = self.prompt.compact_summary_system(focus.as_deref());
+        let _ = self
+            .hook
+            .fire(
+                HookEvent::PreCompact,
+                None,
+                serde_json::json!({ "trigger": "manual" }),
+                &session.0.to_string(),
+                &self.cwd,
+            )
+            .await;
         let mut state = self.compact_state.lock().await;
         let result = compact::compact_messages(
             messages,
@@ -666,6 +749,16 @@ impl Agent {
                 // `maybe_auto_compact`: the prefix changed, so the
                 // section cache should rebuild.
                 self.prompt.clear_cache();
+                let _ = self
+                    .hook
+                    .fire(
+                        HookEvent::PostCompact,
+                        None,
+                        serde_json::json!({ "trigger": "manual" }),
+                        &session.0.to_string(),
+                        &self.cwd,
+                    )
+                    .await;
                 OutboundPayload::Notice(format_compact_report(&report))
             }
             Err(err) => OutboundPayload::Error(format!("/compact failed: {err}")),
@@ -693,6 +786,29 @@ impl Agent {
     /// persisted assistant reply, covering any number of LLM↔tool
     /// calls.
     async fn iteration(&self, iter: &Iteration, user_text: String) -> Result<()> {
+        // UserPromptSubmit hook fires BEFORE we touch the session —
+        // a blocking hook drops the message entirely, the user sees
+        // an Error notice, no LLM call is made.
+        let pre = self
+            .hook
+            .fire(
+                HookEvent::UserPromptSubmit,
+                None,
+                serde_json::json!({ "prompt": user_text }),
+                &iter.session.0.to_string(),
+                &self.cwd,
+            )
+            .await;
+        if pre.is_blocked() {
+            let reason = pre
+                .block_reason()
+                .unwrap_or("blocked by UserPromptSubmit hook")
+                .to_string();
+            self.send_notice(iter, &format!("hook denied user message: {reason}"))
+                .await;
+            return Ok(());
+        }
+
         self.ensure_session(iter, &user_text).await?;
         self.sessions
             .append(&iter.session, Message::User { content: user_text })
@@ -724,6 +840,11 @@ impl Agent {
                 ..
             } = outcome;
 
+            let last_assistant_text = if content.is_empty() {
+                String::new()
+            } else {
+                content.clone()
+            };
             self.sessions
                 .append(
                     &iter.session,
@@ -735,19 +856,109 @@ impl Agent {
                 )
                 .await?;
 
-            let Some(calls) = tool_calls else {
-                return Ok(());
-            };
-            if calls.is_empty() {
+            let no_more_calls = tool_calls.as_ref().is_none_or(Vec::is_empty);
+            if no_more_calls {
+                self.fire_stop_hook(iter, &last_assistant_text).await;
                 return Ok(());
             }
+            // Safe to unwrap: `no_more_calls` short-circuited.
+            let calls = tool_calls.unwrap_or_default();
 
-            for tool_msg in self.tools.dispatch(calls).await {
-                self.sessions.append(&iter.session, tool_msg).await?;
+            for call in calls {
+                self.dispatch_one_with_hooks(iter, call).await?;
             }
 
             i = i.saturating_add(1);
         }
+    }
+
+    /// Invoke one tool call with `Pre/PostToolUse` hooks bracketing
+    /// the actual dispatch. A blocked `PreToolUse` skips the call
+    /// entirely and persists a synthetic tool-error message so the
+    /// model sees its `tool_call_id` resolved on the next turn.
+    async fn dispatch_one_with_hooks(&self, iter: &Iteration, call: ToolCall) -> Result<()> {
+        let pre_payload = serde_json::json!({
+            "tool_name": call.name,
+            "tool_input": serde_json::from_str::<serde_json::Value>(&call.arguments)
+                .unwrap_or(serde_json::Value::Null),
+            "tool_use_id": call.id,
+        });
+        let pre = self
+            .hook
+            .fire(
+                HookEvent::PreToolUse,
+                Some(&call.name),
+                pre_payload,
+                &iter.session.0.to_string(),
+                &self.cwd,
+            )
+            .await;
+        if pre.is_blocked() {
+            let reason = pre.block_reason().unwrap_or("blocked by hook").to_string();
+            let blocked_msg = Message::Tool {
+                content: format!("{{\"error\":\"hook denied tool call: {reason}\"}}"),
+                tool_call_id: call.id,
+            };
+            self.sessions.append(&iter.session, blocked_msg).await?;
+            return Ok(());
+        }
+
+        let tool_name = call.name.clone();
+        let tool_use_id = call.id.clone();
+        let tool_input_raw = call.arguments.clone();
+        let messages = self.tools.invoke_to_messages(call).await;
+        // The first message is the Tool reply; capture it before
+        // moving the vec so we can include `tool_response` in the
+        // PostToolUse payload.
+        let tool_response_text = messages
+            .first()
+            .and_then(|m| match m {
+                Message::Tool { content, .. } => Some(content.clone()),
+                _ => None,
+            })
+            .unwrap_or_default();
+        for msg in messages {
+            self.sessions.append(&iter.session, msg).await?;
+        }
+
+        let post_payload = serde_json::json!({
+            "tool_name": tool_name,
+            "tool_input": serde_json::from_str::<serde_json::Value>(&tool_input_raw)
+                .unwrap_or(serde_json::Value::Null),
+            "tool_response": tool_response_text,
+            "tool_use_id": tool_use_id,
+        });
+        // PostToolUse outcome is informational v1 — a blocked post
+        // hook can't undo a tool that already ran. Drop the result.
+        let _ = self
+            .hook
+            .fire(
+                HookEvent::PostToolUse,
+                Some(&tool_name),
+                post_payload,
+                &iter.session.0.to_string(),
+                &self.cwd,
+            )
+            .await;
+        Ok(())
+    }
+
+    /// Fire the `Stop` hook with the last assistant text. Outcome
+    /// ignored — `Stop` is post-iteration informational only.
+    async fn fire_stop_hook(&self, iter: &Iteration, last_assistant_message: &str) {
+        let _ = self
+            .hook
+            .fire(
+                HookEvent::Stop,
+                None,
+                serde_json::json!({
+                    "stop_hook_active": false,
+                    "last_assistant_message": last_assistant_message,
+                }),
+                &iter.session.0.to_string(),
+                &self.cwd,
+            )
+            .await;
     }
 
     /// Issue one LLM call within an iteration and aggregate the
@@ -866,6 +1077,21 @@ impl Agent {
         self.sessions
             .create(&iter.session, title, iter.channel.clone())
             .await?;
+        // SessionStart hook fires once per fresh session — never on
+        // resume, never per iteration. `source: startup` distinguishes
+        // a brand-new session from a `compact`-triggered one (we don't
+        // emit `compact` here; future Pre/PostCompact wiring may add
+        // an explicit replay if useful).
+        let _ = self
+            .hook
+            .fire(
+                HookEvent::SessionStart,
+                None,
+                serde_json::json!({ "source": "startup" }),
+                &iter.session.0.to_string(),
+                &self.cwd,
+            )
+            .await;
         Ok(())
     }
 

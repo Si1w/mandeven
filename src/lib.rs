@@ -12,6 +12,7 @@ pub mod config;
 pub mod cron;
 pub mod gateway;
 pub mod heartbeat;
+pub mod hook;
 pub mod llm;
 pub mod prompt;
 pub mod session;

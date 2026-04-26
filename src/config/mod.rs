@@ -17,7 +17,7 @@ pub mod types;
 
 pub use error::{ConfigError, Result};
 pub use paths::{
-    CONFIG_FILENAME, HOME_ENV_VAR, HOME_SUBDIR, PROJECTS_SUBDIR, config_path, home_dir,
-    project_bucket, projects_dir,
+    CONFIG_FILENAME, HOME_ENV_VAR, HOME_SUBDIR, PROJECT_OVERRIDE_SUBDIR, PROJECTS_SUBDIR,
+    config_path, home_dir, project_bucket, projects_dir,
 };
 pub use types::{AgentConfig, AppConfig, LLMConfig, LLMProfile};

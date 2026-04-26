@@ -22,6 +22,7 @@ use mandeven::config::{self, AppConfig};
 use mandeven::cron::CronEngine;
 use mandeven::gateway::{Gateway, dispatch_channel};
 use mandeven::heartbeat::HeartbeatEngine;
+use mandeven::prompt::PromptEngine;
 use mandeven::session;
 use mandeven::tools;
 
@@ -41,6 +42,10 @@ async fn main() -> Result<(), DynError> {
     // — see agent-examples/claude-code-analysis/src/utils/sessionStoragePortable.ts.
     let cwd = std::env::current_dir()?;
     let sessions = Arc::new(session::Manager::new(config::project_bucket(&cwd)).await?);
+
+    // Prompt engine reads ~/.mandeven/AGENTS.md once at boot; the
+    // section cache fills lazily as iteration_system is called.
+    let prompts = Arc::new(PromptEngine::load(&cfg.data_dir())?);
 
     // Three queues:
     //   channels → gateway  (InboundMessage, identity-only)
@@ -89,6 +94,8 @@ async fn main() -> Result<(), DynError> {
         active_sessions.clone(),
         heartbeat_wiring,
         cron_wiring,
+        prompts,
+        cwd,
     )?;
 
     let gateway = Gateway::new(

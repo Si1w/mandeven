@@ -319,7 +319,7 @@ pub async fn compact_messages(
     cfg: &CompactConfig,
     state: &mut CompactState,
     trigger: CompactTrigger,
-    focus: Option<&str>,
+    summary_system_prompt: &str,
     timeout_secs: Option<u64>,
 ) -> Result<(Vec<Message>, CompactReport), CompactError> {
     if state.is_circuit_open(cfg) {
@@ -352,7 +352,7 @@ pub async fn compact_messages(
         client,
         cfg,
         &budgets,
-        focus,
+        summary_system_prompt,
         timeout_secs,
     )
     .await
@@ -467,12 +467,18 @@ async fn summarize_with_ptl_fallback(
     client: &dyn BaseLLMClient,
     cfg: &CompactConfig,
     budgets: &CompactBudgets,
-    focus: Option<&str>,
+    summary_system_prompt: &str,
     timeout_secs: Option<u64>,
 ) -> Result<String, CompactError> {
     let mut ptl_attempts: u8 = 0;
     loop {
-        let request = build_summary_request(compact_region, profile, budgets, focus, timeout_secs);
+        let request = build_summary_request(
+            compact_region,
+            profile,
+            budgets,
+            summary_system_prompt,
+            timeout_secs,
+        );
         match client.complete(request).await {
             Ok(resp) => {
                 let summary = resp.content.unwrap_or_default().trim().to_string();
@@ -533,16 +539,15 @@ fn build_summary_request(
     compact_region: &[Message],
     profile: &LLMProfile,
     budgets: &CompactBudgets,
-    focus: Option<&str>,
+    summary_system_prompt: &str,
     timeout_secs: Option<u64>,
 ) -> Request {
     let dump = format_messages_as_dump(compact_region);
-    let system_prompt = build_summary_system_prompt(focus);
 
     Request {
         messages: vec![
             Message::System {
-                content: system_prompt,
+                content: summary_system_prompt.to_string(),
             },
             Message::User { content: dump },
         ],
@@ -555,26 +560,6 @@ fn build_summary_request(
             enabled: false,
             reasoning_effort: None,
         }),
-    }
-}
-
-/// Base instructions for the summarizing LLM. Tuned for "preserve
-/// what later turns will need" rather than "make it short".
-const COMPACT_SYSTEM_PROMPT: &str = "You are summarizing the older portion of a conversation \
-between a user and an AI agent. Produce a concise prose summary that preserves: \
-(1) the user's goals and any standing constraints they declared; \
-(2) decisions made and the reasoning behind them; \
-(3) tool results that the assistant later relied on; \
-(4) anything the assistant promised to do later. \
-Drop chitchat and verbose tool output. Output ONLY the summary text, \
-no preamble, no closing remarks.";
-
-fn build_summary_system_prompt(focus: Option<&str>) -> String {
-    match focus {
-        None => COMPACT_SYSTEM_PROMPT.to_string(),
-        Some(f) => format!(
-            "{COMPACT_SYSTEM_PROMPT}\n\nUser-supplied focus area (prioritize when summarizing): {f}"
-        ),
     }
 }
 
@@ -865,14 +850,6 @@ mod tests {
         assert!(is_ptl_error(&mk("Maximum context window")));
         assert!(!is_ptl_error(&mk("invalid api key")));
         assert!(!is_ptl_error(&mk("rate limit")));
-    }
-
-    #[test]
-    fn summary_system_prompt_appends_focus() {
-        let base = build_summary_system_prompt(None);
-        let focused = build_summary_system_prompt(Some("recent file edits"));
-        assert!(focused.starts_with(&base));
-        assert!(focused.contains("recent file edits"));
     }
 
     #[test]

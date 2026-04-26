@@ -22,8 +22,10 @@ pub use error::{Error, Result};
 pub use types::{CallOutcome, Iteration};
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 
+use chrono::Utc;
 use futures::StreamExt;
 use uuid::Uuid;
 
@@ -43,6 +45,7 @@ use crate::llm::{
     self, BaseLLMClient, CompactTrigger, FinishReason, Message, Request, ResponseStream, Thinking,
     ToolCall, Usage,
 };
+use crate::prompt::{PromptContext, PromptEngine};
 use crate::session;
 use crate::tools;
 use crate::tools::heartbeat::{
@@ -52,13 +55,6 @@ use crate::tools::heartbeat::{
 use self::command::{
     AgentCommandCtx, CompactCmdMatch, format_compact_report, parse_compact_command,
 };
-
-/// System prompt used to generate a short session title from the first
-/// user message. This lives inline for now and will migrate to the
-/// AGENTS.md-style prompt layer when that lands.
-const TITLE_SYSTEM_PROMPT: &str = "Generate a short, descriptive title (max 8 words) for a conversation \
-     starting with the following user message. Reply with only the title, \
-     no quotes or punctuation.";
 
 /// Upper bound on completion tokens for title generation.
 const TITLE_MAX_TOKENS: u32 = 32;
@@ -74,15 +70,6 @@ const FALLBACK_TITLE_MAX_CHARS: usize = 40;
 // `HeartbeatConfig.target` once that field lands. See the
 // `target-routing` TODO on `crate::heartbeat::HeartbeatConfig`.
 const HEARTBEAT_TARGET_CHANNEL: &str = "tui";
-
-/// System prompt for heartbeat phase-1. Constrains the model to a
-/// single tool call so the answer is structured rather than free
-/// text.
-const HEARTBEAT_DECIDE_SYSTEM_PROMPT: &str = "You are the heartbeat decision step. \
-    Read the heartbeat checklist provided and call the heartbeat_decide tool exactly once. \
-    Use action=\"skip\" when nothing in the checklist needs attention right now. \
-    Use action=\"run\" with a concise one-or-two-sentence summary in `tasks` when at \
-    least one item should be acted on now.";
 
 /// Token cap for phase-1. Phase-1 only ever emits a tool call payload
 /// (skip/run + a short tasks string), so a tight cap is enough.
@@ -136,6 +123,17 @@ pub struct Agent {
     /// ([`Agent::iteration`]) and the manual `/compact` command
     /// (`dispatch_command`) bump it from `&self` async contexts.
     compact_state: Arc<AsyncMutex<CompactState>>,
+    /// Prompt assembly engine. Owns `AGENTS.md` plus the section
+    /// cache; every call site (`generate_title`, `heartbeat_decide`,
+    /// the compact pipeline, the iteration system prompt) goes
+    /// through it so future per-task prompt changes only touch one
+    /// module.
+    prompt: Arc<PromptEngine>,
+    /// Process launch directory captured once in `main`. Surfaces in
+    /// the per-call `PromptContext.cwd` for `iteration_system`.
+    /// Mandeven keeps this stable for the lifetime of the run — the
+    /// agent never `cd`s — matching Claude Code's `getOriginalCwd`.
+    cwd: PathBuf,
 }
 
 /// Options for the optional heartbeat wiring. Constructed by
@@ -189,8 +187,8 @@ impl Agent {
     ///   absent from the config catalog.
     /// - [`Error::UnknownProvider`] when the provider is not
     ///   registered in [`crate::llm::providers`].
-    // The eight arguments don't cluster naturally — bundling them into
-    // a `Wirings`-style struct just for clippy would obscure that this
+    // The arguments don't cluster naturally — bundling them into a
+    // `Wirings`-style struct just for clippy would obscure that this
     // is an internal constructor called once from `main.rs`.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -202,6 +200,8 @@ impl Agent {
         active_sessions: ActiveSessions,
         heartbeat: Option<HeartbeatWiring>,
         cron: Option<CronWiring>,
+        prompt: Arc<PromptEngine>,
+        cwd: PathBuf,
     ) -> Result<Self> {
         let (provider_name, model_name) = cfg
             .llm
@@ -256,6 +256,8 @@ impl Agent {
             active_sessions,
             compact_config: cfg.agent.compact.clone(),
             compact_state: Arc::new(AsyncMutex::new(CompactState::new())),
+            prompt,
+            cwd,
         })
     }
 
@@ -473,17 +475,9 @@ impl Agent {
     /// errs on the side of staying silent.
     async fn heartbeat_decide(&self, tick: &HeartbeatTick) -> Result<HeartbeatDecision> {
         let request = Request {
-            messages: vec![
-                Message::System {
-                    content: HEARTBEAT_DECIDE_SYSTEM_PROMPT.into(),
-                },
-                Message::User {
-                    content: format!(
-                        "Current time: {}\n\nHEARTBEAT.md contents:\n\n{}",
-                        tick.at, tick.content
-                    ),
-                },
-            ],
+            messages: self
+                .prompt
+                .heartbeat_decide_messages(&tick.content, tick.at),
             tools: vec![heartbeat_decide_tool()],
             model_name: self.profile.model_name.clone(),
             max_tokens: Some(HEARTBEAT_DECIDE_MAX_TOKENS),
@@ -601,6 +595,7 @@ impl Agent {
             return Ok(messages);
         }
 
+        let summary_system = self.prompt.compact_summary_system(None);
         match compact::compact_messages(
             messages.clone(),
             &self.profile,
@@ -608,7 +603,7 @@ impl Agent {
             &self.compact_config,
             &mut state,
             CompactTrigger::Auto,
-            None,
+            &summary_system,
             self.timeout_secs,
         )
         .await
@@ -617,6 +612,12 @@ impl Agent {
                 self.sessions
                     .replace_messages(&iter.session, compacted.clone())
                     .await?;
+                // Compaction rewrites the conversation prefix, so any
+                // cached `iteration_system` sections are about to be
+                // re-emitted into a brand-new context. Drop the cache
+                // to mirror Claude Code's `clearSystemPromptSections`
+                // behavior — same reasoning, same timing.
+                self.prompt.clear_cache();
                 Ok(compacted)
             }
             Err(err) => {
@@ -641,6 +642,7 @@ impl Agent {
         focus: Option<String>,
     ) -> Result<()> {
         let messages = self.load_history(&session).await?;
+        let summary_system = self.prompt.compact_summary_system(focus.as_deref());
         let mut state = self.compact_state.lock().await;
         let result = compact::compact_messages(
             messages,
@@ -649,7 +651,7 @@ impl Agent {
             &self.compact_config,
             &mut state,
             CompactTrigger::Manual,
-            focus.as_deref(),
+            &summary_system,
             self.timeout_secs,
         )
         .await;
@@ -661,6 +663,10 @@ impl Agent {
         let payload = match result {
             Ok((compacted, report)) => {
                 self.sessions.replace_messages(&session, compacted).await?;
+                // Same reasoning as the auto path in
+                // `maybe_auto_compact`: the prefix changed, so the
+                // section cache should rebuild.
+                self.prompt.clear_cache();
                 OutboundPayload::Notice(format_compact_report(&report))
             }
             Err(err) => OutboundPayload::Error(format!("/compact failed: {err}")),
@@ -703,6 +709,14 @@ impl Agent {
 
             let messages = self.load_history(&iter.session).await?;
             let messages = self.maybe_auto_compact(iter, messages).await?;
+            // Prepend the freshly-built iteration system prompt
+            // here rather than persisting it: env_info changes every
+            // call, AGENTS.md edits should take effect on the next
+            // iteration without rewriting history, and Claude Code
+            // does the same — the system prompt is rendered into
+            // toolUseContext.renderedSystemPrompt per call, never
+            // appended to the transcript.
+            let messages = self.prepend_iteration_system(messages);
             let outcome = self.call(iter, messages).await?;
             let CallOutcome {
                 content,
@@ -743,6 +757,23 @@ impl Agent {
         let request = self.build_request(messages);
         let stream = self.client.stream(request).await?;
         self.stream_to_channel(iter, stream).await
+    }
+
+    /// Render the iteration system prompt and prepend it to
+    /// `messages`. Called from [`Self::iteration`] only — the title
+    /// and heartbeat-decide call paths use their own specialized
+    /// prompts and must not see the iteration system block.
+    fn prepend_iteration_system(&self, mut messages: Vec<Message>) -> Vec<Message> {
+        let ctx = PromptContext {
+            now: Utc::now(),
+            model_id: &self.profile.model_name,
+            cwd: &self.cwd,
+        };
+        let system = self.prompt.iteration_system(&ctx).into_message();
+        let mut out = Vec::with_capacity(messages.len() + 1);
+        out.push(system);
+        out.append(&mut messages);
+        out
     }
 
     /// Consume a [`ResponseStream`], forwarding text chunks to the bus
@@ -843,14 +874,7 @@ impl Agent {
     /// Generate a short session title from the first user message
     /// using a non-streaming completion.
     async fn generate_title(&self, user_input: &str) -> Result<String> {
-        let mut request = self.build_request(vec![
-            Message::System {
-                content: TITLE_SYSTEM_PROMPT.into(),
-            },
-            Message::User {
-                content: user_input.into(),
-            },
-        ]);
+        let mut request = self.build_request(self.prompt.title_messages(user_input));
         // Title generation overrides the profile defaults: no tools
         // advertised, tighter token budget. Temperature is left to
         // the provider — not every API honors it (DeepSeek's

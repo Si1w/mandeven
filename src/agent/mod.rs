@@ -36,6 +36,7 @@ use crate::bus::{
 };
 use crate::command::{CommandOutcome, Router};
 use crate::config::{AgentConfig, AppConfig, LLMProfile};
+use crate::cron;
 use crate::gateway::{ActiveSessions, DispatchReceiver, InboundDispatch};
 use crate::heartbeat::{HeartbeatEngine, HeartbeatTick};
 use crate::llm::{
@@ -115,6 +116,13 @@ pub struct Agent {
     /// Receiver paired with the heartbeat engine. Raced against
     /// `inbox` in [`Agent::run`].
     heartbeat_rx: Option<mpsc::Receiver<HeartbeatTick>>,
+    /// Cron control handle, present iff the engine was wired in.
+    /// Cloned into [`AgentCommandCtx`] so `/cron` subcommands can
+    /// list, trigger, or pause individual jobs.
+    cron: Option<Arc<cron::CronEngine>>,
+    /// Receiver paired with the cron engine. Raced against `inbox`
+    /// (and the heartbeat receiver, when present) in [`Agent::run`].
+    cron_rx: Option<mpsc::Receiver<cron::CronTick>>,
     /// Live view of the gateway's per-channel session bindings.
     /// Heartbeat ticks read this to land in the user's main session
     /// rather than running isolated; written only by the gateway.
@@ -141,6 +149,17 @@ pub struct HeartbeatWiring {
     pub rx: mpsc::Receiver<HeartbeatTick>,
 }
 
+/// Options for the optional cron wiring. Same shape as
+/// [`HeartbeatWiring`] — `main.rs` constructs the engine and threads
+/// these handles into [`Agent::new`].
+pub struct CronWiring {
+    /// Control handle. Stored on the agent and cloned into
+    /// [`AgentCommandCtx`].
+    pub engine: Arc<cron::CronEngine>,
+    /// Tick stream from the engine.
+    pub rx: mpsc::Receiver<cron::CronTick>,
+}
+
 /// Single iteration of the agent's `select!` loop. Names what was
 /// chosen so [`Agent::run`]'s `match` reads as a state machine.
 enum Event {
@@ -149,7 +168,9 @@ enum Event {
     Dispatch(Option<InboundDispatch>),
     /// Heartbeat tick fired. `None` means the engine dropped its
     /// sender — the branch is dynamically disabled afterwards.
-    Tick(Option<HeartbeatTick>),
+    HeartbeatTick(Option<HeartbeatTick>),
+    /// Cron tick fired. `None` semantics match the heartbeat arm.
+    CronTick(Option<cron::CronTick>),
 }
 
 impl Agent {
@@ -168,6 +189,10 @@ impl Agent {
     ///   absent from the config catalog.
     /// - [`Error::UnknownProvider`] when the provider is not
     ///   registered in [`crate::llm::providers`].
+    // The eight arguments don't cluster naturally — bundling them into
+    // a `Wirings`-style struct just for clippy would obscure that this
+    // is an internal constructor called once from `main.rs`.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         cfg: &AppConfig,
         sessions: Arc<session::Manager>,
@@ -176,6 +201,7 @@ impl Agent {
         out: OutboundSender,
         active_sessions: ActiveSessions,
         heartbeat: Option<HeartbeatWiring>,
+        cron: Option<CronWiring>,
     ) -> Result<Self> {
         let (provider_name, model_name) = cfg
             .llm
@@ -202,9 +228,14 @@ impl Agent {
         // commands here mutate agent-internal state.
         let mut agent_command = Router::<AgentCommandCtx>::new();
         agent_command.register(Arc::new(command::Heartbeat));
+        agent_command.register(Arc::new(command::Cron));
 
         let (heartbeat_handle, heartbeat_rx) = match heartbeat {
             Some(HeartbeatWiring { engine, rx }) => (Some(engine), Some(rx)),
+            None => (None, None),
+        };
+        let (cron_handle, cron_rx) = match cron {
+            Some(CronWiring { engine, rx }) => (Some(engine), Some(rx)),
             None => (None, None),
         };
 
@@ -220,6 +251,8 @@ impl Agent {
             command: agent_command,
             heartbeat: heartbeat_handle,
             heartbeat_rx,
+            cron: cron_handle,
+            cron_rx,
             active_sessions,
             compact_config: cfg.agent.compact.clone(),
             compact_state: Arc::new(AsyncMutex::new(CompactState::new())),
@@ -240,19 +273,30 @@ impl Agent {
     /// future shutdown-time failures.
     pub async fn run(mut self) -> Result<()> {
         loop {
-            // Split mut borrows so `tokio::select!` can race two
+            // Split mut borrows so `tokio::select!` can race three
             // queues without a whole-self conflict. The selected
             // branch's `await` ends before any `&self` method call
-            // below (NLL releases `inbox` / `heartbeat_rx` borrows),
-            // so subsequent calls into `self.handle_*` are clean.
+            // below (NLL releases the field borrows), so subsequent
+            // calls into `self.handle_*` are clean.
             let inbox = &mut self.inbox;
-            let event = match self.heartbeat_rx.as_mut() {
-                Some(hb) => tokio::select! {
+            let event = match (self.heartbeat_rx.as_mut(), self.cron_rx.as_mut()) {
+                (Some(hb), Some(cr)) => tokio::select! {
                     biased;
                     msg = inbox.recv() => Event::Dispatch(msg),
-                    tick = hb.recv() => Event::Tick(tick),
+                    tick = hb.recv() => Event::HeartbeatTick(tick),
+                    tick = cr.recv() => Event::CronTick(tick),
                 },
-                None => Event::Dispatch(inbox.recv().await),
+                (Some(hb), None) => tokio::select! {
+                    biased;
+                    msg = inbox.recv() => Event::Dispatch(msg),
+                    tick = hb.recv() => Event::HeartbeatTick(tick),
+                },
+                (None, Some(cr)) => tokio::select! {
+                    biased;
+                    msg = inbox.recv() => Event::Dispatch(msg),
+                    tick = cr.recv() => Event::CronTick(tick),
+                },
+                (None, None) => Event::Dispatch(inbox.recv().await),
             };
 
             match event {
@@ -262,11 +306,15 @@ impl Agent {
                         return Ok(());
                     }
                 }
-                Event::Tick(None) => {
+                Event::HeartbeatTick(None) => {
                     // Engine dropped its sender — disable the branch.
                     self.heartbeat_rx = None;
                 }
-                Event::Tick(Some(tick)) => self.handle_tick(tick).await?,
+                Event::HeartbeatTick(Some(tick)) => self.handle_tick(tick).await?,
+                Event::CronTick(None) => {
+                    self.cron_rx = None;
+                }
+                Event::CronTick(Some(tick)) => self.handle_cron_tick(tick).await?,
             }
         }
     }
@@ -356,6 +404,68 @@ impl Agent {
         Ok(())
     }
 
+    /// Handle a cron tick.
+    ///
+    /// Unlike heartbeat there is no phase-1 decide step — the user
+    /// already told us when this job should run, so we go straight
+    /// into a phase-2 iteration with the job's prompt as the user
+    /// message. The outcome is reported back to
+    /// [`cron::CronEngine::report_outcome`] so consecutive-error
+    /// auto-disable can fire.
+    ///
+    /// Skipped silently when the `tui` channel has no active session
+    /// yet — same reasoning as heartbeat (no place to land output).
+    /// The engine still hears about the skip so `last_status` shows
+    /// it.
+    async fn handle_cron_tick(&self, tick: cron::CronTick) -> Result<()> {
+        let target = ChannelID::new(HEARTBEAT_TARGET_CHANNEL);
+        let session = {
+            let map = self.active_sessions.lock().await;
+            map.get(&target).cloned()
+        };
+        let Some(session) = session else {
+            if let Some(engine) = self.cron.as_ref() {
+                engine
+                    .report_outcome(&tick.job_id, cron::RunStatus::Skipped, None)
+                    .await;
+            }
+            return Ok(());
+        };
+
+        let iter = Iteration {
+            session: session.clone(),
+            channel: target.clone(),
+        };
+        match self.iteration(&iter, tick.prompt.clone()).await {
+            Ok(()) => {
+                if let Some(engine) = self.cron.as_ref() {
+                    engine
+                        .report_outcome(&tick.job_id, cron::RunStatus::Ok, None)
+                        .await;
+                }
+            }
+            Err(err) => {
+                let err_text = err.to_string();
+                if let Some(engine) = self.cron.as_ref() {
+                    engine
+                        .report_outcome(
+                            &tick.job_id,
+                            cron::RunStatus::Error,
+                            Some(err_text.clone()),
+                        )
+                        .await;
+                }
+                let reply = OutboundMessage::new(
+                    target,
+                    session,
+                    OutboundPayload::Error(format!("[cron:{}] {err_text}", tick.job_name)),
+                );
+                let _ = self.out.send(reply).await;
+            }
+        }
+        Ok(())
+    }
+
     /// Phase-1: ask the model to call `heartbeat_decide` and report
     /// `skip` or `run`. Any non-conforming response (no tool call,
     /// wrong tool name, malformed JSON, `run` without `tasks`) is
@@ -440,6 +550,7 @@ impl Agent {
             channel: channel.clone(),
             session: session.clone(),
             heartbeat: self.heartbeat.clone(),
+            cron: self.cron.clone(),
         };
         let outcome = self.command.dispatch(body, &ctx).await;
 

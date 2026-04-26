@@ -14,11 +14,12 @@ use std::sync::Arc;
 
 use tokio::sync::Mutex;
 
-use mandeven::agent::{Agent, HeartbeatWiring};
+use mandeven::agent::{Agent, CronWiring, HeartbeatWiring};
 use mandeven::bus::{Bus, ChannelID};
 use mandeven::channels::Manager;
 use mandeven::cli::CliChannel;
 use mandeven::config::AppConfig;
+use mandeven::cron::CronEngine;
 use mandeven::gateway::{Gateway, dispatch_channel};
 use mandeven::heartbeat::HeartbeatEngine;
 use mandeven::session;
@@ -66,6 +67,16 @@ async fn main() -> Result<(), DynError> {
         None
     };
 
+    let cron_wiring = if cfg.agent.cron.enabled {
+        let data_dir = cfg.data_dir();
+        let (engine, rx) = CronEngine::new(&cfg.agent.cron, &data_dir).await?;
+        let engine = Arc::new(engine);
+        engine.start().await;
+        Some(CronWiring { engine, rx })
+    } else {
+        None
+    };
+
     let agent = Agent::new(
         &cfg,
         sessions.clone(),
@@ -74,6 +85,7 @@ async fn main() -> Result<(), DynError> {
         outbound_tx.clone(),
         active_sessions.clone(),
         heartbeat_wiring,
+        cron_wiring,
     )?;
 
     let gateway = Gateway::new(

@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::agent::compact::CompactConfig;
+use crate::cron::CronConfig;
 use crate::heartbeat::HeartbeatConfig;
 
 /// Root configuration loaded from `./mandeven.toml`.
@@ -59,6 +60,12 @@ pub struct AgentConfig {
     /// with very different `max_context_window` values.
     #[serde(default)]
     pub compact: CompactConfig,
+
+    /// Per-agent cron configuration. Just the on/off switch — job
+    /// definitions live in `<data_dir>/cron/jobs.json` so they can
+    /// be added or removed at runtime without editing `mandeven.toml`.
+    #[serde(default)]
+    pub cron: CronConfig,
 }
 
 impl AppConfig {

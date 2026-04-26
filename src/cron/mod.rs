@@ -18,11 +18,13 @@
 //! `mandeven.toml` is read-only at runtime and not the right home for
 //! agent-mutable data. Mirrors openclaw / nanobot / claw0.
 
+pub mod engine;
 pub mod error;
 pub mod schedule;
 pub mod store;
 pub mod types;
 
+pub use engine::{AUTO_DISABLE_AFTER, CronEngine};
 pub use error::{Error, Result};
 pub use schedule::{Schedule, ScheduleError};
 pub use store::{Store, StoreFile};

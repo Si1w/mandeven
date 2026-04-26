@@ -13,6 +13,7 @@ use super::paths;
 use crate::agent::compact::CompactConfig;
 use crate::cron::CronConfig;
 use crate::heartbeat::HeartbeatConfig;
+use crate::skill::SkillConfig;
 
 /// Root configuration loaded from `~/.mandeven/mandeven.toml`.
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -66,6 +67,12 @@ pub struct AgentConfig {
     /// be added or removed at runtime without editing `mandeven.toml`.
     #[serde(default)]
     pub cron: CronConfig,
+
+    /// Per-agent skill configuration. Just the on/off switch —
+    /// skill definitions live in `~/.mandeven/skills/<name>/SKILL.md`
+    /// and are discovered at boot. Same pattern as cron.
+    #[serde(default)]
+    pub skill: SkillConfig,
 }
 
 impl AppConfig {

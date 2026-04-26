@@ -24,6 +24,7 @@ use mandeven::gateway::{Gateway, dispatch_channel};
 use mandeven::heartbeat::HeartbeatEngine;
 use mandeven::prompt::PromptEngine;
 use mandeven::session;
+use mandeven::skill::{self, SkillIndex};
 use mandeven::tools;
 
 /// Identifier for the built-in TUI channel.
@@ -43,9 +44,19 @@ async fn main() -> Result<(), DynError> {
     let cwd = std::env::current_dir()?;
     let sessions = Arc::new(session::Manager::new(config::project_bucket(&cwd)).await?);
 
-    // Prompt engine reads ~/.mandeven/AGENTS.md once at boot; the
+    // Skill index reads ~/.mandeven/skills/<name>/SKILL.md once at
+    // boot. Disabled => empty index, no SkillTool registration, no
+    // skills_index section in the prompt.
+    let skill_index = Arc::new(if cfg.agent.skill.enabled {
+        skill::load(&cfg.data_dir().join(skill::SKILLS_SUBDIR))?
+    } else {
+        SkillIndex::new()
+    });
+
+    // Prompt engine reads ~/.mandeven/AGENTS.md once at boot and
+    // borrows the skill index for the skills_index section. The
     // section cache fills lazily as iteration_system is called.
-    let prompts = Arc::new(PromptEngine::load(&cfg.data_dir())?);
+    let prompts = Arc::new(PromptEngine::load(&cfg.data_dir(), &skill_index)?);
 
     // Three queues:
     //   channels → gateway  (InboundMessage, identity-only)
@@ -59,6 +70,9 @@ async fn main() -> Result<(), DynError> {
 
     let mut tool_registry = tools::Registry::new();
     tools::register_builtins(&mut tool_registry);
+    if !skill_index.is_empty() {
+        tool_registry.register(Arc::new(tools::skill::SkillTool::new(skill_index.clone())));
+    }
 
     // Shared per-channel session map: gateway is the writer, the
     // agent reads it (heartbeat tick path) so heartbeat ticks land in
@@ -110,6 +124,7 @@ async fn main() -> Result<(), DynError> {
     manager.register(Arc::new(CliChannel::new(
         ChannelID::new(TUI_CHANNEL),
         sessions,
+        skill_index,
     )));
 
     let agent_handle = tokio::spawn(agent.run());

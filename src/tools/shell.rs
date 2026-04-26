@@ -40,7 +40,7 @@ use tokio::process::Command;
 use tokio::time::timeout;
 
 use super::error::{Error, Result};
-use super::{BaseTool, MAX_TOOL_RESULT_BYTES};
+use super::{BaseTool, MAX_TOOL_RESULT_BYTES, ToolOutcome};
 use crate::llm::Tool;
 
 /// Default per-call timeout when the caller omits `timeout_secs`.
@@ -116,7 +116,7 @@ impl BaseTool for Shell {
         }
     }
 
-    async fn call(&self, args: Value) -> Result<Value> {
+    async fn call(&self, args: Value) -> Result<ToolOutcome> {
         let p: ShellParams =
             serde_json::from_value(args).map_err(|source| Error::InvalidArguments {
                 tool: "shell".into(),
@@ -184,10 +184,7 @@ impl BaseTool for Shell {
         }
         write!(result, "Exit code: {exit}").expect("writing to String is infallible");
 
-        Ok(Value::String(middle_truncate(
-            &result,
-            MAX_TOOL_RESULT_BYTES,
-        )))
+        Ok(Value::String(middle_truncate(&result, MAX_TOOL_RESULT_BYTES)).into())
     }
 }
 

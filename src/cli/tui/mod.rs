@@ -47,8 +47,10 @@ pub fn render(f: &mut Frame<'_>, state: &mut CliState) {
     render_status_line(f, chunks[2], state);
     render_input(f, chunks[3], state);
 
-    if matches!(state.overlay, Some(Overlay::Help)) {
-        render_help_overlay(f, chunks[1]);
+    match state.overlay {
+        Some(Overlay::Help) => render_help_overlay(f, chunks[1]),
+        Some(Overlay::Skills) => render_skills_overlay(f, chunks[1], &state.skills),
+        None => {}
     }
 }
 
@@ -321,6 +323,71 @@ fn render_help_overlay(f: &mut Frame<'_>, area: Rect) {
         Paragraph::new(build_help_text()).wrap(Wrap { trim: false }),
         content_area,
     );
+}
+
+/// Render the skills overlay.
+///
+/// Shows one row per loaded skill with its name and (truncated)
+/// description. Empty catalog gets a friendly placeholder rather
+/// than an empty box.
+fn render_skills_overlay(f: &mut Frame<'_>, area: Rect, skills: &[(String, String)]) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+
+    // 2 lines for title block padding + 1 header line + N skill lines.
+    let body_lines: u16 = if skills.is_empty() {
+        1
+    } else {
+        u16::try_from(skills.len() + 1).unwrap_or(u16::MAX)
+    };
+    let overlay_rect = full_width_rect(area, body_lines + 4);
+    f.render_widget(Clear, overlay_rect);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(dim_style())
+        .title(Line::styled(" skills ", brand_style()))
+        .title_bottom(Line::styled(
+            overlay_footer(overlay_rect.width),
+            dim_style(),
+        ));
+
+    let inner = block.inner(overlay_rect);
+    f.render_widget(block, overlay_rect);
+
+    let content_area = inner.inner(Margin {
+        horizontal: 2,
+        vertical: 1,
+    });
+    f.render_widget(
+        Paragraph::new(build_skills_text(skills)).wrap(Wrap { trim: false }),
+        content_area,
+    );
+}
+
+fn build_skills_text(skills: &[(String, String)]) -> Text<'_> {
+    if skills.is_empty() {
+        return Text::from(vec![Line::styled(
+            "no skills loaded — drop a SKILL.md into ~/.mandeven/skills/<name>/",
+            dim_style(),
+        )]);
+    }
+
+    let mut lines: Vec<Line<'_>> = Vec::with_capacity(skills.len() + 1);
+    lines.push(Line::styled(
+        "Type /<name> to invoke. Esc to dismiss.",
+        dim_style(),
+    ));
+    for (name, description) in skills {
+        lines.push(Line::from(vec![
+            Span::styled(format!("/{name}"), brand_style()),
+            Span::raw("  "),
+            Span::styled(description.as_str(), dim_style()),
+        ]));
+    }
+    Text::from(lines)
 }
 
 fn overlay_footer(width: u16) -> &'static str {

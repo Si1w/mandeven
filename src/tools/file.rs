@@ -23,7 +23,7 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use super::error::{Error, Result};
-use super::{BaseTool, MAX_TOOL_RESULT_BYTES};
+use super::{BaseTool, MAX_TOOL_RESULT_BYTES, ToolOutcome};
 use crate::llm::Tool;
 
 /// Default number of lines returned by `file_read` when `limit` is
@@ -64,7 +64,7 @@ impl BaseTool for FileRead {
         }
     }
 
-    async fn call(&self, args: Value) -> Result<Value> {
+    async fn call(&self, args: Value) -> Result<ToolOutcome> {
         let p: ReadParams = parse_params("file_read", args)?;
         if is_dev_path(&p.path) {
             return Err(exec("file_read", format!("reading {} is blocked", p.path)));
@@ -90,7 +90,7 @@ impl BaseTool for FileRead {
             lines.len()
         };
         if total == 0 {
-            return Ok(Value::String(format!("(Empty file: {})", p.path)));
+            return Ok(Value::String(format!("(Empty file: {})", p.path)).into());
         }
 
         let offset = p.offset.unwrap_or(1).max(1);
@@ -137,7 +137,7 @@ impl BaseTool for FileRead {
                 .expect("writing to String is infallible");
         }
 
-        Ok(Value::String(out))
+        Ok(Value::String(out).into())
     }
 }
 
@@ -172,7 +172,7 @@ impl BaseTool for FileWrite {
         }
     }
 
-    async fn call(&self, args: Value) -> Result<Value> {
+    async fn call(&self, args: Value) -> Result<ToolOutcome> {
         let p: WriteParams = parse_params("file_write", args)?;
         let path = PathBuf::from(&p.path);
         if let Some(parent) = path.parent()
@@ -185,11 +185,7 @@ impl BaseTool for FileWrite {
         tokio::fs::write(&path, &p.content)
             .await
             .map_err(|e| exec("file_write", format!("{}: {e}", p.path)))?;
-        Ok(Value::String(format!(
-            "Wrote {} bytes to {}",
-            p.content.len(),
-            p.path
-        )))
+        Ok(Value::String(format!("Wrote {} bytes to {}", p.content.len(), p.path)).into())
     }
 }
 
@@ -241,7 +237,7 @@ impl BaseTool for FileEdit {
         }
     }
 
-    async fn call(&self, args: Value) -> Result<Value> {
+    async fn call(&self, args: Value) -> Result<ToolOutcome> {
         let p: EditParams = parse_params("file_edit", args)?;
         let path = PathBuf::from(&p.path);
 
@@ -257,7 +253,7 @@ impl BaseTool for FileEdit {
             tokio::fs::write(&path, &p.new_string)
                 .await
                 .map_err(|e| exec("file_edit", format!("{}: {e}", p.path)))?;
-            return Ok(Value::String(format!("Created {}", p.path)));
+            return Ok(Value::String(format!("Created {}", p.path)).into());
         }
 
         let raw = tokio::fs::read(&path)
@@ -322,7 +318,8 @@ impl BaseTool for FileEdit {
             "Replaced {} occurrence(s) in {}",
             selected.len(),
             p.path
-        )))
+        ))
+        .into())
     }
 }
 

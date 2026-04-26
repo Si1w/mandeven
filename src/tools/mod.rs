@@ -16,6 +16,7 @@ pub mod error;
 pub mod file;
 pub mod heartbeat;
 pub mod shell;
+pub mod skill;
 
 pub use error::{Error, Result};
 
@@ -32,8 +33,49 @@ use serde_json::json;
 
 use crate::llm::{Message, Tool, ToolCall};
 
-/// Trait implemented by skills that expose a callable tool to the
-/// model.
+/// Outcome of one [`BaseTool::call`].
+///
+/// 99% of tools return [`Self::Result`] — a JSON value that becomes
+/// the [`Message::Tool`] content. The outlier is
+/// [`crate::tools::skill::SkillTool`], which uses [`Self::Inject`]
+/// to splice an additional [`Message::User`] (the SKILL.md body)
+/// into the conversation alongside the regular tool result. This
+/// matches Claude Code's `newMessages` mechanism on `SkillTool` (see
+/// [`agent-examples/claude-code-analysis/src/tools/SkillTool/SkillTool.ts:766`]).
+///
+/// `Result(value)` is freely constructed via `.into()` from any
+/// [`serde_json::Value`].
+#[derive(Debug)]
+pub enum ToolOutcome {
+    /// Plain tool result. Becomes a single [`Message::Tool`] in the
+    /// conversation.
+    Result(serde_json::Value),
+    /// Tool result plus extra messages to splice in immediately
+    /// after. The agent loop appends each in order, so a `SkillTool`
+    /// invocation produces:
+    ///
+    /// ```text
+    /// [tool] result
+    /// [user] SKILL.md body
+    /// ```
+    ///
+    /// The next iteration sees the skill body in user role and
+    /// reacts.
+    Inject {
+        /// Payload for the standard [`Message::Tool`] reply.
+        result: serde_json::Value,
+        /// Extra messages to splice after the tool reply.
+        messages: Vec<Message>,
+    },
+}
+
+impl From<serde_json::Value> for ToolOutcome {
+    fn from(value: serde_json::Value) -> Self {
+        Self::Result(value)
+    }
+}
+
+/// Trait implemented by tools that the model can invoke.
 ///
 /// Implementations typically derive their parameter schema from a
 /// `#[derive(serde::Deserialize, schemars::JsonSchema)]` struct and
@@ -44,14 +86,15 @@ pub trait BaseTool: Send + Sync {
     /// as the registry key.
     fn schema(&self) -> Tool;
 
-    /// Execute the tool with the parsed arguments object and return a
-    /// structured JSON result. The registry serializes the returned
-    /// value into the string payload of [`Message::Tool`].
+    /// Execute the tool with the parsed arguments object and return
+    /// either a plain result or a [`ToolOutcome::Inject`] effect.
+    /// Plain JSON values implement `Into<ToolOutcome>` so most tools
+    /// can keep returning `Ok(json!({...}))`-style values directly.
     ///
     /// # Errors
     ///
     /// Return [`Error::Execution`] for tool-specific runtime failures.
-    async fn call(&self, args: serde_json::Value) -> Result<serde_json::Value>;
+    async fn call(&self, args: serde_json::Value) -> Result<ToolOutcome>;
 }
 
 /// Registry of tools available to the agent.
@@ -86,27 +129,42 @@ impl Registry {
         self.tools.values().map(|t| t.schema()).collect()
     }
 
-    /// Dispatch a batch of tool invocations from the model. Always
-    /// produces exactly one [`Message::Tool`] per input call.
-    /// Successes carry the tool's JSON result; failures carry an
-    /// `{"error":"..."}` object so the model can react on the next
-    /// turn.
+    /// Dispatch a batch of tool invocations from the model.
+    ///
+    /// Always produces at least one [`Message::Tool`] per input
+    /// call (success → JSON result; failure → `{"error":"..."}`
+    /// object). Tools that return [`ToolOutcome::Inject`] additionally
+    /// splice the extra messages **after** their own tool reply, so
+    /// the output `Vec` may be longer than `calls.len()`.
     pub async fn dispatch(&self, calls: Vec<ToolCall>) -> Vec<Message> {
         let mut out = Vec::with_capacity(calls.len());
         for call in calls {
-            let content = match self.invoke(&call).await {
-                Ok(value) => serialize_result(&value),
-                Err(err) => error_content(&err.to_string()),
-            };
-            out.push(Message::Tool {
-                content,
-                tool_call_id: call.id,
-            });
+            match self.invoke(&call).await {
+                Ok(ToolOutcome::Result(value)) => {
+                    out.push(Message::Tool {
+                        content: serialize_result(&value),
+                        tool_call_id: call.id,
+                    });
+                }
+                Ok(ToolOutcome::Inject { result, messages }) => {
+                    out.push(Message::Tool {
+                        content: serialize_result(&result),
+                        tool_call_id: call.id,
+                    });
+                    out.extend(messages);
+                }
+                Err(err) => {
+                    out.push(Message::Tool {
+                        content: error_content(&err.to_string()),
+                        tool_call_id: call.id,
+                    });
+                }
+            }
         }
         out
     }
 
-    async fn invoke(&self, call: &ToolCall) -> Result<serde_json::Value> {
+    async fn invoke(&self, call: &ToolCall) -> Result<ToolOutcome> {
         let tool = self
             .tools
             .get(&call.name)

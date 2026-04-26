@@ -20,9 +20,11 @@ use std::path::Path;
 use chrono::{DateTime, Utc};
 
 use crate::llm::Message;
+use crate::skill::SkillIndex;
 
 use super::context::{
-    AGENTS_MD_NAME, ENV_INFO_NAME, agents_md_section, env_info_section, load_agents_md,
+    AGENTS_MD_NAME, ENV_INFO_NAME, SKILLS_INDEX_NAME, agents_md_section, env_info_section,
+    load_agents_md, skills_index_section,
 };
 use super::error::Result;
 use super::section::{Section, SectionCache, SystemPrompt};
@@ -52,24 +54,37 @@ pub struct PromptContext<'a> {
 pub struct PromptEngine {
     /// `AGENTS.md` body, `None` when the file is absent.
     agents_md: Option<String>,
+    /// Snapshot of skill `(name, description)` pairs, captured once
+    /// at construction so the cached `skills_index` section is built
+    /// from a stable input. Empty when no skills are loaded.
+    skill_entries: Vec<(String, String)>,
     cache: SectionCache,
 }
 
 impl PromptEngine {
     /// Construct an engine from the per-user data directory
-    /// ([`crate::config::home_dir`]).
+    /// ([`crate::config::home_dir`]) plus the boot-time
+    /// [`SkillIndex`].
     ///
-    /// Reads `AGENTS.md` once. Subsequent edits to the file are not
-    /// picked up until the future `/reload-prompt` command lands.
+    /// Reads `AGENTS.md` once and snapshots the skill catalog into a
+    /// `Vec<(name, description)>` — the engine doesn't keep an
+    /// `Arc<SkillIndex>` because the only piece of skill state it
+    /// needs is the index for the prompt section. The rest of the
+    /// agent reaches the index through its own `Arc`.
     ///
     /// # Errors
     ///
     /// - [`super::error::Error::AgentsMdRead`] when `AGENTS.md`
     ///   exists but the read fails.
-    pub fn load(data_dir: &Path) -> Result<Self> {
+    pub fn load(data_dir: &Path, skills: &SkillIndex) -> Result<Self> {
         let agents_md = load_agents_md(data_dir)?;
+        let skill_entries: Vec<(String, String)> = skills
+            .entries()
+            .map(|(n, d)| (n.to_string(), d.to_string()))
+            .collect();
         Ok(Self {
             agents_md,
+            skill_entries,
             cache: SectionCache::new(),
         })
     }
@@ -80,12 +95,18 @@ impl PromptEngine {
     /// module:
     ///
     /// ```text
-    /// intro                  ← static, cached
-    /// system_rules           ← static, cached
-    /// tone                   ← static, cached
-    /// agents_md (optional)   ← dynamic input, cached at first call
-    /// env_info               ← dynamic input, cached at first call
+    /// intro                     ← static, cached
+    /// system_rules              ← static, cached
+    /// tone                      ← static, cached
+    /// skills_index (optional)   ← cached, omitted when no skills
+    /// agents_md (optional)      ← cached
+    /// env_info                  ← cached
     /// ```
+    ///
+    /// `skills_index` lands ahead of `agents_md` because AGENTS.md
+    /// may reference skill names ("for git use /git-clean"); the
+    /// model needs to know what skills exist before reading the
+    /// project-specific instructions.
     ///
     /// Every section flows through [`SectionCache`] so the rendered
     /// bytes are stable for the lifetime of the engine — the
@@ -93,6 +114,11 @@ impl PromptEngine {
     /// cache. [`Self::clear_cache`] is the one explicit invalidation
     /// path, called from `/compact` after the conversation prefix
     /// has been rewritten.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the section cache mutex was poisoned by a prior
+    /// compute call — irrecoverable.
     #[must_use]
     pub fn iteration_system(&self, ctx: &PromptContext<'_>) -> SystemPrompt {
         let mut prompt = SystemPrompt::new();
@@ -100,6 +126,17 @@ impl PromptEngine {
         prompt.push(self.cached(INTRO_NAME, || INTRO.to_string()));
         prompt.push(self.cached(SYSTEM_RULES_NAME, || SYSTEM_RULES.to_string()));
         prompt.push(self.cached(TONE_NAME, || TONE.to_string()));
+
+        if !self.skill_entries.is_empty() {
+            let entries = self.skill_entries.clone();
+            prompt.push(self.cached(SKILLS_INDEX_NAME, move || {
+                // `skills_index_section` returns Some when entries
+                // is non-empty; we already gated on that above.
+                skills_index_section(&entries)
+                    .expect("non-empty entries produce Some")
+                    .content
+            }));
+        }
 
         if let Some(content) = &self.agents_md {
             let body = content.clone();
@@ -158,6 +195,7 @@ impl PromptEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::skill::{Skill, SkillFrontmatter};
     use std::env;
     use std::fs;
     use std::path::PathBuf;
@@ -175,10 +213,29 @@ mod tests {
         }
     }
 
+    fn engine_no_skills(data_dir: &Path) -> PromptEngine {
+        PromptEngine::load(data_dir, &SkillIndex::new()).unwrap()
+    }
+
+    fn engine_with_skills(data_dir: &Path, skills: Vec<(&str, &str)>) -> PromptEngine {
+        let skills: Vec<Skill> = skills
+            .into_iter()
+            .map(|(n, d)| Skill {
+                frontmatter: SkillFrontmatter {
+                    name: n.into(),
+                    description: d.into(),
+                },
+                body: String::new(),
+                source_path: PathBuf::from(format!("/tmp/{n}/SKILL.md")),
+            })
+            .collect();
+        PromptEngine::load(data_dir, &SkillIndex::from_skills(skills)).unwrap()
+    }
+
     #[test]
-    fn iteration_system_emits_expected_section_order() {
+    fn iteration_system_emits_expected_section_order_without_skills() {
         let dir = tempdir();
-        let engine = PromptEngine::load(&dir).unwrap();
+        let engine = engine_no_skills(&dir);
         let prompt = engine.iteration_system(&ctx(&dir));
 
         let names: Vec<&str> = prompt.iter_named().map(|(n, _)| n).collect();
@@ -186,17 +243,34 @@ mod tests {
     }
 
     #[test]
-    fn iteration_system_includes_agents_md_when_present() {
+    fn iteration_system_inserts_skills_index_before_agents_md() {
         let dir = tempdir();
         fs::write(dir.join("AGENTS.md"), "be terse\n").unwrap();
-        let engine = PromptEngine::load(&dir).unwrap();
+        let engine = engine_with_skills(&dir, vec![("git-clean", "Clean up branch")]);
         let prompt = engine.iteration_system(&ctx(&dir));
 
         let names: Vec<&str> = prompt.iter_named().map(|(n, _)| n).collect();
         assert_eq!(
             names,
-            vec!["intro", "system_rules", "tone", "agents_md", "env_info"]
+            vec![
+                "intro",
+                "system_rules",
+                "tone",
+                "skills_index",
+                "agents_md",
+                "env_info",
+            ]
         );
+    }
+
+    #[test]
+    fn iteration_system_omits_skills_index_when_no_skills_loaded() {
+        let dir = tempdir();
+        fs::write(dir.join("AGENTS.md"), "be terse\n").unwrap();
+        let engine = engine_no_skills(&dir);
+        let prompt = engine.iteration_system(&ctx(&dir));
+        let names: Vec<&str> = prompt.iter_named().map(|(n, _)| n).collect();
+        assert!(!names.contains(&"skills_index"));
     }
 
     #[test]
@@ -205,7 +279,7 @@ mod tests {
         // for DeepSeek's automatic prefix cache — every section,
         // not just the static head, must reproduce identically.
         let dir = tempdir();
-        let engine = PromptEngine::load(&dir).unwrap();
+        let engine = engine_no_skills(&dir);
         let p1 = engine.iteration_system(&ctx(&dir));
         let p2 = engine.iteration_system(&ctx(&dir));
 
@@ -221,7 +295,7 @@ mod tests {
         // load-bearing invariant for `/compact` followed by an
         // immediate iteration.
         let dir = tempdir();
-        let engine = PromptEngine::load(&dir).unwrap();
+        let engine = engine_no_skills(&dir);
         let before = engine.iteration_system(&ctx(&dir));
         engine.clear_cache();
         let after = engine.iteration_system(&ctx(&dir));

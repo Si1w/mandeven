@@ -47,3 +47,27 @@ impl Command<CliCommandCtx> for Help {
         CommandOutcome::Handled
     }
 }
+
+/// `/skills` — open the skills overlay listing every loaded SKILL.md
+/// by name + description.
+///
+/// The overlay reads the same [`crate::skill::SkillIndex`] the
+/// `/<skill-name>` slash-command fallback uses, so the list shown
+/// here is exactly the set of names that will resolve to a skill
+/// invocation.
+pub struct Skills;
+
+#[async_trait]
+impl Command<CliCommandCtx> for Skills {
+    fn name(&self) -> &'static str {
+        "skills"
+    }
+    fn describe(&self) -> &'static str {
+        "show the skills overlay"
+    }
+    async fn execute(&self, _args: &str, ctx: &CliCommandCtx) -> CommandOutcome {
+        ctx.state.lock().unwrap().overlay = Some(Overlay::Skills);
+        ctx.redraw.notify_one();
+        CommandOutcome::Handled
+    }
+}

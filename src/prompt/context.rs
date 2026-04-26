@@ -23,6 +23,7 @@
 //! memoized to date-only granularity, but mandeven defers the
 //! feature entirely until a concrete need appears.
 
+use std::fmt::Write as _;
 use std::fs;
 use std::path::Path;
 
@@ -41,6 +42,12 @@ pub const AGENTS_MD_NAME: &str = "agents_md";
 
 /// Section name for the per-call environment info block.
 pub const ENV_INFO_NAME: &str = "env_info";
+
+/// Section name for the catalog of available skills. Sits between
+/// the static template block and `AGENTS.md` so the model knows what
+/// skills it can suggest before it reads project-specific
+/// instructions (which may reference skill names).
+pub const SKILLS_INDEX_NAME: &str = "skills_index";
 
 /// Read `<data_dir>/AGENTS.md` if present.
 ///
@@ -74,6 +81,42 @@ pub fn agents_md_section(content: &str) -> Section {
             content.trim_end()
         ),
     }
+}
+
+/// Build the `skills_index` section listing every loaded skill by
+/// `name + description`. Returns `None` when no skills are loaded
+/// — `iteration_system` then omits the section entirely so the
+/// prompt does not carry a misleading "available skills (none)"
+/// header.
+///
+/// The instruction sentence at the top tells the model both
+/// invocation paths (`/<name>` for the user, `skill_tool(name)` for
+/// the model itself) plus the soft guard "suggest, do not invoke
+/// unsolicited" — Claude Code achieves the same with a longer
+/// session-guidance bullet, but a one-paragraph framing in front of
+/// the list keeps the section under one screen of text.
+#[must_use]
+pub fn skills_index_section(entries: &[(String, String)]) -> Option<Section> {
+    if entries.is_empty() {
+        return None;
+    }
+    let mut content = String::from(
+        "# Available Skills\n\
+         The user can invoke any of these by typing /<name>. Suggest one \
+         proactively when its description matches the current task. You may \
+         also call the `skill_tool` to invoke a skill directly when the user \
+         has clearly delegated execution.\n",
+    );
+    for (name, description) in entries {
+        writeln!(content, "- /{name}: {description}").expect("writing to String is infallible");
+    }
+    // Trim the trailing newline so the SystemPrompt::into_message
+    // join produces exactly one blank line between sections.
+    let content = content.trim_end().to_string();
+    Some(Section {
+        name: SKILLS_INDEX_NAME,
+        content,
+    })
 }
 
 /// Build the `env_info` section: model id and working directory.
@@ -126,6 +169,26 @@ mod tests {
         let s = agents_md_section("project says X\n\n");
         assert!(s.content.starts_with("# Project Instructions"));
         assert!(s.content.ends_with("project says X"));
+    }
+
+    #[test]
+    fn skills_index_returns_none_when_empty() {
+        let result = skills_index_section(&[]);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn skills_index_lists_each_skill_with_slash_prefix() {
+        let entries = vec![
+            ("git-clean".to_string(), "Clean up branch".to_string()),
+            ("rp-generate".to_string(), "Brainstorm research".to_string()),
+        ];
+        let s = skills_index_section(&entries).unwrap();
+        assert!(s.content.starts_with("# Available Skills"));
+        assert!(s.content.contains("- /git-clean: Clean up branch"));
+        assert!(s.content.contains("- /rp-generate: Brainstorm research"));
+        assert!(s.content.contains("skill_tool"));
+        assert!(!s.content.ends_with('\n'));
     }
 
     #[test]

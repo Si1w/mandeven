@@ -104,6 +104,9 @@ pub enum Mode {
 pub enum Overlay {
     /// Help overlay listing commands and keybindings.
     Help,
+    /// Skills overlay listing every loaded SKILL.md by name +
+    /// description. Triggered by `/skills`.
+    Skills,
 }
 
 /// UI state shared between the input loop and the render task.
@@ -133,6 +136,12 @@ pub struct CliState {
     /// always shows the bottom of the transcript (auto-follow). Set
     /// back to `true` when the user pages down to the bottom.
     pub follow_bottom: bool,
+    /// Snapshot of `(name, description)` pairs from the boot-time
+    /// [`crate::skill::SkillIndex`]. Empty when no skills are
+    /// loaded; used by [`Overlay::Skills`] rendering only — the
+    /// `/<name>` fallback hits the live `Arc<SkillIndex>` on
+    /// [`CliChannel`] directly.
+    pub skills: Vec<(String, String)>,
 }
 
 impl Default for CliState {
@@ -154,6 +163,7 @@ impl Default for CliState {
             overlay: None,
             scroll_offset: 0,
             follow_bottom: true,
+            skills: Vec::new(),
         }
     }
 }
@@ -182,12 +192,17 @@ pub struct CliChannel {
     redraw: Arc<Notify>,
     /// Slash-command registry for commands that affect only this
     /// channel (overlay toggles, exit). Unknown commands fall
-    /// through to the gateway via [`InboundPayload::Command`].
+    /// through to a skill lookup, then to the gateway via
+    /// [`InboundPayload::Command`].
     router: Router<CliCommandCtx>,
     /// Session store handle. The channel only reads from this (to
     /// replay history on [`OutboundPayload::SessionSwitched`]); the
     /// gateway and agent are the write authorities.
     sessions: Arc<session::Manager>,
+    /// Skill catalog used for two purposes: rendering the `/skills`
+    /// overlay, and the `/<skill-name>` slash-command fallback that
+    /// expands a skill body into a regular user message.
+    skills: Arc<crate::skill::SkillIndex>,
 }
 
 impl CliChannel {
@@ -195,19 +210,35 @@ impl CliChannel {
     ///
     /// `sessions` is used to replay history when the gateway
     /// announces a session switch; the CLI does not write to it.
+    /// `skills` powers `/skills` (overlay) and the `/<name>`
+    /// slash-command fallback.
     #[must_use]
-    pub fn new(id: ChannelID, sessions: Arc<session::Manager>) -> Self {
+    pub fn new(
+        id: ChannelID,
+        sessions: Arc<session::Manager>,
+        skills: Arc<crate::skill::SkillIndex>,
+    ) -> Self {
         let mut router = Router::<CliCommandCtx>::new();
         router.register(Arc::new(command::builtins::Exit));
         router.register(Arc::new(command::builtins::Quit));
         router.register(Arc::new(commands::Help));
+        router.register(Arc::new(commands::Skills));
 
+        let skill_snapshot: Vec<(String, String)> = skills
+            .entries()
+            .map(|(n, d)| (n.to_string(), d.to_string()))
+            .collect();
+        let state = CliState {
+            skills: skill_snapshot,
+            ..CliState::default()
+        };
         Self {
             id,
-            state: Arc::new(Mutex::new(CliState::default())),
+            state: Arc::new(Mutex::new(state)),
             redraw: Arc::new(Notify::new()),
             router,
             sessions,
+            skills,
         }
     }
 }
@@ -436,11 +467,11 @@ impl CliChannel {
     /// Returns `false` to exit the REPL, `true` to continue.
     ///
     /// A `None` outcome from the channel router means "not one of my
-    /// commands" — we forward the body to the agent as
-    /// [`InboundPayload::Command`], and the agent's own outbound
-    /// reply (either a `Notice` from an agent-level handler or an
-    /// `Error("unknown command: /xxx")`) flows back through the
-    /// normal outbound path.
+    /// commands" — we then probe the skill catalog: a hit expands
+    /// the SKILL.md body into a regular [`InboundPayload::UserInput`]
+    /// (same shape as if the user had pasted the body manually); a
+    /// miss falls through to [`InboundPayload::Command`] so the
+    /// agent layer can either handle or echo "unknown command".
     async fn dispatch_command(&self, body: &str, inbound: &InboundSender) -> bool {
         let ctx = CliCommandCtx {
             state: self.state.clone(),
@@ -454,15 +485,42 @@ impl CliChannel {
                 self.redraw.notify_one();
                 true
             }
-            None => {
-                let forwarded = InboundMessage::with_peer(
-                    self.id.clone(),
-                    CLI_PEER_ID,
-                    InboundPayload::Command(body.to_string()),
-                );
-                inbound.send(forwarded).await.is_ok()
-            }
+            None => self.maybe_dispatch_skill_or_forward(body, inbound).await,
         }
+    }
+
+    /// Skill fallback for unknown slash commands. The lookup key is
+    /// the first whitespace-delimited token of `body` so future
+    /// `/<skill> <args>` syntax (when the skill schema grows args
+    /// support) lands here without re-routing.
+    async fn maybe_dispatch_skill_or_forward(&self, body: &str, inbound: &InboundSender) -> bool {
+        let name = body.split_whitespace().next().unwrap_or(body);
+        if let Some(skill) = self.skills.get(name) {
+            // Echo the invocation so the user sees they triggered it,
+            // then ship the SKILL.md body as if it were typed.
+            {
+                let mut state = self.state.lock().unwrap();
+                state
+                    .transcript
+                    .push(Line::User(format!("/{}", skill.frontmatter.name)));
+                state.mode = Mode::Replying;
+            }
+            self.redraw.notify_one();
+
+            let payload = InboundMessage::with_peer(
+                self.id.clone(),
+                CLI_PEER_ID,
+                InboundPayload::UserInput(skill.body.clone()),
+            );
+            return inbound.send(payload).await.is_ok();
+        }
+
+        let forwarded = InboundMessage::with_peer(
+            self.id.clone(),
+            CLI_PEER_ID,
+            InboundPayload::Command(body.to_string()),
+        );
+        inbound.send(forwarded).await.is_ok()
     }
 }
 

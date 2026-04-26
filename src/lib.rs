@@ -15,4 +15,5 @@ pub mod heartbeat;
 pub mod llm;
 pub mod prompt;
 pub mod session;
+pub mod skill;
 pub mod tools;

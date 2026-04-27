@@ -15,6 +15,8 @@ curl -fsSL https://raw.githubusercontent.com/Si1w/mandeven/main/scripts/install.
 Or from source (installs into `~/.cargo/bin/`):
 
 ```sh
+git clone https://github.com/Si1w/mandeven.git
+cd mandeven
 cargo install --path .
 ```
 
@@ -61,8 +63,8 @@ Registered automatically and advertised to the model on every turn.
 
 | Capability | Covers                                                          |
 | ---------- | --------------------------------------------------------------- |
-| File       | Read, write, edit, and content search                           |
-| Shell      | Run shell commands under the active sandbox tier                |
+| File       | Read regular UTF-8 files up to 5 MiB; write/edit inside the workspace; content search |
+| Shell      | Run commands with read-only allow-listing or workspace-write deny-listing; not an OS sandbox |
 | Web        | DuckDuckGo search and URL fetch with HTML→Markdown + SSRF guard |
 
 ## 📡 Channels

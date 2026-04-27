@@ -11,9 +11,9 @@
 //! - **Sandbox policy**: write paths additionally pass through
 //!   [`crate::security::ensure_writable_now`], so [`crate::security::SandboxPolicy::ReadOnly`]
 //!   rejects every write before any disk work happens.
-//! - **Device-path blocklist**: [`FileRead`] refuses anything starting
-//!   with `/dev/` so the model cannot read `/dev/random` and fill
-//!   memory (or block on `/dev/tty`).
+//! - **Regular-file read guard**: [`FileRead`] refuses `/dev/*`,
+//!   non-regular files, and files above `MAX_FILE_READ_BYTES` before
+//!   loading bytes into memory.
 //! - **UTF-8 only**: files are decoded as UTF-8; binary files produce
 //!   a clean error rather than lossy bytes.
 //! - **CRLF normalization**: input content has `\r\n` collapsed to
@@ -38,6 +38,11 @@ use crate::utils::workspace;
 /// Default number of lines returned by `file_read` when `limit` is
 /// unset.
 const DEFAULT_READ_LIMIT: usize = 2000;
+
+/// Largest regular file `file_read` will load into memory. The tool
+/// still paginates line output, but line counting currently needs the
+/// whole text buffer, so reject oversized files before reading.
+const MAX_FILE_READ_BYTES: u64 = 5 * 1024 * 1024;
 
 // ---------------------------------------------------------------------------
 // file_read
@@ -64,9 +69,10 @@ impl BaseTool for FileRead {
     fn schema(&self) -> Tool {
         Tool {
             name: "file_read".into(),
-            description: "Read a UTF-8 text file. Output format: LINE_NUM| CONTENT. \
-                Supports line-range pagination via offset (1-indexed) and limit. \
-                /dev/* paths are blocked. Binary files produce an error."
+            description: "Read a regular UTF-8 text file up to 5 MiB. Output \
+                format: LINE_NUM| CONTENT. Supports line-range pagination via \
+                offset (1-indexed) and limit. /dev/* and non-regular files are \
+                blocked. Binary files produce an error."
                 .into(),
             parameters: serde_json::to_value(schema_for!(ReadParams))
                 .expect("JsonSchema derive always serializes"),
@@ -77,6 +83,26 @@ impl BaseTool for FileRead {
         let p: ReadParams = parse_params("file_read", args)?;
         if is_dev_path(&p.path) {
             return Err(exec("file_read", format!("reading {} is blocked", p.path)));
+        }
+        let metadata = tokio::fs::metadata(&p.path)
+            .await
+            .map_err(|e| exec("file_read", format!("{}: {e}", p.path)))?;
+        if !metadata.is_file() {
+            return Err(exec(
+                "file_read",
+                format!("{} is not a regular file", p.path),
+            ));
+        }
+        if metadata.len() > MAX_FILE_READ_BYTES {
+            return Err(exec(
+                "file_read",
+                format!(
+                    "{} is too large to read safely ({} bytes > {} bytes)",
+                    p.path,
+                    metadata.len(),
+                    MAX_FILE_READ_BYTES
+                ),
+            ));
         }
 
         let raw = tokio::fs::read(&p.path)
@@ -491,6 +517,46 @@ mod tests {
                 .unwrap(),
             "hello"
         );
+        let _ = tokio::fs::remove_dir_all(dir).await;
+    }
+
+    #[tokio::test]
+    async fn file_read_rejects_large_file_before_loading() {
+        let dir = workspace_tmp_path("large-read");
+        let path = dir.join("huge.txt");
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let file = tokio::fs::File::create(&path).await.unwrap();
+        file.set_len(MAX_FILE_READ_BYTES + 1).await.unwrap();
+
+        let err = FileRead
+            .call(json!({
+                "path": path,
+            }))
+            .await
+            .unwrap_err()
+            .to_string();
+
+        assert!(err.contains("too large"));
+        let _ = tokio::fs::remove_dir_all(dir).await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn file_read_rejects_symlink_to_device() {
+        let dir = workspace_tmp_path("read-device-link");
+        let path = dir.join("null-link");
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        std::os::unix::fs::symlink("/dev/null", &path).unwrap();
+
+        let err = FileRead
+            .call(json!({
+                "path": path,
+            }))
+            .await
+            .unwrap_err()
+            .to_string();
+
+        assert!(err.contains("not a regular file"));
         let _ = tokio::fs::remove_dir_all(dir).await;
     }
 

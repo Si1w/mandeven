@@ -72,7 +72,9 @@ pub struct Metadata {
     pub channel: ChannelID,
     /// When the session was first created.
     pub created_at: DateTime<Utc>,
-    /// When the session was last modified (bumped on every append).
+    /// When the session was last modified. Appends do not rewrite the
+    /// metadata line; readers derive a fresher value from the last
+    /// record timestamp when needed.
     pub updated_at: DateTime<Utc>,
 }
 

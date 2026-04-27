@@ -39,6 +39,11 @@ use super::{HEARTBEAT_FILENAME, HeartbeatConfig};
 /// further build-up is a sign the agent loop is hung.
 const TICK_QUEUE_CAPACITY: usize = 4;
 
+/// Smallest runtime interval accepted by the engine. Config loading
+/// rejects zero, but direct callers of the engine API still get a
+/// defensive clamp instead of a `sleep(Duration::ZERO)` loop.
+const MIN_INTERVAL_SECS: u64 = 1;
+
 /// One tick delivered from the engine to the agent loop.
 #[derive(Clone, Debug)]
 pub struct HeartbeatTick {
@@ -110,7 +115,7 @@ impl HeartbeatEngine {
     ) -> (Self, mpsc::Receiver<HeartbeatTick>) {
         let (tick_tx, tick_rx) = mpsc::channel(TICK_QUEUE_CAPACITY);
         let state = EngineState {
-            interval: Duration::from_secs(config.interval_secs),
+            interval: interval_duration(config.interval_secs),
             paused: false,
             enabled: config.enabled,
             last_tick_at: None,
@@ -190,6 +195,7 @@ impl HeartbeatEngine {
 
     /// Replace the tick period. Wakes the task so the new interval
     /// takes effect immediately rather than after the in-flight wait.
+    /// Values below one second are clamped to one second.
     ///
     /// # Panics
     ///
@@ -197,7 +203,7 @@ impl HeartbeatEngine {
     pub fn set_interval(&self, secs: u64) {
         {
             let mut state = self.state.lock().expect("heartbeat state poisoned");
-            state.interval = Duration::from_secs(secs);
+            state.interval = interval_duration(secs);
         }
         self.wake.notify_one();
     }
@@ -302,6 +308,10 @@ fn is_effectively_empty(content: &str) -> bool {
     })
 }
 
+fn interval_duration(secs: u64) -> Duration {
+    Duration::from_secs(secs.max(MIN_INTERVAL_SECS))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -330,6 +340,15 @@ mod tests {
         let engine = make_engine(true, 30);
         engine.set_interval(120);
         assert_eq!(engine.status().interval_secs, 120);
+    }
+
+    #[test]
+    fn zero_interval_is_clamped_to_one_second() {
+        let engine = make_engine(true, 0);
+        assert_eq!(engine.status().interval_secs, 1);
+
+        engine.set_interval(0);
+        assert_eq!(engine.status().interval_secs, 1);
     }
 
     #[test]

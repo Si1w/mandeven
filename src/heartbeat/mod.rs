@@ -57,7 +57,9 @@ pub struct HeartbeatConfig {
     #[serde(default = "default_enabled")]
     pub enabled: bool,
 
-    /// Tick period in seconds. Mutable at runtime via
+    /// Tick period in seconds. Config loading rejects zero; direct
+    /// engine calls clamp values below one second to one second.
+    /// Mutable at runtime via
     /// [`HeartbeatEngine::set_interval`] (`/heartbeat interval
     /// <secs>`); runtime changes are not persisted back to
     /// `mandeven.toml`.

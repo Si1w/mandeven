@@ -7,16 +7,20 @@
 //!   [`crate::tools::file::FileEdit`]) is rejected before it touches
 //!   disk; the shell only runs commands on the
 //!   [`super::commands`] allow-list.
-//! - [`SandboxPolicy::WorkspaceWrite`] (default): writes are confined to
-//!   the workspace canonical CWD by [`crate::utils::workspace`]; shell
-//!   commands run subject to the existing deny patterns in
-//!   [`crate::tools::shell`].
+//! - [`SandboxPolicy::WorkspaceWrite`] (default): `file_write` and
+//!   `file_edit` are confined to the workspace canonical CWD by
+//!   [`crate::utils::workspace`]. Shell commands are not workspace
+//!   confined; they run with the curated environment and deny patterns
+//!   in [`crate::tools::shell`], inherit the process CWD by default,
+//!   and may opt into another `cwd`.
 //!
-//! Read access is intentionally **unbounded under both tiers** —
-//! `file_read` and `grep` traverse the whole filesystem on either policy.
-//! Reading and writing have asymmetric blast radius, and forcing reads
-//! into the workspace would block legitimate cross-directory inspection
-//! (looking at `~/Desktop/notes` while editing inside a project).
+//! Read access is intentionally **not workspace-confined under either
+//! tier**. `file_read` can read regular UTF-8 files outside the
+//! workspace up to its size cap, and `grep` traverses the requested
+//! root on either policy. Reading and writing have asymmetric blast
+//! radius, and forcing reads into the workspace would block legitimate
+//! cross-directory inspection (looking at `~/Desktop/notes` while
+//! editing inside a project).
 //!
 //! The active policy is installed once at process startup via
 //! [`SandboxPolicy::init`] (called from `main` after config load) and
@@ -42,8 +46,9 @@ pub enum SandboxPolicy {
     /// known-safe allow-list.
     ReadOnly,
 
-    /// Default. Writes confined to the workspace by [`crate::utils::workspace`];
-    /// shell still subject to its deny patterns but otherwise unrestricted.
+    /// Default. File writes are confined to the workspace by
+    /// [`crate::utils::workspace`]; shell is still subject to its deny
+    /// patterns and curated env but is not workspace-confined.
     #[default]
     WorkspaceWrite,
 }

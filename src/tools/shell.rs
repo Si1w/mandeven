@@ -11,7 +11,10 @@
 //!   every invocation is routed through [`crate::security::ensure_safe_command`]
 //!   first; commands not on the allow-list are rejected before any
 //!   `spawn`. Under `WorkspaceWrite` the gate is skipped — the existing
-//!   deny patterns and the workspace-anchored CWD are the only guards.
+//!   deny patterns and curated environment remain, but the shell is not
+//!   workspace-confined. When `cwd` is omitted the child inherits the
+//!   process CWD; when `cwd` is provided it is passed directly to
+//!   `Command::current_dir`.
 //! - **Curated env**: only a small set of variables (`HOME`, `PATH`,
 //!   `LANG`, `TERM`, `USER`, `SHELL`) is inherited from the parent
 //!   process. Everything else — including API keys in the agent's
@@ -124,7 +127,8 @@ impl BaseTool for Shell {
                 deny-list always blocks obviously destructive commands \
                 (rm -rf, dd if=, shutdown, fork bomb). Under read_only \
                 sandbox policy only commands on the safe allow-list run \
-                (cat / ls / wc / grep / git status|log|diff / ...)."
+                (cat / ls / wc / grep / git status|log|diff|show|branch / ...). \
+                Under workspace_write the shell is not workspace-confined."
                 .into(),
             parameters: serde_json::to_value(schema_for!(ShellParams))
                 .expect("JsonSchema derive always serializes"),

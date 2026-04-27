@@ -263,13 +263,13 @@ impl CronEngine {
             return;
         };
         match status {
-            RunStatus::Ok => {
-                job.state.last_status = Some(RunStatus::Ok);
+            RunStatus::Succeeded => {
+                job.state.last_status = Some(RunStatus::Succeeded);
                 job.state.last_error = None;
                 job.state.consecutive_errors = 0;
             }
-            RunStatus::Error => {
-                job.state.last_status = Some(RunStatus::Error);
+            RunStatus::Failed => {
+                job.state.last_status = Some(RunStatus::Failed);
                 job.state.last_error = error;
                 job.state.consecutive_errors = job.state.consecutive_errors.saturating_add(1);
                 if job.state.consecutive_errors >= AUTO_DISABLE_AFTER {
@@ -533,7 +533,7 @@ mod tests {
 
         for _ in 0..AUTO_DISABLE_AFTER {
             engine
-                .report_outcome(&job.id, RunStatus::Error, Some("boom".into()))
+                .report_outcome(&job.id, RunStatus::Failed, Some("boom".into()))
                 .await;
         }
         let status = engine.status().await;
@@ -543,7 +543,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn report_outcome_ok_resets_consecutive_errors() {
+    async fn report_outcome_succeeded_resets_consecutive_errors() {
         let dir = tempdir();
         let cfg = CronConfig { enabled: true };
         let (engine, _rx) = CronEngine::new(&cfg, &dir).await.unwrap();
@@ -557,13 +557,15 @@ mod tests {
             .unwrap();
 
         engine
-            .report_outcome(&job.id, RunStatus::Error, Some("flap".into()))
+            .report_outcome(&job.id, RunStatus::Failed, Some("flap".into()))
             .await;
-        engine.report_outcome(&job.id, RunStatus::Ok, None).await;
+        engine
+            .report_outcome(&job.id, RunStatus::Succeeded, None)
+            .await;
         let status = engine.status().await;
         let entry = status.jobs.iter().find(|j| j.id == job.id).unwrap();
         assert_eq!(entry.state.consecutive_errors, 0);
-        assert_eq!(entry.state.last_status, Some(RunStatus::Ok));
+        assert_eq!(entry.state.last_status, Some(RunStatus::Succeeded));
     }
 
     #[tokio::test]

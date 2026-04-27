@@ -7,7 +7,7 @@
 //! them by forwarding [`crate::bus::InboundPayload::Command`] over
 //! the bus.
 //!
-//! Currently registered:
+//! Currently handled:
 //!
 //! - `/new` — bind the channel to a fresh session id
 //! - `/list` — list this channel's known sessions, snapshot for
@@ -19,12 +19,11 @@ use std::collections::HashMap;
 use std::fmt::Write;
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use tokio::sync::Mutex;
 
 use crate::bus::{ChannelID, SessionID};
-use crate::command::{Command, CommandOutcome};
+use crate::command::CommandOutcome;
 use crate::session;
 
 /// How session timestamps are formatted in `/list` output.
@@ -74,50 +73,15 @@ impl GatewayCommandCtx {
         let map = self.last_listed.lock().await;
         map.get(&self.channel).and_then(|v| v.get(idx).cloned())
     }
-}
 
-/// `/new` — bind the channel to a fresh `SessionID`. The session
-/// file is **not** pre-created; the agent's `ensure_session` will
-/// create it (with a real title generated from the first user
-/// message) on the next user input. Returns
-/// [`CommandOutcome::Handled`] so the *only* channel-visible effect
-/// is the [`crate::bus::OutboundPayload::SessionSwitched`] notice the
-/// gateway emits when it detects the binding change — the CLI clears
-/// its transcript on that, and an extra "started a new session" line
-/// would just be noise.
-pub struct New;
-
-#[async_trait]
-impl Command<GatewayCommandCtx> for New {
-    fn name(&self) -> &'static str {
-        "new"
-    }
-    fn describe(&self) -> &'static str {
-        "start a fresh session"
-    }
-    async fn execute(&self, _args: &str, ctx: &GatewayCommandCtx) -> CommandOutcome {
+    pub(crate) async fn new_session(&self) -> CommandOutcome {
         let id = SessionID::new();
-        ctx.set_active(id).await;
-        CommandOutcome::Handled
+        self.set_active(id).await;
+        CommandOutcome::Completed
     }
-}
 
-/// `/list` — list the channel's known sessions sorted newest-first
-/// by `updated_at`. Stores a parallel `Vec<SessionID>` snapshot in
-/// [`GatewayCommandCtx::last_listed`] so a subsequent `/load <n>`
-/// can resolve the numeric index without re-walking the store.
-pub struct List;
-
-#[async_trait]
-impl Command<GatewayCommandCtx> for List {
-    fn name(&self) -> &'static str {
-        "list"
-    }
-    fn describe(&self) -> &'static str {
-        "list sessions on this channel; pair with /load <n>"
-    }
-    async fn execute(&self, _args: &str, ctx: &GatewayCommandCtx) -> CommandOutcome {
-        let ids = match ctx.sessions.list().await {
+    pub(crate) async fn list_sessions(&self) -> CommandOutcome {
+        let ids = match self.sessions.list().await {
             Ok(v) => v,
             Err(err) => return CommandOutcome::Feedback(format!("failed to list sessions: {err}")),
         };
@@ -128,8 +92,8 @@ impl Command<GatewayCommandCtx> for List {
             // and corrupt files (Err) — neither should block /list
             // from showing the rest. Corruption surfaces loudly via
             // the load path instead.
-            if let Ok(Some(meta)) = ctx.sessions.metadata(&id).await
-                && meta.channel == ctx.channel
+            if let Ok(Some(meta)) = self.sessions.metadata(&id).await
+                && meta.channel == self.channel
             {
                 entries.push((id, meta.title, meta.updated_at));
             }
@@ -141,7 +105,7 @@ impl Command<GatewayCommandCtx> for List {
         }
 
         let snapshot: Vec<SessionID> = entries.iter().map(|(id, _, _)| id.clone()).collect();
-        ctx.set_last_listed(snapshot).await;
+        self.set_last_listed(snapshot).await;
 
         let mut out = String::new();
         out.push_str("Sessions (newest first):\n");
@@ -154,38 +118,12 @@ impl Command<GatewayCommandCtx> for List {
         out.push_str("Type /load <n> to switch.");
         CommandOutcome::Feedback(out)
     }
-}
 
-/// `/load <n>` — bind the channel to the n-th session from the most
-/// recent `/list` snapshot. 1-based indexing because that is what
-/// `/list` displays. Empty snapshot → instructive feedback. Out-of-
-/// range index → instructive feedback. Successful switch returns
-/// `Handled` so the gateway emits `SessionSwitched` and a notice
-/// from a single dispatch site rather than mixing them in here.
-pub struct Load;
-
-#[async_trait]
-impl Command<GatewayCommandCtx> for Load {
-    fn name(&self) -> &'static str {
-        "load"
-    }
-    fn describe(&self) -> &'static str {
-        "switch to a session from the latest /list (use /load <n>)"
-    }
-    async fn execute(&self, args: &str, ctx: &GatewayCommandCtx) -> CommandOutcome {
-        let trimmed = args.trim();
-        if trimmed.is_empty() {
-            return CommandOutcome::Feedback(
-                "usage: /load <n>; run /list first to see indices".to_string(),
-            );
-        }
-        let Ok(n) = trimmed.parse::<usize>() else {
-            return CommandOutcome::Feedback(format!("expected a number, got '{trimmed}'"));
-        };
+    pub(crate) async fn load_session(&self, n: usize) -> CommandOutcome {
         if n == 0 {
             return CommandOutcome::Feedback("indices start at 1".to_string());
         }
-        let Some(target) = ctx.lookup_listed(n - 1).await else {
+        let Some(target) = self.lookup_listed(n - 1).await else {
             return CommandOutcome::Feedback(format!(
                 "no session at index {n}; run /list first or pick a smaller number"
             ));
@@ -194,13 +132,13 @@ impl Command<GatewayCommandCtx> for Load {
         // Confirm the file still exists before swapping bindings —
         // a concurrent process or manual `rm` between /list and
         // /load shouldn't leave the channel pointing at a hole.
-        // Success returns `Handled`; the visible effect is the
+        // Success returns `Completed`; the visible effect is the
         // `SessionSwitched` notice the gateway emits when it sees
         // the binding changed, which drives the transcript rebuild.
-        match ctx.sessions.metadata(&target).await {
+        match self.sessions.metadata(&target).await {
             Ok(Some(_)) => {
-                ctx.set_active(target).await;
-                CommandOutcome::Handled
+                self.set_active(target).await;
+                CommandOutcome::Completed
             }
             Ok(None) => CommandOutcome::Feedback(format!(
                 "session {n} no longer exists; run /list to refresh"

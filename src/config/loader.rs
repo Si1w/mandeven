@@ -189,7 +189,7 @@ fn split_default(raw: &str) -> Result<(&str, &str)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::types::{AgentConfig, LLMConfig, LLMProfile};
+    use crate::config::types::{AgentConfig, LLMConfig, LLMProfile, TuiConfig};
     use std::collections::HashMap;
 
     /// Toml + serde on a doubly-flattened `HashMap` layout (the
@@ -219,6 +219,9 @@ mod tests {
                 timeout_secs: Some(45),
                 providers,
             },
+            tui: TuiConfig {
+                show_thinking: false,
+            },
             agent: AgentConfig::default(),
             source_path: std::path::PathBuf::new(),
         };
@@ -234,5 +237,22 @@ mod tests {
         assert_eq!(prof.max_context_window, 128_000);
         assert_eq!(prof.max_tokens, Some(2048));
         assert_eq!(prof.temperature, None);
+        assert!(!parsed.tui.show_thinking);
+    }
+
+    #[test]
+    fn tui_config_hides_thinking_by_default() {
+        let text = r#"
+            [llm]
+            default = "acme/my-profile"
+
+            [llm.acme.my-profile]
+            model_name = "upstream-model"
+            max_context_window = 128000
+        "#;
+
+        let parsed: AppConfig = toml::from_str(text).expect("deserialize");
+
+        assert!(!parsed.tui.show_thinking);
     }
 }

@@ -18,14 +18,13 @@ pub const STORE_VERSION: u32 = 1;
 
 /// Terminal status of one execution.
 ///
-/// `Skipped` exists only so future "fire was skipped because target
-/// session was missing" cases have a place to land — present jobs
-/// always end `Ok` or `Err`.
+/// `Skipped` exists for "fire was skipped because target session was
+/// missing" cases; present jobs end `Succeeded` or `Failed`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum RunStatus {
-    Ok,
-    Error,
+    Succeeded,
+    Failed,
     Skipped,
 }
 

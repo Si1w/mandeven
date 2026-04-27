@@ -21,7 +21,8 @@ use super::{CliState, Line as TranscriptLine, Mode, Overlay};
 mod markdown;
 
 const PROMPT: &str = "› ";
-const HELP_BODY_LINES: u16 = 20;
+const HELP_BODY_LINES: u16 = 21;
+const HELP_LABEL_WIDTH: usize = 28;
 const QUEUED_PREVIEW_LIMIT: usize = 3;
 
 const BRAND: Color = Color::Rgb(215, 119, 87);
@@ -30,7 +31,7 @@ const BRAND: Color = Color::Rgb(215, 119, 87);
 ///
 /// Takes `&mut CliState` because [`render_transcript`] synchronises
 /// `state.scroll_offset` with the render-time `max_offset` (so a
-/// subsequent `PgUp` from follow-mode moves relative to the current
+/// subsequent arrow-up from follow-mode moves relative to the current
 /// bottom, not from zero).
 pub fn render(f: &mut Frame<'_>, state: &mut CliState) {
     let queued_preview_height = queued_preview_height(state);
@@ -52,8 +53,8 @@ pub fn render(f: &mut Frame<'_>, state: &mut CliState) {
     render_input(f, chunks[4], state);
 
     match state.overlay {
-        Some(Overlay::Help) => render_help_overlay(f, chunks[1]),
-        Some(Overlay::Skills) => render_skills_overlay(f, chunks[1], &state.skills),
+        Some(Overlay::Help) => render_help_overlay(f, chunks[1], state),
+        Some(Overlay::Skills) => render_skills_overlay(f, chunks[1], state),
         None => {}
     }
 }
@@ -63,11 +64,6 @@ fn render_header(f: &mut Frame<'_>, area: Rect, state: &CliState) {
         return;
     }
 
-    let status = match state.mode {
-        Mode::Idle => "ready",
-        Mode::Replying => "thinking",
-    };
-    let status_style = status_style(state.mode);
     let view = if state.follow_bottom {
         "live"
     } else {
@@ -79,10 +75,6 @@ fn render_header(f: &mut Frame<'_>, area: Rect, state: &CliState) {
         Span::styled("Mandeven", brand_style()),
         Span::styled("  local agent", dim_style()),
         Span::styled("  ·  ", dim_style()),
-        Span::styled("●", status_style),
-        Span::raw(" "),
-        Span::styled(status, status_style),
-        Span::styled("  ·  ", dim_style()),
         Span::styled(view, dim_style()),
     ])];
 
@@ -91,7 +83,7 @@ fn render_header(f: &mut Frame<'_>, area: Rect, state: &CliState) {
             Span::raw(" "),
             Span::styled("/help", accent_style()),
             Span::styled(" commands   ", dim_style()),
-            Span::styled("PgUp/PgDn", accent_style()),
+            Span::styled("↑/↓", accent_style()),
             Span::styled(" transcript", dim_style()),
         ]));
     }
@@ -123,9 +115,9 @@ fn render_transcript(f: &mut Frame<'_>, area: Rect, state: &mut CliState) {
         u16::try_from(logical.saturating_sub(inner.height as usize)).unwrap_or(u16::MAX);
 
     // follow_bottom=true -> render at the live bottom and sync
-    // scroll_offset to max_offset so a subsequent PgUp starts from
+    // scroll_offset to max_offset so a subsequent arrow-up starts from
     // the current bottom view. follow_bottom=false -> render at the
-    // user-frozen offset, clamped to valid range; if a PgDn pushed
+    // user-frozen offset, clamped to valid range; if arrow-down pushed
     // offset past max_offset, the clamp snaps it back and re-enters
     // follow mode automatically.
     let scroll = if state.follow_bottom {
@@ -171,7 +163,12 @@ fn render_empty_transcript(f: &mut Frame<'_>, area: Rect) {
 }
 
 fn has_transcript_content(state: &CliState) -> bool {
-    !state.transcript.is_empty() || state.streaming_thinking.is_some() || state.streaming.is_some()
+    state
+        .transcript
+        .iter()
+        .any(|entry| should_render_transcript_entry(state, entry))
+        || (state.show_thinking && state.streaming_thinking.is_some())
+        || state.streaming.is_some()
 }
 
 /// Count the number of logical lines that [`build_transcript`] will
@@ -179,8 +176,13 @@ fn has_transcript_content(state: &CliState) -> bool {
 /// (inter-entry blank lines + Markdown-rendered assistant output).
 fn count_logical_lines(state: &CliState) -> usize {
     let mut count = 0usize;
-    for (i, entry) in state.transcript.iter().enumerate() {
-        if i > 0 {
+    let mut rendered_any = false;
+    for entry in state
+        .transcript
+        .iter()
+        .filter(|entry| should_render_transcript_entry(state, entry))
+    {
+        if rendered_any {
             count += 1; // blank separator
         }
         count += match entry {
@@ -190,15 +192,19 @@ fn count_logical_lines(state: &CliState) -> usize {
             | TranscriptLine::Compact(t) => t.matches('\n').count() + 1,
             TranscriptLine::Assistant(t) => markdown::Engine::line_count(t),
         };
+        rendered_any = true;
     }
-    if let Some(thinking) = &state.streaming_thinking {
-        if !state.transcript.is_empty() {
+    if state.show_thinking
+        && let Some(thinking) = &state.streaming_thinking
+    {
+        if rendered_any {
             count += 1;
         }
         count += thinking.matches('\n').count() + 1;
+        rendered_any = true;
     }
     if let Some(stream) = &state.streaming {
-        if !state.transcript.is_empty() || state.streaming_thinking.is_some() {
+        if rendered_any {
             count += 1;
         }
         count += markdown::Engine::line_count(stream);
@@ -214,11 +220,11 @@ fn render_status_line(f: &mut Frame<'_>, area: Rect, state: &CliState) {
     let detail = if state.overlay.is_some() {
         "Esc dismiss overlay".to_string()
     } else if !state.follow_bottom {
-        "history view · PgDn to latest".to_string()
+        "history view · ↓ to latest".to_string()
     } else if !state.queued_inputs.is_empty() {
-        format!("queued {} · Esc to interrupt", state.queued_inputs.len())
+        format!("queued {} · Enter keeps queuing", state.queued_inputs.len())
     } else if state.mode == Mode::Replying {
-        "Esc to interrupt".to_string()
+        "Enter queues · Ctrl+C clears draft".to_string()
     } else {
         "Enter to send".to_string()
     };
@@ -347,18 +353,21 @@ fn render_input(f: &mut Frame<'_>, area: Rect, state: &CliState) {
 
 fn input_footer(width: u16, state: &CliState) -> &'static str {
     if state.overlay.is_some() {
-        return " Esc dismiss overlay ";
+        return match width {
+            0..=45 => " ↑/↓ · Esc ",
+            _ => " ↑/↓ scroll overlay · Esc dismiss ",
+        };
     }
 
     match (state.mode, width) {
         (Mode::Idle, 0..=45) => " Enter send · /help ",
-        (Mode::Idle, _) => " Enter send · /help commands · PgUp/PgDn scroll ",
+        (Mode::Idle, _) => " Enter send · Shift+Enter newline · /help ",
         (Mode::Replying, 0..=45) => " Thinking · Esc ",
-        (Mode::Replying, _) => " Thinking · /help available · Esc interrupt ",
+        (Mode::Replying, _) => " Thinking · Enter queues · Ctrl+C clears draft ",
     }
 }
 
-fn render_help_overlay(f: &mut Frame<'_>, area: Rect) {
+fn render_help_overlay(f: &mut Frame<'_>, area: Rect, state: &mut CliState) {
     if area.width == 0 || area.height == 0 {
         return;
     }
@@ -383,8 +392,16 @@ fn render_help_overlay(f: &mut Frame<'_>, area: Rect) {
         horizontal: 2,
         vertical: 1,
     });
+    let text = build_help_text();
+    let scroll = clamp_overlay_scroll(
+        &mut state.overlay_scroll_offset,
+        text.height(),
+        content_area.height,
+    );
     f.render_widget(
-        Paragraph::new(build_help_text()).wrap(Wrap { trim: false }),
+        Paragraph::new(text)
+            .wrap(Wrap { trim: false })
+            .scroll((scroll, 0)),
         content_area,
     );
 }
@@ -394,16 +411,16 @@ fn render_help_overlay(f: &mut Frame<'_>, area: Rect) {
 /// Shows one row per loaded skill with its name and (truncated)
 /// description. Empty catalog gets a friendly placeholder rather
 /// than an empty box.
-fn render_skills_overlay(f: &mut Frame<'_>, area: Rect, skills: &[(String, String)]) {
+fn render_skills_overlay(f: &mut Frame<'_>, area: Rect, state: &mut CliState) {
     if area.width == 0 || area.height == 0 {
         return;
     }
 
     // 2 lines for title block padding + 1 header line + N skill lines.
-    let body_lines: u16 = if skills.is_empty() {
+    let body_lines: u16 = if state.skills.is_empty() {
         1
     } else {
-        u16::try_from(skills.len() + 1).unwrap_or(u16::MAX)
+        u16::try_from(state.skills.len() + 1).unwrap_or(u16::MAX)
     };
     let overlay_rect = full_width_rect(area, body_lines + 4);
     f.render_widget(Clear, overlay_rect);
@@ -425,10 +442,25 @@ fn render_skills_overlay(f: &mut Frame<'_>, area: Rect, skills: &[(String, Strin
         horizontal: 2,
         vertical: 1,
     });
+    let content_height = usize::from(body_lines);
+    let scroll = clamp_overlay_scroll(
+        &mut state.overlay_scroll_offset,
+        content_height,
+        content_area.height,
+    );
     f.render_widget(
-        Paragraph::new(build_skills_text(skills)).wrap(Wrap { trim: false }),
+        Paragraph::new(build_skills_text(&state.skills))
+            .wrap(Wrap { trim: false })
+            .scroll((scroll, 0)),
         content_area,
     );
+}
+
+fn clamp_overlay_scroll(offset: &mut u16, content_height: usize, visible_height: u16) -> u16 {
+    let max_offset = content_height.saturating_sub(usize::from(visible_height));
+    let max_offset = u16::try_from(max_offset).unwrap_or(u16::MAX);
+    *offset = (*offset).min(max_offset);
+    *offset
 }
 
 fn build_skills_text(skills: &[(String, String)]) -> Text<'_> {
@@ -456,9 +488,9 @@ fn build_skills_text(skills: &[(String, String)]) -> Text<'_> {
 
 fn overlay_footer(width: u16) -> &'static str {
     if width < 54 {
-        " Esc dismiss "
+        " ↑/↓ · Esc "
     } else {
-        " Esc dismiss · transcript scroll resumes after close "
+        " ↑/↓ or wheel scroll · Esc dismiss "
     }
 }
 
@@ -476,27 +508,37 @@ fn full_width_rect(area: Rect, height: u16) -> Rect {
 fn build_transcript(state: &CliState) -> Text<'_> {
     let mut lines: Vec<Line<'_>> = Vec::new();
 
-    for (i, entry) in state.transcript.iter().enumerate() {
-        if i > 0 {
+    for entry in state
+        .transcript
+        .iter()
+        .filter(|entry| should_render_transcript_entry(state, entry))
+    {
+        if !lines.is_empty() {
             lines.push(Line::raw(""));
         }
         append_transcript_entry(&mut lines, entry);
     }
 
-    if let Some(thinking) = &state.streaming_thinking {
-        if !state.transcript.is_empty() {
+    if state.show_thinking
+        && let Some(thinking) = &state.streaming_thinking
+    {
+        if !lines.is_empty() {
             lines.push(Line::raw(""));
         }
         append_thinking_lines(&mut lines, thinking);
     }
     if let Some(stream) = &state.streaming {
-        if !state.transcript.is_empty() || state.streaming_thinking.is_some() {
+        if !lines.is_empty() {
             lines.push(Line::raw(""));
         }
         append_assistant_lines(&mut lines, stream);
     }
 
     Text::from(lines)
+}
+
+fn should_render_transcript_entry(state: &CliState, entry: &TranscriptLine) -> bool {
+    state.show_thinking || !matches!(entry, TranscriptLine::Thinking(_))
 }
 
 fn append_transcript_entry<'a>(lines: &mut Vec<Line<'a>>, entry: &'a TranscriptLine) {
@@ -570,6 +612,7 @@ fn build_help_text() -> Text<'static> {
         help_entry("/list", "list saved sessions"),
         help_entry("/load <n>", "switch to a listed session"),
         help_entry("/switch [model]", "list or switch LLM profile"),
+        help_entry("/switch default <model>", "save default LLM profile"),
         help_entry("/compact [focus]", "compact conversation history"),
         help_entry("/heartbeat", "show or control heartbeat"),
         help_entry("/cron", "list or control cron jobs"),
@@ -578,10 +621,19 @@ fn build_help_text() -> Text<'static> {
         section_header("Keys"),
         Line::raw(""),
         help_entry("Enter", "send input"),
+        help_entry("Shift/Alt+Enter", "insert newline"),
+        help_entry("\\ + Enter", "continue on a new line"),
         help_entry("Enter while busy", "queue follow-up input"),
-        help_entry("PgUp/PgDn", "scroll transcript when closed"),
-        help_entry("Mouse wheel", "scroll transcript when closed"),
-        help_entry("Esc", "dismiss this overlay"),
+        help_entry("Ctrl+C", "clear draft or dismiss overlay"),
+        help_entry("Ctrl+D", "exit when draft is empty"),
+        help_entry("Ctrl+L", "redraw screen"),
+        help_entry("Ctrl+A/E", "start or end of line"),
+        help_entry("Ctrl+U/K", "delete to start or end"),
+        help_entry("Ctrl+W", "delete previous word"),
+        help_entry("Ctrl+Z/Y", "undo or redo input edits"),
+        help_entry("↑/↓", "scroll current panel"),
+        help_entry("Mouse wheel", "scroll current panel"),
+        help_entry("Esc", "clear draft or dismiss overlay"),
     ])
 }
 
@@ -591,7 +643,7 @@ fn section_header(text: &'static str) -> Line<'static> {
 
 fn help_entry(key: &'static str, desc: &'static str) -> Line<'static> {
     Line::from(vec![
-        Span::styled(format!("  {key:<20}"), accent_style()),
+        Span::styled(format!("  {key:<HELP_LABEL_WIDTH$}"), accent_style()),
         Span::styled(desc, dim_style()),
     ])
 }
@@ -610,13 +662,58 @@ fn accent_style() -> Style {
     Style::default().fg(Color::Cyan)
 }
 
-fn status_style(mode: Mode) -> Style {
-    match mode {
-        Mode::Idle => Style::default().fg(Color::Green),
-        Mode::Replying => Style::default().fg(Color::Yellow),
-    }
-}
-
 fn dim_style() -> Style {
     Style::default().fg(Color::DarkGray)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{build_transcript, has_transcript_content};
+    use crate::cli::{CliState, Line as TranscriptLine};
+    use ratatui::text::Text;
+
+    #[test]
+    fn transcript_hides_thinking_when_configured() {
+        let state = CliState {
+            show_thinking: false,
+            transcript: vec![
+                TranscriptLine::User("question".to_string()),
+                TranscriptLine::Thinking("hidden reasoning".to_string()),
+                TranscriptLine::Assistant("answer".to_string()),
+            ],
+            streaming_thinking: Some("hidden streaming".to_string()),
+            ..CliState::default()
+        };
+
+        let rendered = text_to_plain(&build_transcript(&state));
+
+        assert!(rendered.contains("question"));
+        assert!(rendered.contains("answer"));
+        assert!(!rendered.contains("hidden reasoning"));
+        assert!(!rendered.contains("hidden streaming"));
+    }
+
+    #[test]
+    fn hidden_thinking_alone_is_not_visible_content() {
+        let state = CliState {
+            show_thinking: false,
+            transcript: vec![TranscriptLine::Thinking("hidden".to_string())],
+            ..CliState::default()
+        };
+
+        assert!(!has_transcript_content(&state));
+    }
+
+    fn text_to_plain(text: &Text<'_>) -> String {
+        text.lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
 }

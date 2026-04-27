@@ -22,6 +22,11 @@ pub struct AppConfig {
     /// LLM profile catalog.
     pub llm: LLMConfig,
 
+    /// Terminal UI preferences. Entire section is optional in TOML;
+    /// missing fields preserve the current UI defaults.
+    #[serde(default)]
+    pub tui: TuiConfig,
+
     /// Agent-loop configuration. Entire section is optional in TOML;
     /// missing fields fall back to [`AgentConfig::default`].
     #[serde(default)]
@@ -33,6 +38,15 @@ pub struct AppConfig {
     /// directories resolve through [`paths::home_dir`] regardless.
     #[serde(skip)]
     pub(crate) source_path: PathBuf,
+}
+
+/// Terminal UI preferences.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct TuiConfig {
+    /// Render model reasoning traces in the transcript when providers
+    /// return them. This only affects display; reasoning remains in
+    /// session history so changing the setting later can reveal it.
+    pub show_thinking: bool,
 }
 
 /// Agent-loop configuration.

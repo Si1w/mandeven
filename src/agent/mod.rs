@@ -36,7 +36,8 @@ use self::compact::{CompactConfig, CompactState};
 use crate::bus::{
     ChannelID, InboundPayload, OutboundMessage, OutboundPayload, OutboundSender, SessionID,
 };
-use crate::command::{CommandOutcome, Router};
+use crate::command::CommandOutcome;
+use crate::command::slash::{self, SlashCommand, SwitchCommand};
 use crate::config::{AgentConfig, AppConfig, LLMConfig, LLMProfile};
 use crate::cron;
 use crate::gateway::{ActiveSessions, DispatchReceiver, InboundDispatch};
@@ -54,7 +55,7 @@ use crate::tools::heartbeat::{
 };
 
 use self::command::{
-    AgentCommandCtx, CompactCmdMatch, format_compact_report, parse_compact_command,
+    AgentCommandCtx, format_compact_report, run_cron_command, run_heartbeat_command,
 };
 
 /// Upper bound on completion tokens for title generation.
@@ -84,6 +85,7 @@ const HEARTBEAT_DECIDE_MAX_TOKENS: u32 = 256;
 pub struct Agent {
     model: Arc<RwLock<ModelSnapshot>>,
     model_catalog: Arc<ModelCatalog>,
+    app_config: Arc<RwLock<AppConfig>>,
     sessions: Arc<session::Manager>,
     tools: tools::Registry,
     inbox: DispatchReceiver,
@@ -93,10 +95,6 @@ pub struct Agent {
     /// [`crate::config::LLMConfig::timeout_secs`] so every iteration
     /// builds its [`Request`] without re-reading the config.
     timeout_secs: Option<u64>,
-    /// Agent-level command router. Unknown commands reach the agent
-    /// after traversing the channel router and the gateway router;
-    /// the agent is the final fallback.
-    command: Router<AgentCommandCtx>,
     /// Heartbeat control handle, present iff the engine was wired in.
     /// Cloned into [`AgentCommandCtx`] so `/heartbeat` subcommands can
     /// pause / resume / set the interval.
@@ -187,10 +185,6 @@ impl ModelCatalog {
             })
     }
 
-    fn contains(&self, raw: &str) -> bool {
-        self.entries.contains_key(raw)
-    }
-
     fn ids(&self) -> impl Iterator<Item = &str> {
         self.entries.keys().map(String::as_str)
     }
@@ -277,13 +271,6 @@ impl Agent {
         let model_catalog = Arc::new(ModelCatalog::from_config(&cfg.llm)?);
         let model = Arc::new(RwLock::new(model_catalog.get(&cfg.llm.default)?));
 
-        // Agent-level command router. Routing / session-level
-        // commands (`/new`, `/list`, `/load`) live in the gateway;
-        // commands here mutate agent-internal state.
-        let mut agent_command = Router::<AgentCommandCtx>::new();
-        agent_command.register(Arc::new(command::Heartbeat));
-        agent_command.register(Arc::new(command::Cron));
-
         let (heartbeat_handle, heartbeat_rx) = match heartbeat {
             Some(HeartbeatWiring { engine, rx }) => (Some(engine), Some(rx)),
             None => (None, None),
@@ -296,13 +283,13 @@ impl Agent {
         Ok(Self {
             model,
             model_catalog,
+            app_config: Arc::new(RwLock::new(cfg.clone())),
             sessions,
             tools,
             inbox,
             out,
             config: cfg.agent.clone(),
             timeout_secs: cfg.llm.timeout_secs,
-            command: agent_command,
             heartbeat: heartbeat_handle,
             heartbeat_rx,
             cron: cron_handle,
@@ -547,7 +534,7 @@ impl Agent {
             Ok(()) => {
                 if let Some(engine) = self.cron.as_ref() {
                     engine
-                        .report_outcome(&tick.job_id, cron::RunStatus::Ok, None)
+                        .report_outcome(&tick.job_id, cron::RunStatus::Succeeded, None)
                         .await;
                 }
             }
@@ -557,7 +544,7 @@ impl Agent {
                     engine
                         .report_outcome(
                             &tick.job_id,
-                            cron::RunStatus::Error,
+                            cron::RunStatus::Failed,
                             Some(err_text.clone()),
                         )
                         .await;
@@ -620,8 +607,8 @@ impl Agent {
         }
     }
 
-    /// Dispatch one forwarded slash command through the agent-level
-    /// router and send a reply (when applicable) to the originating
+    /// Dispatch one forwarded slash command through the agent layer
+    /// and send a reply (when applicable) to the originating
     /// channel. Named to mirror `CliChannel::dispatch_command` — same
     /// role at a different layer. The only failure path is the
     /// outbound bus being closed, in which case the caller should
@@ -632,26 +619,21 @@ impl Agent {
         session: SessionID,
         body: &str,
     ) -> Result<()> {
-        if let Some(payload) = self.maybe_run_switch_command(body) {
-            let reply = OutboundMessage::new(channel, session, payload);
-            self.out.send(reply).await?;
-            return Ok(());
-        }
-
-        // `/compact [focus]` is special-cased rather than registered
-        // on the router because its execution needs an `&self` LLM
-        // call + session write — neither fits the static
-        // `Command<AgentCommandCtx>` trait shape (which returns a
-        // synchronous `CommandOutcome`).
-        match parse_compact_command(body) {
-            CompactCmdMatch::Bare => return self.run_compact_command(channel, session, None).await,
-            CompactCmdMatch::Focused(focus) => {
-                return self
-                    .run_compact_command(channel, session, Some(focus))
-                    .await;
+        let parsed = match slash::parse(body) {
+            Ok(parsed) => parsed,
+            Err(err) => {
+                let reply = OutboundMessage::new(channel, session, OutboundPayload::Error(err));
+                self.out.send(reply).await?;
+                return Ok(());
             }
-            CompactCmdMatch::None => {}
-        }
+        };
+
+        let parsed = match parsed {
+            SlashCommand::Compact { focus } => {
+                return self.run_compact_command(channel, session, focus).await;
+            }
+            other => other,
+        };
 
         let ctx = AgentCommandCtx {
             channel: channel.clone(),
@@ -659,19 +641,36 @@ impl Agent {
             heartbeat: self.heartbeat.clone(),
             cron: self.cron.clone(),
         };
-        let outcome = self.command.dispatch(body, &ctx).await;
 
-        let payload = match outcome {
-            Some(CommandOutcome::Handled) => return Ok(()),
-            Some(CommandOutcome::Feedback(msg)) => OutboundPayload::Notice(msg),
-            Some(CommandOutcome::Exit) => {
-                // Exit has no meaning at the agent layer (agent can't
-                // shut down a channel). A command that returns it was
-                // registered in the wrong router — log and ignore.
-                eprintln!("[agent] command {body:?} returned Exit at agent layer; ignoring");
-                return Ok(());
+        let payload = match parsed {
+            SlashCommand::Switch(command) => self.run_switch_command(command),
+            SlashCommand::Heartbeat(command) => match run_heartbeat_command(command, &ctx).await {
+                CommandOutcome::Completed => return Ok(()),
+                CommandOutcome::Feedback(msg) => OutboundPayload::Notice(msg),
+                CommandOutcome::Exit => {
+                    eprintln!("[agent] command {body:?} returned Exit at agent layer; ignoring");
+                    return Ok(());
+                }
+            },
+            SlashCommand::Cron(command) => match run_cron_command(command, &ctx).await {
+                CommandOutcome::Completed => return Ok(()),
+                CommandOutcome::Feedback(msg) => OutboundPayload::Notice(msg),
+                CommandOutcome::Exit => {
+                    eprintln!("[agent] command {body:?} returned Exit at agent layer; ignoring");
+                    return Ok(());
+                }
+            },
+            SlashCommand::External { name, .. } => {
+                OutboundPayload::Error(format!("unknown command: /{name}"))
             }
-            None => {
+            SlashCommand::Help
+            | SlashCommand::Skills
+            | SlashCommand::Exit
+            | SlashCommand::Quit
+            | SlashCommand::New
+            | SlashCommand::List
+            | SlashCommand::Load { .. }
+            | SlashCommand::Compact { .. } => {
                 let name = body.split_whitespace().next().unwrap_or(body);
                 OutboundPayload::Error(format!("unknown command: /{name}"))
             }
@@ -682,47 +681,92 @@ impl Agent {
         Ok(())
     }
 
-    fn maybe_run_switch_command(&self, body: &str) -> Option<OutboundPayload> {
-        let trimmed = body.trim();
-        if trimmed == "switch" {
-            return Some(OutboundPayload::Notice(self.format_model_list()));
+    fn run_switch_command(&self, command: SwitchCommand) -> OutboundPayload {
+        match command {
+            SwitchCommand::List => OutboundPayload::Notice(self.format_model_list()),
+            SwitchCommand::Runtime { profile_id } => self
+                .switch_runtime_model(&profile_id)
+                .unwrap_or_else(OutboundPayload::Error),
+            SwitchCommand::ShowDefault => OutboundPayload::Notice(self.format_default_model()),
+            SwitchCommand::SetDefault { profile_id } => self
+                .switch_default_model(&profile_id)
+                .unwrap_or_else(OutboundPayload::Error),
+        }
+    }
+
+    fn switch_runtime_model(&self, target: &str) -> std::result::Result<OutboundPayload, String> {
+        let snapshot = self.model_catalog.get(target).map_err(|_| {
+            format!("unknown model profile: {target}; run /switch to list available profiles")
+        })?;
+        self.set_model_snapshot(snapshot);
+        Ok(OutboundPayload::Notice(format!(
+            "switched model to {}",
+            self.current_model_label()
+        )))
+    }
+
+    fn switch_default_model(&self, target: &str) -> std::result::Result<OutboundPayload, String> {
+        let snapshot = self.model_catalog.get(target).map_err(|_| {
+            format!("unknown model profile: {target}; run /switch to list available profiles")
+        })?;
+
+        {
+            let mut cfg = self.app_config.write().expect("config lock poisoned");
+            let previous = cfg.llm.default.clone();
+            cfg.llm.default = target.to_string();
+            if let Err(err) = cfg.save() {
+                cfg.llm.default = previous;
+                return Err(format!("failed to save default model: {err}"));
+            }
         }
 
-        let rest = trimmed.strip_prefix("switch")?;
-        if !rest.starts_with(char::is_whitespace) {
-            return None;
-        }
+        self.set_model_snapshot(snapshot);
+        Ok(OutboundPayload::Notice(format!(
+            "default model set to {}",
+            self.current_model_label()
+        )))
+    }
 
-        let target = rest.trim();
-        if target.is_empty() {
-            return Some(OutboundPayload::Notice(self.format_model_list()));
-        }
-        if !self.model_catalog.contains(target) {
-            return Some(OutboundPayload::Error(format!(
-                "unknown model profile: {target}; run /switch to list available profiles"
-            )));
-        }
-
-        let snapshot = match self.model_catalog.get(target) {
-            Ok(snapshot) => snapshot,
-            Err(err) => return Some(OutboundPayload::Error(err.to_string())),
-        };
-        let upstream = snapshot.profile.model_name.clone();
+    fn set_model_snapshot(&self, snapshot: ModelSnapshot) {
         *self.model.write().expect("model lock poisoned") = snapshot;
         self.prompt.clear_cache();
-        Some(OutboundPayload::Notice(format!(
-            "switched model to {target} ({upstream})"
-        )))
+    }
+
+    fn current_model_label(&self) -> String {
+        let snapshot = self.model_snapshot();
+        format!("{} ({})", snapshot.id, snapshot.profile.model_name)
+    }
+
+    fn default_model_id(&self) -> String {
+        self.app_config
+            .read()
+            .expect("config lock poisoned")
+            .llm
+            .default
+            .clone()
+    }
+
+    fn format_default_model(&self) -> String {
+        let default = self.default_model_id();
+        let current = self.model_snapshot().id;
+        format!(
+            "default model: {default}\ncurrent model: {current}\nType /switch default <provider/profile> to change the saved default."
+        )
     }
 
     fn format_model_list(&self) -> String {
         let current = self.model_snapshot().id;
-        let mut out = format!("current model: {current}\nAvailable models:");
+        let default = self.default_model_id();
+        let mut out =
+            format!("current model: {current}\ndefault model: {default}\nAvailable models:");
         for id in self.model_catalog.ids() {
-            let marker = if id == current { "*" } else { " " };
-            let _ = write!(out, "\n  {marker} {id}");
+            let current_marker = if id == current { "*" } else { " " };
+            let default_marker = if id == default { " (default)" } else { "" };
+            let _ = write!(out, "\n  {current_marker} {id}{default_marker}");
         }
-        out.push_str("\nType /switch <provider/profile> to switch.");
+        out.push_str(
+            "\nType /switch <provider/profile> to switch now, or /switch default <provider/profile> to save the default.",
+        );
         out
     }
 

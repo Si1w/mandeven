@@ -133,6 +133,7 @@ async fn main() -> Result<(), DynError> {
         ChannelID::new(TUI_CHANNEL),
         sessions,
         skill_index,
+        cfg.tui.show_thinking,
     )));
 
     let agent_handle = tokio::spawn(agent.run());

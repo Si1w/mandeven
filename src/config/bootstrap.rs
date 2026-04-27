@@ -20,7 +20,7 @@ use std::path::PathBuf;
 use std::str::FromStr;
 
 use super::error::{ConfigError, Result};
-use super::types::{AgentConfig, AppConfig, LLMConfig, LLMProfile};
+use super::types::{AgentConfig, AppConfig, LLMConfig, LLMProfile, TuiConfig};
 use crate::llm::providers;
 
 /// Drive the interactive bootstrap flow and return the user-constructed
@@ -85,6 +85,7 @@ pub(super) fn interactive() -> Result<AppConfig> {
             timeout_secs,
             providers: providers_map,
         },
+        tui: TuiConfig::default(),
         agent: AgentConfig::default(),
         source_path: PathBuf::new(),
     })

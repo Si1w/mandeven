@@ -5,11 +5,12 @@
 //! here first. The gateway:
 //!
 //! 1. If the payload is an [`InboundPayload::Command`], tries the
-//!    gateway-level [`commands`] router first. A hit is handled in
+//!    gateway-level [`commands`] handlers first. A hit is handled in
 //!    place — the gateway emits a [`OutboundPayload::Notice`] (and
 //!    a [`OutboundPayload::SessionSwitched`] when the binding
 //!    changed) and the message does **not** reach the agent.
-//! 2. Otherwise (or on a router miss), looks up — or creates —
+//! 2. Otherwise (or when the command belongs to a later layer), looks up
+//!    — or creates —
 //!    the [`crate::bus::SessionID`] bound to the message's channel,
 //!    and forwards the message to the agent as an
 //!    [`InboundDispatch`].
@@ -17,8 +18,8 @@
 //! The design follows `agent-examples/claw0`'s Gateway +
 //! `BindingTable` split: identity lives in the transport payload,
 //! session assignment is a gateway concern, and routing-style
-//! commands (`/new`, `/list`, `/load`) live in the gateway command
-//! router rather than in either the channel or the agent.
+//! commands (`/new`, `/list`, `/load`) live in the gateway rather than
+//! in either the channel or the agent.
 
 pub mod bindings;
 pub mod commands;
@@ -33,7 +34,8 @@ use crate::bus::{
     ChannelID, InboundMessage, InboundPayload, InboundReceiver, MessageID, OutboundMessage,
     OutboundPayload, OutboundSender, Receiver, Sender, SessionID,
 };
-use crate::command::{CommandOutcome, Router};
+use crate::command::CommandOutcome;
+use crate::command::slash::{self, SlashCommand};
 use crate::session;
 
 use self::commands::GatewayCommandCtx;
@@ -44,9 +46,8 @@ use self::commands::GatewayCommandCtx;
 /// "session has been attached" invariant explicit.
 ///
 /// Named `InboundDispatch` to align with the `dispatch` vocabulary
-/// used elsewhere in the codebase ([`crate::command::Router::dispatch`],
-/// `CliChannel::dispatch_command`): this is the payload the gateway
-/// dispatches onward to the agent.
+/// used elsewhere in the codebase (`CliChannel::dispatch_command`):
+/// this is the payload the gateway dispatches onward to the agent.
 #[derive(Debug, Clone)]
 pub struct InboundDispatch {
     /// Identifier propagated from the inbound message.
@@ -97,10 +98,6 @@ pub struct Gateway {
     /// and the channel reads message history when reacting to a
     /// `SessionSwitched` notice.
     sessions: Arc<session::Manager>,
-    /// Gateway-level command router. Channels reach this by
-    /// forwarding [`InboundPayload::Command`] over the inbound
-    /// queue.
-    commands: Router<GatewayCommandCtx>,
     /// Inbound stream from channels.
     inbound: InboundReceiver,
     /// Forward stream to the agent loop.
@@ -123,16 +120,10 @@ impl Gateway {
         sessions: Arc<session::Manager>,
         active_sessions: ActiveSessions,
     ) -> Self {
-        let mut router = Router::<GatewayCommandCtx>::new();
-        router.register(Arc::new(commands::New));
-        router.register(Arc::new(commands::List));
-        router.register(Arc::new(commands::Load));
-
         Self {
             active_sessions,
             last_listed: Arc::new(Mutex::new(HashMap::new())),
             sessions,
-            commands: router,
             inbound,
             forward,
             outbound,
@@ -176,8 +167,8 @@ impl Gateway {
     ///
     /// Returns `Ok(true)` when the command matched (and the message
     /// should not be forwarded onward), `Ok(false)` when the
-    /// gateway router has no entry for that name (the message
-    /// continues to the agent so its router can have a chance).
+    /// command belongs to a later layer (the message continues to
+    /// the agent so it can have a chance).
     /// Propagates outbound bus errors.
     ///
     /// On a hit the gateway reads `active_sessions` *before* and
@@ -190,20 +181,40 @@ impl Gateway {
         msg: &InboundMessage,
         body: &str,
     ) -> crate::bus::Result<bool> {
+        let parsed = match slash::parse(body) {
+            Ok(parsed) => parsed,
+            Err(err) => {
+                if let Some(payload) =
+                    command_outcome_to_outbound(CommandOutcome::Feedback(err), &msg.channel)
+                {
+                    self.outbound.send(payload).await?;
+                }
+                return Ok(true);
+            }
+        };
+
+        let is_gateway_command = matches!(
+            parsed,
+            SlashCommand::New | SlashCommand::List | SlashCommand::Load { .. }
+        );
+        if !is_gateway_command {
+            return Ok(false);
+        }
+
+        let before = self.bound_session(&msg.channel).await;
         let ctx = GatewayCommandCtx {
             channel: msg.channel.clone(),
             active_sessions: self.active_sessions.clone(),
             last_listed: self.last_listed.clone(),
             sessions: self.sessions.clone(),
         };
-
-        let before = self.bound_session(&msg.channel).await;
-        let outcome = self.commands.dispatch(body, &ctx).await;
-        let after = self.bound_session(&msg.channel).await;
-
-        let Some(outcome) = outcome else {
-            return Ok(false);
+        let outcome = match parsed {
+            SlashCommand::New => ctx.new_session().await,
+            SlashCommand::List => ctx.list_sessions().await,
+            SlashCommand::Load { index } => ctx.load_session(index).await,
+            _ => unreachable!("gateway command prechecked"),
         };
+        let after = self.bound_session(&msg.channel).await;
 
         if before != after
             && let Some(new_id) = after
@@ -241,7 +252,7 @@ impl Gateway {
 }
 
 /// Translate a command outcome into the outbound message the channel
-/// should see. `Handled` means "no message" (the side effect already
+/// should see. `Completed` means "no message" (the side effect already
 /// happened, gateway has nothing to add). `Exit` is meaningless at
 /// the gateway layer and is dropped with a `[gateway]` log line.
 /// `Feedback` becomes a [`OutboundPayload::Notice`] so the channel
@@ -251,7 +262,7 @@ fn command_outcome_to_outbound(
     channel: &ChannelID,
 ) -> Option<OutboundMessage> {
     let payload = match outcome {
-        CommandOutcome::Handled => return None,
+        CommandOutcome::Completed => return None,
         CommandOutcome::Feedback(text) => OutboundPayload::Notice(text),
         CommandOutcome::Exit => {
             eprintln!("[gateway] command returned Exit at gateway layer; ignoring");

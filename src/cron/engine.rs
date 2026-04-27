@@ -43,7 +43,7 @@ const TICK_QUEUE_CAPACITY: usize = 16;
 /// Wake at least once per [`MAX_SLEEP`] even when no job is pending.
 /// Recovers schedule drift after wall-clock jumps (suspend / resume,
 /// NTP step), matching openclaw's `MAX_TIMER_DELAY_MS = 60_000`.
-const MAX_SLEEP: Duration = Duration::from_secs(60);
+const MAX_SLEEP: Duration = Duration::from_mins(1);
 
 /// Consecutive failure threshold beyond which the engine flips a
 /// job's `enabled` to `false`. Matches claw0's choice and is in the

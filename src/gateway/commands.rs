@@ -98,7 +98,7 @@ impl GatewayCommandCtx {
                 entries.push((id, meta.title, meta.updated_at));
             }
         }
-        entries.sort_by(|a, b| b.2.cmp(&a.2));
+        entries.sort_by_key(|e| std::cmp::Reverse(e.2));
 
         if entries.is_empty() {
             return CommandOutcome::Feedback("no sessions yet".to_string());

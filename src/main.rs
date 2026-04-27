@@ -28,6 +28,7 @@ use mandeven::security::SandboxPolicy;
 use mandeven::session;
 use mandeven::skill::{self, SkillIndex};
 use mandeven::tools;
+use mandeven::workspace;
 
 /// Identifier for the built-in TUI channel.
 const TUI_CHANNEL: &str = "tui";
@@ -39,16 +40,21 @@ type DynError = Box<dyn std::error::Error + Send + Sync>;
 async fn main() -> Result<(), DynError> {
     let cfg = AppConfig::bootstrap()?;
 
+    // Capture the launch CWD once. The canonical form anchors the
+    // workspace boundary every tool reads via `workspace::root()`; the
+    // raw form drives the per-project session bucket.
+    let cwd = std::env::current_dir()?;
+    let canonical_cwd = std::fs::canonicalize(&cwd)?;
+    workspace::init(canonical_cwd);
+
     // Install the sandbox tier before any tool is registered. Tools read
     // it via `SandboxPolicy::current()` on each invocation; missing
     // `[sandbox]` block in the TOML keeps the default `WorkspaceWrite`.
     SandboxPolicy::init(cfg.sandbox.policy);
 
-    // Sessions are scoped per-project: capture the launch cwd once and
-    // sanitize it into a bucket name under `~/.mandeven/projects/`.
-    // Same shape as Claude Code's `~/.claude/projects/<sanitized-cwd>/`
+    // Sessions are scoped per-project: same `~/.mandeven/projects/`
+    // bucket shape as Claude Code's `~/.claude/projects/<sanitized-cwd>/`
     // — see agent-examples/claude-code-analysis/src/utils/sessionStoragePortable.ts.
-    let cwd = std::env::current_dir()?;
     let sessions = Arc::new(session::Manager::new(config::project_bucket(&cwd)).await?);
 
     // Skill index reads ~/.mandeven/skills/<name>/SKILL.md once at

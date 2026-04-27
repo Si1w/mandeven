@@ -18,7 +18,6 @@ pub mod grep;
 pub mod heartbeat;
 pub mod shell;
 pub mod skill;
-pub mod workspace;
 
 pub use error::{Error, Result};
 

@@ -39,9 +39,9 @@ use tokio::process::Command;
 use tokio::time::timeout;
 
 use super::error::{Error, Result};
-use super::workspace::{resolve_for_read, workspace_root};
 use super::{BaseTool, MAX_TOOL_RESULT_BYTES, ToolOutcome};
 use crate::llm::Tool;
+use crate::workspace;
 
 /// Hard timeout on a single `rg` invocation. Mirrors codex's choice.
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
@@ -137,8 +137,10 @@ impl BaseTool for Grep {
             .unwrap_or(DEFAULT_HEAD_LIMIT)
             .clamp(1, MAX_HEAD_LIMIT);
 
-        let root = workspace_root()?;
-        let search_path = resolve_for_read("grep", p.path.as_deref()).await?;
+        let root = workspace::root();
+        let search_path = workspace::resolve_for_read(p.path.as_deref())
+            .await
+            .map_err(|e| exec(e.to_string()))?;
 
         let rg_args = build_argv(&p, mode, &search_path);
 

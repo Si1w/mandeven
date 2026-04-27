@@ -19,3 +19,4 @@ pub mod security;
 pub mod session;
 pub mod skill;
 pub mod tools;
+pub mod workspace;

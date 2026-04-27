@@ -30,10 +30,10 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use super::error::{Error, Result};
-use super::workspace::{resolve_for_write, workspace_root};
 use super::{BaseTool, MAX_TOOL_RESULT_BYTES, ToolOutcome};
 use crate::llm::Tool;
 use crate::security::{SandboxPolicy, ensure_writable_now};
+use crate::workspace;
 
 /// Default number of lines returned by `file_read` when `limit` is
 /// unset.
@@ -184,7 +184,9 @@ impl BaseTool for FileWrite {
     async fn call(&self, args: Value) -> Result<ToolOutcome> {
         let p: WriteParams = parse_params("file_write", args)?;
         ensure_writable_now("file_write", SandboxPolicy::current())?;
-        let path = resolve_for_write("file_write", &p.path).await?;
+        let path = workspace::resolve_for_write(&p.path)
+            .await
+            .map_err(|e| exec("file_write", e.to_string()))?;
         write_file_atomic("file_write", &path, &p.content).await?;
         Ok(Value::String(format!("Wrote {} bytes to {}", p.content.len(), p.path)).into())
     }
@@ -241,7 +243,9 @@ impl BaseTool for FileEdit {
     async fn call(&self, args: Value) -> Result<ToolOutcome> {
         let p: EditParams = parse_params("file_edit", args)?;
         ensure_writable_now("file_edit", SandboxPolicy::current())?;
-        let path = resolve_for_write("file_edit", &p.path).await?;
+        let path = workspace::resolve_for_write(&p.path)
+            .await
+            .map_err(|e| exec("file_edit", e.to_string()))?;
 
         // Create-file special case.
         if p.old_string.is_empty()
@@ -418,7 +422,7 @@ async fn write_file_atomic(tool: &'static str, path: &Path, content: &str) -> Re
         .await
         .map_err(|e| exec(tool, format!("create parents of {}: {e}", path.display())))?;
 
-    let root = workspace_root()?;
+    let root = workspace::root();
     let parent_canonical = tokio::fs::canonicalize(parent)
         .await
         .map_err(|e| exec(tool, format!("canonicalize {}: {e}", parent.display())))?;

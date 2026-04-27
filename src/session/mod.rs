@@ -1,5 +1,4 @@
-//! Session persistence — one JSONL file per session, rewritten
-//! atomically on every change.
+//! Session persistence — one JSONL file per session.
 //!
 //! Sessions are scoped per launch directory, so the canonical location
 //! of `<base_dir>` is the project bucket
@@ -21,10 +20,10 @@
 //! subsequent lines are [`Record`]s — a chronological [`Message`] plus
 //! its wall-clock timestamp.
 //!
-//! Every write is atomic: the entire file contents are serialized in
-//! memory, written to `<uuid>.jsonl.tmp`, then `rename`-d into place.
-//! A POSIX `rename` is atomic, so a reader either sees the old file or
-//! the new file — never a torn state.
+//! Appends are written as one JSONL record at the end of the file.
+//! Full rewrites are reserved for operations that intentionally
+//! replace history, such as compaction; those still write to
+//! `<uuid>.jsonl.tmp` and `rename` into place.
 //!
 //! A per-session async [`tokio::sync::Mutex`] serializes writes
 //! (necessary once background tasks such as auto-compaction start
@@ -40,6 +39,7 @@ use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use tokio::io::AsyncWriteExt;
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
@@ -89,9 +89,8 @@ pub struct Record {
 
 /// Manages session persistence across a daemon lifetime.
 ///
-/// One JSONL file per session; every append rewrites the whole file
-/// atomically. A per-session async mutex protects against concurrent
-/// writers.
+/// One JSONL file per session. A per-session async mutex protects
+/// against concurrent writers.
 pub struct Manager {
     base_dir: PathBuf,
     locks: Mutex<HashMap<SessionID, Arc<Mutex<()>>>>,
@@ -178,8 +177,12 @@ impl Manager {
         Ok(Some(state.metadata))
     }
 
-    /// Append one message to a session, bumping its `updated_at` and
-    /// rewriting the file atomically.
+    /// Append one message to a session as a single JSONL line.
+    ///
+    /// The metadata line is not rewritten on append. Readers derive
+    /// `updated_at` from the last record timestamp so `/list` still
+    /// sorts by real activity without turning every append into a full
+    /// file rewrite.
     ///
     /// # Errors
     ///
@@ -196,15 +199,21 @@ impl Manager {
             return Err(Error::NotFound(id.clone()));
         }
 
-        let mut state = self.read_state(&path).await?;
         let now = Utc::now();
-        state.records.push(Record {
+        let record = Record {
             message: msg,
             timestamp: now,
-        });
-        state.metadata.updated_at = now;
+        };
+        let mut line = serde_json::to_string(&record)?;
+        line.push('\n');
 
-        self.write_state(id, &state).await
+        let mut file = tokio::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .await?;
+        file.write_all(line.as_bytes()).await?;
+        file.flush().await?;
+        Ok(())
     }
 
     /// Replace the entire message log of a session in one shot.
@@ -309,7 +318,7 @@ impl Manager {
         let meta_line = lines
             .next()
             .ok_or_else(|| Error::InvalidFormat("session file is empty".into()))?;
-        let meta_parsed: MetadataLineRead = serde_json::from_str(meta_line)?;
+        let mut meta_parsed: MetadataLineRead = serde_json::from_str(meta_line)?;
         if meta_parsed.marker != METADATA_MARKER {
             return Err(Error::InvalidFormat(format!(
                 "first line _type is '{}', expected '{METADATA_MARKER}'",
@@ -320,6 +329,11 @@ impl Manager {
         let records = lines
             .map(|l| serde_json::from_str(l).map_err(Error::from))
             .collect::<Result<Vec<Record>>>()?;
+        if let Some(last) = records.last()
+            && last.timestamp > meta_parsed.meta.updated_at
+        {
+            meta_parsed.meta.updated_at = last.timestamp;
+        }
 
         Ok(State {
             metadata: meta_parsed.meta,
@@ -347,5 +361,90 @@ impl Manager {
         tokio::fs::write(&tmp, content.as_bytes()).await?;
         tokio::fs::rename(&tmp, &final_path).await?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_session_dir() -> PathBuf {
+        std::env::temp_dir().join(format!("mandeven-session-test-{}", Uuid::now_v7()))
+    }
+
+    #[tokio::test]
+    async fn append_writes_jsonl_records_in_order() {
+        let dir = temp_session_dir();
+        let manager = Manager::new(dir.clone()).await.unwrap();
+        let id = SessionID::new();
+        manager
+            .create(&id, "test".to_string(), ChannelID::new("tui"))
+            .await
+            .unwrap();
+
+        manager
+            .append(
+                &id,
+                Message::User {
+                    content: "one".to_string(),
+                },
+            )
+            .await
+            .unwrap();
+        manager
+            .append(
+                &id,
+                Message::Assistant {
+                    content: Some("two".to_string()),
+                    tool_calls: None,
+                    reasoning: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        let content = tokio::fs::read_to_string(manager.session_path(&id))
+            .await
+            .unwrap();
+        assert_eq!(content.lines().count(), 3);
+
+        let records = manager.load(&id).await.unwrap();
+        assert_eq!(records.len(), 2);
+        assert!(matches!(
+            &records[0].message,
+            Message::User { content } if content == "one"
+        ));
+        assert!(matches!(
+            &records[1].message,
+            Message::Assistant { content: Some(content), .. } if content == "two"
+        ));
+
+        let _ = tokio::fs::remove_dir_all(dir).await;
+    }
+
+    #[tokio::test]
+    async fn metadata_updated_at_tracks_last_appended_record() {
+        let dir = temp_session_dir();
+        let manager = Manager::new(dir.clone()).await.unwrap();
+        let id = SessionID::new();
+        manager
+            .create(&id, "test".to_string(), ChannelID::new("tui"))
+            .await
+            .unwrap();
+        manager
+            .append(
+                &id,
+                Message::User {
+                    content: "hello".to_string(),
+                },
+            )
+            .await
+            .unwrap();
+
+        let records = manager.load(&id).await.unwrap();
+        let metadata = manager.metadata(&id).await.unwrap().unwrap();
+
+        assert_eq!(metadata.updated_at, records[0].timestamp);
+        let _ = tokio::fs::remove_dir_all(dir).await;
     }
 }

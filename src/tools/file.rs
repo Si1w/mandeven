@@ -2,9 +2,10 @@
 //!
 //! Design notes:
 //!
-//! - **No sandbox**: paths are used as given; there is no workspace
-//!   confinement. The agent operates with the host user's full
-//!   filesystem privileges.
+//! - **Workspace-confined writes**: `file_write` and `file_edit`
+//!   resolve relative paths against the process CWD and reject writes
+//!   outside that workspace, including existing symlink prefixes that
+//!   canonicalize elsewhere.
 //! - **Device-path blocklist**: [`FileRead`] refuses anything starting
 //!   with `/dev/` so the model cannot read `/dev/random` and fill
 //!   memory (or block on `/dev/tty`).
@@ -15,12 +16,13 @@
 //!   consistent regardless of the file's original line endings.
 
 use std::fmt::Write;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use async_trait::async_trait;
 use schemars::{JsonSchema, schema_for};
 use serde::Deserialize;
 use serde_json::Value;
+use uuid::Uuid;
 
 use super::error::{Error, Result};
 use super::{BaseTool, MAX_TOOL_RESULT_BYTES, ToolOutcome};
@@ -174,17 +176,8 @@ impl BaseTool for FileWrite {
 
     async fn call(&self, args: Value) -> Result<ToolOutcome> {
         let p: WriteParams = parse_params("file_write", args)?;
-        let path = PathBuf::from(&p.path);
-        if let Some(parent) = path.parent()
-            && !parent.as_os_str().is_empty()
-        {
-            tokio::fs::create_dir_all(parent)
-                .await
-                .map_err(|e| exec("file_write", format!("create parents of {}: {e}", p.path)))?;
-        }
-        tokio::fs::write(&path, &p.content)
-            .await
-            .map_err(|e| exec("file_write", format!("{}: {e}", p.path)))?;
+        let path = resolve_write_path("file_write", &p.path).await?;
+        write_file_atomic("file_write", &path, &p.content).await?;
         Ok(Value::String(format!("Wrote {} bytes to {}", p.content.len(), p.path)).into())
     }
 }
@@ -239,20 +232,15 @@ impl BaseTool for FileEdit {
 
     async fn call(&self, args: Value) -> Result<ToolOutcome> {
         let p: EditParams = parse_params("file_edit", args)?;
-        let path = PathBuf::from(&p.path);
+        let path = resolve_write_path("file_edit", &p.path).await?;
 
         // Create-file special case.
-        if p.old_string.is_empty() && !path.exists() {
-            if let Some(parent) = path.parent()
-                && !parent.as_os_str().is_empty()
-            {
-                tokio::fs::create_dir_all(parent)
-                    .await
-                    .map_err(|e| exec("file_edit", format!("create parents of {}: {e}", p.path)))?;
-            }
-            tokio::fs::write(&path, &p.new_string)
+        if p.old_string.is_empty()
+            && !tokio::fs::try_exists(&path)
                 .await
-                .map_err(|e| exec("file_edit", format!("{}: {e}", p.path)))?;
+                .map_err(|e| exec("file_edit", format!("{}: {e}", path.display())))?
+        {
+            write_file_atomic("file_edit", &path, &p.new_string).await?;
             return Ok(Value::String(format!("Created {}", p.path)).into());
         }
 
@@ -311,9 +299,7 @@ impl BaseTool for FileEdit {
         } else {
             result
         };
-        tokio::fs::write(&path, &final_content)
-            .await
-            .map_err(|e| exec("file_edit", format!("{}: {e}", p.path)))?;
+        write_file_atomic("file_edit", &path, &final_content).await?;
         Ok(Value::String(format!(
             "Replaced {} occurrence(s) in {}",
             selected.len(),
@@ -414,10 +400,252 @@ fn exec(tool: &'static str, message: impl Into<String>) -> Error {
     }
 }
 
+async fn resolve_write_path(tool: &'static str, raw: &str) -> Result<PathBuf> {
+    if raw.trim().is_empty() {
+        return Err(exec(tool, "path is empty"));
+    }
+
+    let root = workspace_root(tool)?;
+    let input = Path::new(raw);
+    let candidate = if input.is_absolute() {
+        input.to_path_buf()
+    } else {
+        root.join(input)
+    };
+    let normalized = lexical_normalize(&candidate);
+    if !normalized.starts_with(&root) {
+        return Err(exec(
+            tool,
+            format!("{} is outside workspace {}", raw, root.display()),
+        ));
+    }
+    if let Some(name) = normalized.file_name().and_then(|n| n.to_str())
+        && is_sensitive_name(name)
+    {
+        return Err(exec(
+            tool,
+            format!("writing sensitive path {raw} is blocked"),
+        ));
+    }
+    if normalized
+        .components()
+        .filter_map(|component| match component {
+            Component::Normal(name) => name.to_str(),
+            _ => None,
+        })
+        .any(|name| matches!(name, ".git" | ".ssh" | ".aws" | ".gnupg"))
+    {
+        return Err(exec(
+            tool,
+            format!("writing sensitive path {raw} is blocked"),
+        ));
+    }
+
+    ensure_existing_prefix_inside_workspace(tool, &root, &normalized).await?;
+    Ok(normalized)
+}
+
+fn workspace_root(tool: &'static str) -> Result<PathBuf> {
+    let cwd = std::env::current_dir().map_err(|e| exec(tool, format!("current_dir: {e}")))?;
+    std::fs::canonicalize(&cwd)
+        .map_err(|e| exec(tool, format!("canonicalize {}: {e}", cwd.display())))
+}
+
+fn lexical_normalize(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Prefix(prefix) => out.push(prefix.as_os_str()),
+            Component::RootDir => out.push(std::path::MAIN_SEPARATOR.to_string()),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop();
+            }
+            Component::Normal(part) => out.push(part),
+        }
+    }
+    out
+}
+
+async fn ensure_existing_prefix_inside_workspace(
+    tool: &'static str,
+    root: &Path,
+    path: &Path,
+) -> Result<()> {
+    let mut probe = path.to_path_buf();
+    if !tokio::fs::try_exists(&probe)
+        .await
+        .map_err(|e| exec(tool, format!("{}: {e}", probe.display())))?
+    {
+        probe = path.parent().unwrap_or(root).to_path_buf();
+    }
+
+    while !tokio::fs::try_exists(&probe)
+        .await
+        .map_err(|e| exec(tool, format!("{}: {e}", probe.display())))?
+    {
+        if !probe.pop() {
+            return Err(exec(
+                tool,
+                format!("no existing parent for {}", path.display()),
+            ));
+        }
+    }
+
+    let canonical = tokio::fs::canonicalize(&probe)
+        .await
+        .map_err(|e| exec(tool, format!("canonicalize {}: {e}", probe.display())))?;
+    if !canonical.starts_with(root) {
+        return Err(exec(
+            tool,
+            format!(
+                "{} resolves outside workspace {}",
+                probe.display(),
+                root.display()
+            ),
+        ));
+    }
+    Ok(())
+}
+
+async fn write_file_atomic(tool: &'static str, path: &Path, content: &str) -> Result<()> {
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .ok_or_else(|| exec(tool, format!("{} has no parent directory", path.display())))?;
+    tokio::fs::create_dir_all(parent)
+        .await
+        .map_err(|e| exec(tool, format!("create parents of {}: {e}", path.display())))?;
+
+    let root = workspace_root(tool)?;
+    let parent_canonical = tokio::fs::canonicalize(parent)
+        .await
+        .map_err(|e| exec(tool, format!("canonicalize {}: {e}", parent.display())))?;
+    if !parent_canonical.starts_with(&root) {
+        return Err(exec(
+            tool,
+            format!(
+                "{} resolves outside workspace {}",
+                parent.display(),
+                root.display()
+            ),
+        ));
+    }
+
+    let tmp = parent.join(format!(".mandeven-write-{}.tmp", Uuid::now_v7()));
+    tokio::fs::write(&tmp, content)
+        .await
+        .map_err(|e| exec(tool, format!("{}: {e}", tmp.display())))?;
+    if let Err(err) = tokio::fs::rename(&tmp, path).await {
+        let _ = tokio::fs::remove_file(&tmp).await;
+        return Err(exec(tool, format!("{}: {err}", path.display())));
+    }
+    Ok(())
+}
+
+fn is_sensitive_name(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    matches!(
+        lower.as_str(),
+        ".env" | ".npmrc" | ".pypirc" | ".netrc" | "id_rsa" | "id_dsa" | "id_ecdsa" | "id_ed25519"
+    ) || lower.starts_with(".env.")
+}
+
 /// Returns true when `path` references a device file we refuse to
 /// read. Literal string match — does not resolve symlinks, so paths
 /// like `/tmp/link-to-dev-null` are not caught (acceptable trade-off
 /// for the minimal set this layer is defending against).
 fn is_dev_path(path: &str) -> bool {
     Path::new(path).starts_with("/dev")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn workspace_tmp_path(name: &str) -> PathBuf {
+        PathBuf::from("target")
+            .join("tmp")
+            .join(format!("mandeven-file-tool-{name}-{}", Uuid::now_v7()))
+    }
+
+    #[tokio::test]
+    async fn file_write_allows_workspace_path() {
+        let dir = workspace_tmp_path("inside");
+        let path = dir.join("nested").join("file.txt");
+
+        FileWrite
+            .call(json!({
+                "path": path,
+                "content": "hello"
+            }))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            tokio::fs::read_to_string(dir.join("nested/file.txt"))
+                .await
+                .unwrap(),
+            "hello"
+        );
+        let _ = tokio::fs::remove_dir_all(dir).await;
+    }
+
+    #[tokio::test]
+    async fn file_write_rejects_absolute_path_outside_workspace() {
+        let path = std::env::temp_dir().join(format!("mandeven-outside-{}", Uuid::now_v7()));
+
+        let err = FileWrite
+            .call(json!({
+                "path": path,
+                "content": "nope"
+            }))
+            .await
+            .unwrap_err()
+            .to_string();
+
+        assert!(err.contains("outside workspace"));
+    }
+
+    #[tokio::test]
+    async fn file_write_rejects_sensitive_file_name() {
+        let dir = workspace_tmp_path("sensitive");
+        let path = dir.join(".env");
+
+        let err = FileWrite
+            .call(json!({
+                "path": path,
+                "content": "SECRET=value"
+            }))
+            .await
+            .unwrap_err()
+            .to_string();
+
+        assert!(err.contains("sensitive path"));
+        let _ = tokio::fs::remove_dir_all(dir).await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn file_write_rejects_symlink_parent_escape() {
+        let dir = workspace_tmp_path("symlink");
+        let outside = std::env::temp_dir().join(format!("mandeven-outside-{}", Uuid::now_v7()));
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        tokio::fs::create_dir_all(&outside).await.unwrap();
+        std::os::unix::fs::symlink(&outside, dir.join("link")).unwrap();
+
+        let err = FileWrite
+            .call(json!({
+                "path": dir.join("link/file.txt"),
+                "content": "nope"
+            }))
+            .await
+            .unwrap_err()
+            .to_string();
+
+        assert!(err.contains("outside workspace"));
+        let _ = tokio::fs::remove_dir_all(dir).await;
+        let _ = tokio::fs::remove_dir_all(outside).await;
+    }
 }

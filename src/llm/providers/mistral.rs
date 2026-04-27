@@ -111,6 +111,9 @@ impl BaseLLMClient for Mistral {
                 prompt_tokens: wire.usage.prompt,
                 completion_tokens: wire.usage.completion,
                 total_tokens: wire.usage.total,
+                // Mistral does not surface prefix-cache accounting.
+                cache_hit_tokens: None,
+                cache_miss_tokens: None,
             },
             finish_reason: parse_finish_reason(&first.finish_reason),
         })
@@ -208,6 +211,9 @@ fn convert_stream_chunk(wire: WireStreamChunk) -> StreamChunk {
         prompt_tokens: u.prompt,
         completion_tokens: u.completion,
         total_tokens: u.total,
+        // Mistral does not surface prefix-cache accounting.
+        cache_hit_tokens: None,
+        cache_miss_tokens: None,
     });
     StreamChunk {
         content_delta,

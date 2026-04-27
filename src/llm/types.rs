@@ -289,6 +289,15 @@ pub struct Usage {
     pub completion_tokens: u32,
     /// Sum of prompt and completion tokens.
     pub total_tokens: u32,
+    /// Subset of `prompt_tokens` that hit the provider's automatic
+    /// prefix cache. `None` for providers that do not surface this
+    /// metric (e.g. Mistral). Reported by `DeepSeek` as
+    /// `prompt_cache_hit_tokens`.
+    pub cache_hit_tokens: Option<u32>,
+    /// Subset of `prompt_tokens` that missed the prefix cache.
+    /// `None` for providers that do not surface this metric. Reported
+    /// by `DeepSeek` as `prompt_cache_miss_tokens`.
+    pub cache_miss_tokens: Option<u32>,
 }
 
 /// Why the model stopped producing tokens.

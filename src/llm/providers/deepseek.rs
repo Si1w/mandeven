@@ -111,6 +111,8 @@ impl BaseLLMClient for DeepSeek {
                 prompt_tokens: wire.usage.prompt,
                 completion_tokens: wire.usage.completion,
                 total_tokens: wire.usage.total,
+                cache_hit_tokens: wire.usage.cache_hit,
+                cache_miss_tokens: wire.usage.cache_miss,
             },
             finish_reason: parse_finish_reason(&first.finish_reason),
         })
@@ -215,6 +217,8 @@ fn convert_stream_chunk(wire: WireStreamChunk) -> StreamChunk {
         prompt_tokens: u.prompt,
         completion_tokens: u.completion,
         total_tokens: u.total,
+        cache_hit_tokens: u.cache_hit,
+        cache_miss_tokens: u.cache_miss,
     });
     StreamChunk {
         content_delta,
@@ -517,4 +521,13 @@ struct WireUsage {
     completion: u32,
     #[serde(rename = "total_tokens")]
     total: u32,
+    /// `DeepSeek`-specific: portion of `prompt_tokens` served from the
+    /// automatic prefix cache. Absent on responses where the field is
+    /// not yet populated; `serde(default)` keeps that path infallible.
+    #[serde(default, rename = "prompt_cache_hit_tokens")]
+    cache_hit: Option<u32>,
+    /// `DeepSeek`-specific: portion of `prompt_tokens` that missed the
+    /// prefix cache.
+    #[serde(default, rename = "prompt_cache_miss_tokens")]
+    cache_miss: Option<u32>,
 }

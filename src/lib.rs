@@ -15,6 +15,7 @@ pub mod heartbeat;
 pub mod hook;
 pub mod llm;
 pub mod prompt;
+pub mod security;
 pub mod session;
 pub mod skill;
 pub mod tools;

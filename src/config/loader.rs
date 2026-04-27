@@ -223,6 +223,7 @@ mod tests {
                 show_thinking: false,
             },
             agent: AgentConfig::default(),
+            sandbox: crate::security::SandboxConfig::default(),
             source_path: std::path::PathBuf::new(),
         };
 

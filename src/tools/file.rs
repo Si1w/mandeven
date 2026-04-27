@@ -2,10 +2,15 @@
 //!
 //! Design notes:
 //!
-//! - **Workspace-confined writes**: `file_write` and `file_edit`
-//!   resolve relative paths against the process CWD and reject writes
-//!   outside that workspace, including existing symlink prefixes that
-//!   canonicalize elsewhere.
+//! - **Workspace-confined writes**: `file_write` and `file_edit` resolve
+//!   relative paths against the process CWD and reject writes outside
+//!   that workspace, including existing symlink prefixes that
+//!   canonicalize elsewhere. The path-resolution logic is shared with
+//!   [`super::workspace`] so [`super::grep::Grep`] and the shell tool
+//!   reach for the same primitives.
+//! - **Sandbox policy**: write paths additionally pass through
+//!   [`super::policy::ensure_writable_now`], so [`super::policy::SandboxPolicy::ReadOnly`]
+//!   rejects every write before any disk work happens.
 //! - **Device-path blocklist**: [`FileRead`] refuses anything starting
 //!   with `/dev/` so the model cannot read `/dev/random` and fill
 //!   memory (or block on `/dev/tty`).
@@ -16,7 +21,7 @@
 //!   consistent regardless of the file's original line endings.
 
 use std::fmt::Write;
-use std::path::{Component, Path, PathBuf};
+use std::path::Path;
 
 use async_trait::async_trait;
 use schemars::{JsonSchema, schema_for};
@@ -25,8 +30,10 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use super::error::{Error, Result};
+use super::workspace::{resolve_for_write, workspace_root};
 use super::{BaseTool, MAX_TOOL_RESULT_BYTES, ToolOutcome};
 use crate::llm::Tool;
+use crate::security::{SandboxPolicy, ensure_writable_now};
 
 /// Default number of lines returned by `file_read` when `limit` is
 /// unset.
@@ -176,7 +183,8 @@ impl BaseTool for FileWrite {
 
     async fn call(&self, args: Value) -> Result<ToolOutcome> {
         let p: WriteParams = parse_params("file_write", args)?;
-        let path = resolve_write_path("file_write", &p.path).await?;
+        ensure_writable_now("file_write", SandboxPolicy::current())?;
+        let path = resolve_for_write("file_write", &p.path).await?;
         write_file_atomic("file_write", &path, &p.content).await?;
         Ok(Value::String(format!("Wrote {} bytes to {}", p.content.len(), p.path)).into())
     }
@@ -232,7 +240,8 @@ impl BaseTool for FileEdit {
 
     async fn call(&self, args: Value) -> Result<ToolOutcome> {
         let p: EditParams = parse_params("file_edit", args)?;
-        let path = resolve_write_path("file_edit", &p.path).await?;
+        ensure_writable_now("file_edit", SandboxPolicy::current())?;
+        let path = resolve_for_write("file_edit", &p.path).await?;
 
         // Create-file special case.
         if p.old_string.is_empty()
@@ -400,114 +409,6 @@ fn exec(tool: &'static str, message: impl Into<String>) -> Error {
     }
 }
 
-async fn resolve_write_path(tool: &'static str, raw: &str) -> Result<PathBuf> {
-    if raw.trim().is_empty() {
-        return Err(exec(tool, "path is empty"));
-    }
-
-    let root = workspace_root(tool)?;
-    let input = Path::new(raw);
-    let candidate = if input.is_absolute() {
-        input.to_path_buf()
-    } else {
-        root.join(input)
-    };
-    let normalized = lexical_normalize(&candidate);
-    if !normalized.starts_with(&root) {
-        return Err(exec(
-            tool,
-            format!("{} is outside workspace {}", raw, root.display()),
-        ));
-    }
-    if let Some(name) = normalized.file_name().and_then(|n| n.to_str())
-        && is_sensitive_name(name)
-    {
-        return Err(exec(
-            tool,
-            format!("writing sensitive path {raw} is blocked"),
-        ));
-    }
-    if normalized
-        .components()
-        .filter_map(|component| match component {
-            Component::Normal(name) => name.to_str(),
-            _ => None,
-        })
-        .any(|name| matches!(name, ".git" | ".ssh" | ".aws" | ".gnupg"))
-    {
-        return Err(exec(
-            tool,
-            format!("writing sensitive path {raw} is blocked"),
-        ));
-    }
-
-    ensure_existing_prefix_inside_workspace(tool, &root, &normalized).await?;
-    Ok(normalized)
-}
-
-fn workspace_root(tool: &'static str) -> Result<PathBuf> {
-    let cwd = std::env::current_dir().map_err(|e| exec(tool, format!("current_dir: {e}")))?;
-    std::fs::canonicalize(&cwd)
-        .map_err(|e| exec(tool, format!("canonicalize {}: {e}", cwd.display())))
-}
-
-fn lexical_normalize(path: &Path) -> PathBuf {
-    let mut out = PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::Prefix(prefix) => out.push(prefix.as_os_str()),
-            Component::RootDir => out.push(std::path::MAIN_SEPARATOR.to_string()),
-            Component::CurDir => {}
-            Component::ParentDir => {
-                out.pop();
-            }
-            Component::Normal(part) => out.push(part),
-        }
-    }
-    out
-}
-
-async fn ensure_existing_prefix_inside_workspace(
-    tool: &'static str,
-    root: &Path,
-    path: &Path,
-) -> Result<()> {
-    let mut probe = path.to_path_buf();
-    if !tokio::fs::try_exists(&probe)
-        .await
-        .map_err(|e| exec(tool, format!("{}: {e}", probe.display())))?
-    {
-        probe = path.parent().unwrap_or(root).to_path_buf();
-    }
-
-    while !tokio::fs::try_exists(&probe)
-        .await
-        .map_err(|e| exec(tool, format!("{}: {e}", probe.display())))?
-    {
-        if !probe.pop() {
-            return Err(exec(
-                tool,
-                format!("no existing parent for {}", path.display()),
-            ));
-        }
-    }
-
-    let canonical = tokio::fs::canonicalize(&probe)
-        .await
-        .map_err(|e| exec(tool, format!("canonicalize {}: {e}", probe.display())))?;
-    if !canonical.starts_with(root) {
-        return Err(exec(
-            tool,
-            format!(
-                "{} resolves outside workspace {}",
-                probe.display(),
-                root.display()
-            ),
-        ));
-    }
-    Ok(())
-}
-
 async fn write_file_atomic(tool: &'static str, path: &Path, content: &str) -> Result<()> {
     let parent = path
         .parent()
@@ -517,7 +418,7 @@ async fn write_file_atomic(tool: &'static str, path: &Path, content: &str) -> Re
         .await
         .map_err(|e| exec(tool, format!("create parents of {}: {e}", path.display())))?;
 
-    let root = workspace_root(tool)?;
+    let root = workspace_root()?;
     let parent_canonical = tokio::fs::canonicalize(parent)
         .await
         .map_err(|e| exec(tool, format!("canonicalize {}: {e}", parent.display())))?;
@@ -543,14 +444,6 @@ async fn write_file_atomic(tool: &'static str, path: &Path, content: &str) -> Re
     Ok(())
 }
 
-fn is_sensitive_name(name: &str) -> bool {
-    let lower = name.to_ascii_lowercase();
-    matches!(
-        lower.as_str(),
-        ".env" | ".npmrc" | ".pypirc" | ".netrc" | "id_rsa" | "id_dsa" | "id_ecdsa" | "id_ed25519"
-    ) || lower.starts_with(".env.")
-}
-
 /// Returns true when `path` references a device file we refuse to
 /// read. Literal string match — does not resolve symlinks, so paths
 /// like `/tmp/link-to-dev-null` are not caught (acceptable trade-off
@@ -561,6 +454,8 @@ fn is_dev_path(path: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use super::*;
     use serde_json::json;
 

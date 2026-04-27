@@ -14,9 +14,11 @@
 
 pub mod error;
 pub mod file;
+pub mod grep;
 pub mod heartbeat;
 pub mod shell;
 pub mod skill;
+pub mod workspace;
 
 pub use error::{Error, Result};
 
@@ -222,11 +224,12 @@ fn error_content(message: &str) -> String {
 }
 
 /// Install the built-in tool set ([`file::FileRead`], [`file::FileWrite`],
-/// [`file::FileEdit`], [`shell::Shell`]) into `registry`. Callers who
-/// want a different subset can register tools directly instead.
+/// [`file::FileEdit`], [`grep::Grep`], [`shell::Shell`]) into `registry`.
+/// Callers who want a different subset can register tools directly instead.
 pub fn register_builtins(registry: &mut Registry) {
     registry.register(Arc::new(file::FileRead));
     registry.register(Arc::new(file::FileWrite));
     registry.register(Arc::new(file::FileEdit));
+    registry.register(Arc::new(grep::Grep));
     registry.register(Arc::new(shell::Shell));
 }

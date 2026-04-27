@@ -24,6 +24,7 @@ use mandeven::gateway::{Gateway, dispatch_channel};
 use mandeven::heartbeat::HeartbeatEngine;
 use mandeven::hook::HookEngine;
 use mandeven::prompt::PromptEngine;
+use mandeven::security::SandboxPolicy;
 use mandeven::session;
 use mandeven::skill::{self, SkillIndex};
 use mandeven::tools;
@@ -37,6 +38,11 @@ type DynError = Box<dyn std::error::Error + Send + Sync>;
 #[tokio::main]
 async fn main() -> Result<(), DynError> {
     let cfg = AppConfig::bootstrap()?;
+
+    // Install the sandbox tier before any tool is registered. Tools read
+    // it via `SandboxPolicy::current()` on each invocation; missing
+    // `[sandbox]` block in the TOML keeps the default `WorkspaceWrite`.
+    SandboxPolicy::init(cfg.sandbox.policy);
 
     // Sessions are scoped per-project: capture the launch cwd once and
     // sanitize it into a bucket name under `~/.mandeven/projects/`.

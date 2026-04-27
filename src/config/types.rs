@@ -14,6 +14,7 @@ use crate::agent::compact::CompactConfig;
 use crate::cron::CronConfig;
 use crate::heartbeat::HeartbeatConfig;
 use crate::hook::HookConfig;
+use crate::security::SandboxConfig;
 use crate::skill::SkillConfig;
 
 /// Root configuration loaded from `~/.mandeven/mandeven.toml`.
@@ -31,6 +32,12 @@ pub struct AppConfig {
     /// missing fields fall back to [`AgentConfig::default`].
     #[serde(default)]
     pub agent: AgentConfig,
+
+    /// Sandbox capability tier shared across every tool. Optional in
+    /// TOML; missing section defaults to
+    /// [`crate::security::SandboxPolicy::WorkspaceWrite`].
+    #[serde(default)]
+    pub sandbox: SandboxConfig,
 
     /// Filesystem path this config was loaded from. Populated by
     /// [`AppConfig::from_file`] / [`AppConfig::load`], empty for

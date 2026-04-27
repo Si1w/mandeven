@@ -1,20 +1,25 @@
-//! `shell` tool — execute a shell command via `sh -c`.
+//! `shell` tool — execute a shell command.
 //!
 //! Design notes:
 //!
-//! - **Shell choice**: `sh -c`, not `bash -l -c`. POSIX-portable and
-//!   deterministic; the user's login profile is intentionally *not*
-//!   sourced. Callers that need specific environment variables must
-//!   pass them through the curated [`PASS_ENV_KEYS`] list or wrap the
-//!   command explicitly.
+//! - **Shell choice**: defaults to `sh -c` (POSIX-portable, no login
+//!   profile sourced). The model can opt in to the user's login shell
+//!   per call via `login: true`, which switches to `$SHELL -lc <cmd>`
+//!   and pulls in the user's PATH/aliases — useful for `gh`, `nvm`-shimmed
+//!   `node`, etc. Defaults to `sh` (`/bin/sh`) when `$SHELL` is unset.
+//! - **Sandbox policy gate**: under [`super::policy::SandboxPolicy::ReadOnly`]
+//!   every invocation is routed through [`super::safe_commands::ensure_safe_command`]
+//!   first; commands not on the allow-list are rejected before any
+//!   `spawn`. Under `WorkspaceWrite` the gate is skipped — the existing
+//!   deny patterns and the workspace-anchored CWD are the only guards.
 //! - **Curated env**: only a small set of variables (`HOME`, `PATH`,
-//!   `LANG`, `TERM`, `USER`) is inherited from the parent process.
-//!   All other variables — including any API keys in the agent's
-//!   environment — are stripped before `sh -c` runs.
+//!   `LANG`, `TERM`, `USER`, `SHELL`) is inherited from the parent
+//!   process. Everything else — including API keys in the agent's
+//!   environment — is stripped before the command runs.
 //! - **Deny patterns**: a minimal regex set blocks a handful of
 //!   obviously destructive commands (`rm -rf`, `dd if=`, `shutdown`,
 //!   fork bomb). Not a sandbox; a defense-in-depth backstop against
-//!   the most catastrophic accidents.
+//!   the most catastrophic accidents. Always on, both policy tiers.
 //! - **Timeout via `kill_on_drop`**: the child is spawned with
 //!   `kill_on_drop(true)`; when the surrounding `tokio::time::timeout`
 //!   fires, dropping the future cancels `wait_with_output` which
@@ -42,6 +47,7 @@ use tokio::time::timeout;
 use super::error::{Error, Result};
 use super::{BaseTool, MAX_TOOL_RESULT_BYTES, ToolOutcome};
 use crate::llm::Tool;
+use crate::security::{SandboxPolicy, ensure_safe_command};
 
 /// Default per-call timeout when the caller omits `timeout_secs`.
 const DEFAULT_TIMEOUT_SECS: u64 = 60;
@@ -49,10 +55,10 @@ const DEFAULT_TIMEOUT_SECS: u64 = 60;
 /// Hard ceiling on `timeout_secs`. Clamped on the way in.
 const MAX_TIMEOUT_SECS: u64 = 600;
 
-/// Environment variables forwarded from the parent process into
-/// `sh -c`. Keep this list short; everything else (API keys, etc.) is
-/// stripped.
-const PASS_ENV_KEYS: &[&str] = &["HOME", "PATH", "LANG", "TERM", "USER"];
+/// Environment variables forwarded from the parent process. Keep this
+/// list short; everything else (API keys, etc.) is stripped. `SHELL`
+/// is included so `login: true` can locate the user's preferred shell.
+const PASS_ENV_KEYS: &[&str] = &["HOME", "PATH", "LANG", "TERM", "USER", "SHELL"];
 
 /// Patterns that cause [`Shell::call`] to refuse the command outright.
 /// Matched against the lowercased command. Compiled once into
@@ -81,7 +87,8 @@ static DENY_RE: LazyLock<Vec<Regex>> = LazyLock::new(|| {
 
 #[derive(Deserialize, JsonSchema)]
 struct ShellParams {
-    /// Shell command passed to `sh -c`.
+    /// Shell command. Run via `sh -c` by default, or `$SHELL -lc` when
+    /// `login: true`.
     command: String,
     /// Working directory. Defaults to the process CWD.
     #[serde(default)]
@@ -89,6 +96,11 @@ struct ShellParams {
     /// Per-call timeout in seconds. Default 60, max 600.
     #[serde(default)]
     timeout_secs: Option<u64>,
+    /// When `true`, run the command through the user's login shell
+    /// (`$SHELL -lc <cmd>`) so aliases, PATH additions, and shell
+    /// initialisation files apply. Defaults to `false` (POSIX `sh -c`).
+    #[serde(default)]
+    login: Option<bool>,
 }
 
 /// Execute a command via `sh -c` with a curated environment, deny-list
@@ -103,13 +115,16 @@ impl BaseTool for Shell {
     fn schema(&self) -> Tool {
         Tool {
             name: "shell".into(),
-            description: "Execute a shell command via `sh -c` with a curated \
-                environment (HOME, PATH, LANG, TERM, USER). Prefer file_read / \
-                file_write / file_edit over cat / echo / sed, and grep tools over \
-                shell find/grep. Output is middle-truncated at the shared tool \
-                result cap; timeout defaults to 60s, max 600s. A minimal deny-list \
-                blocks obviously destructive commands (rm -rf, dd if=, shutdown, \
-                fork bomb)."
+            description: "Execute a shell command via `sh -c` (or `$SHELL -lc` \
+                when `login: true`) with a curated environment (HOME, PATH, \
+                LANG, TERM, USER, SHELL). Prefer file_read / file_write / \
+                file_edit over cat / echo / sed, and the grep tool over shell \
+                find/grep. Output is middle-truncated at the shared tool \
+                result cap; timeout defaults to 60s, max 600s. A minimal \
+                deny-list always blocks obviously destructive commands \
+                (rm -rf, dd if=, shutdown, fork bomb). Under read_only \
+                sandbox policy only commands on the safe allow-list run \
+                (cat / ls / wc / grep / git status|log|diff / ...)."
                 .into(),
             parameters: serde_json::to_value(schema_for!(ShellParams))
                 .expect("JsonSchema derive always serializes"),
@@ -131,14 +146,26 @@ impl BaseTool for Shell {
             )));
         }
 
+        if matches!(SandboxPolicy::current(), SandboxPolicy::ReadOnly) {
+            ensure_safe_command(&p.command)?;
+        }
+
         let t = Duration::from_secs(
             p.timeout_secs
                 .unwrap_or(DEFAULT_TIMEOUT_SECS)
                 .clamp(1, MAX_TIMEOUT_SECS),
         );
 
-        let mut cmd = Command::new("sh");
-        cmd.arg("-c").arg(&p.command);
+        let (program, shell_flag) = if p.login.unwrap_or(false) {
+            (
+                std::env::var("SHELL").unwrap_or_else(|_| "sh".into()),
+                "-lc",
+            )
+        } else {
+            ("sh".into(), "-c")
+        };
+        let mut cmd = Command::new(&program);
+        cmd.arg(shell_flag).arg(&p.command);
         cmd.env_clear();
         for key in PASS_ENV_KEYS {
             if let Ok(val) = std::env::var(key) {

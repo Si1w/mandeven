@@ -87,6 +87,7 @@ pub(super) fn interactive() -> Result<AppConfig> {
         },
         tui: TuiConfig::default(),
         agent: AgentConfig::default(),
+        sandbox: crate::security::SandboxConfig::default(),
         source_path: PathBuf::new(),
     })
 }

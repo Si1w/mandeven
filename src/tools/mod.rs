@@ -27,7 +27,7 @@ pub use error::{Error, Result};
 /// at this bound so per-turn context cost stays predictable.
 pub const MAX_TOOL_RESULT_BYTES: usize = 30_000;
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -100,8 +100,15 @@ pub trait BaseTool: Send + Sync {
 }
 
 /// Registry of tools available to the agent.
+///
+/// Backed by [`BTreeMap`] so [`Self::schemas`] emits tools in a stable
+/// lexicographic order that survives process restarts. The iteration
+/// order of [`std::collections::HashMap`] is deterministic within one
+/// run but randomized across runs, which silently invalidates
+/// `DeepSeek`'s automatic prefix cache between sessions — same prompt
+/// bytes, different tool ordering on the wire, fresh cache miss.
 pub struct Registry {
-    tools: HashMap<String, Arc<dyn BaseTool>>,
+    tools: BTreeMap<String, Arc<dyn BaseTool>>,
 }
 
 impl Registry {
@@ -109,7 +116,7 @@ impl Registry {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            tools: HashMap::new(),
+            tools: BTreeMap::new(),
         }
     }
 

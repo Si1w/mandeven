@@ -20,7 +20,10 @@ use super::{CliState, Line as TranscriptLine, Mode, Overlay};
 
 mod markdown;
 
-const PROMPT: &str = "› ";
+const LIVE_PREFIX_COLS: u16 = 2;
+const PROMPT_MARKER: &str = "›";
+const PROMPT_PREFIX: &str = "› ";
+const CONTINUATION_PREFIX: &str = "  ";
 const HELP_BODY_LINES: u16 = 21;
 const HELP_LABEL_WIDTH: usize = 28;
 const QUEUED_PREVIEW_LIMIT: usize = 3;
@@ -101,16 +104,11 @@ fn render_transcript(f: &mut Frame<'_>, area: Rect, state: &mut CliState) {
         vertical: 0,
     });
 
-    // Estimate logical lines ignoring terminal wrapping. At 80+
-    // columns most messages fit on one line; under-counts only when
-    // content actually wraps, in which case the last wrapped rows
-    // may scroll out of view. Acceptable trade-off vs. pulling in
-    // ratatui's unstable `Paragraph::line_count` (ratatui issue #293).
-    //
-    // TODO(wrap-aware-scroll): replace with `Paragraph::line_count`
-    // once it stabilises, or track wrapping ourselves via
-    // `unicode-width`.
-    let logical = count_logical_lines(state);
+    if inner.width == 0 {
+        return;
+    }
+
+    let logical = build_transcript_for_width(state, inner.width).lines.len();
     let max_offset =
         u16::try_from(logical.saturating_sub(inner.height as usize)).unwrap_or(u16::MAX);
 
@@ -132,22 +130,18 @@ fn render_transcript(f: &mut Frame<'_>, area: Rect, state: &mut CliState) {
         clamped
     };
 
-    if has_transcript_content(state) {
-        f.render_widget(
-            Paragraph::new(build_transcript(state))
-                .wrap(Wrap { trim: false })
-                .scroll((scroll, 0)),
-            inner,
-        );
-    } else {
+    let text = build_transcript_for_width(state, inner.width);
+    if text.lines.is_empty() {
         render_empty_transcript(f, inner);
+    } else {
+        f.render_widget(Paragraph::new(text).scroll((scroll, 0)), inner);
     }
 }
 
 fn render_empty_transcript(f: &mut Frame<'_>, area: Rect) {
     let text = Text::from(vec![
         Line::from(vec![
-            Span::styled("› ", prompt_style()),
+            Span::styled(PROMPT_PREFIX, prompt_style()),
             Span::styled("Ask Mandeven to do anything", dim_style()),
         ]),
         Line::raw(""),
@@ -162,6 +156,7 @@ fn render_empty_transcript(f: &mut Frame<'_>, area: Rect) {
     f.render_widget(Paragraph::new(text).wrap(Wrap { trim: false }), area);
 }
 
+#[cfg(test)]
 fn has_transcript_content(state: &CliState) -> bool {
     state
         .transcript
@@ -169,47 +164,6 @@ fn has_transcript_content(state: &CliState) -> bool {
         .any(|entry| should_render_transcript_entry(state, entry))
         || (state.show_thinking && state.streaming_thinking.is_some())
         || state.streaming.is_some()
-}
-
-/// Count the number of logical lines that [`build_transcript`] will
-/// produce, without accounting for wrapping. Mirrors the same rules
-/// (inter-entry blank lines + Markdown-rendered assistant output).
-fn count_logical_lines(state: &CliState) -> usize {
-    let mut count = 0usize;
-    let mut rendered_any = false;
-    for entry in state
-        .transcript
-        .iter()
-        .filter(|entry| should_render_transcript_entry(state, entry))
-    {
-        if rendered_any {
-            count += 1; // blank separator
-        }
-        count += match entry {
-            TranscriptLine::User(t)
-            | TranscriptLine::Error(t)
-            | TranscriptLine::Thinking(t)
-            | TranscriptLine::Compact(t) => t.matches('\n').count() + 1,
-            TranscriptLine::Assistant(t) => markdown::Engine::line_count(t),
-        };
-        rendered_any = true;
-    }
-    if state.show_thinking
-        && let Some(thinking) = &state.streaming_thinking
-    {
-        if rendered_any {
-            count += 1;
-        }
-        count += thinking.matches('\n').count() + 1;
-        rendered_any = true;
-    }
-    if let Some(stream) = &state.streaming {
-        if rendered_any {
-            count += 1;
-        }
-        count += markdown::Engine::line_count(stream);
-    }
-    count
 }
 
 fn render_status_line(f: &mut Frame<'_>, area: Rect, state: &CliState) {
@@ -311,20 +265,27 @@ fn render_input(f: &mut Frame<'_>, area: Rect, state: &CliState) {
         .title(Line::styled(" message ", dim_style()))
         .title_bottom(Line::styled(input_footer(area.width, state), dim_style()));
 
-    let inner = block.inner(area);
+    let inner = block.inner(area).inner(Margin {
+        horizontal: 1,
+        vertical: 0,
+    });
     f.render_widget(block, area);
 
-    let splits = Layout::horizontal([
-        Constraint::Length(u16::try_from(PROMPT.chars().count()).unwrap_or(2)),
-        Constraint::Min(0),
-    ])
-    .split(inner);
-    let prefix_rect = splits[0];
-    let textarea_rect = splits[1];
+    let textarea_rect = Rect {
+        x: inner.x.saturating_add(LIVE_PREFIX_COLS),
+        y: inner.y,
+        width: inner.width.saturating_sub(LIVE_PREFIX_COLS),
+        height: inner.height,
+    };
 
     f.render_widget(
-        Paragraph::new(Line::styled(PROMPT, prompt_style())),
-        prefix_rect,
+        Paragraph::new(Line::styled(PROMPT_MARKER, prompt_style())),
+        Rect {
+            x: inner.x,
+            y: inner.y,
+            width: LIVE_PREFIX_COLS.min(inner.width),
+            height: inner.height,
+        },
     );
     // `&TextArea` implements `Widget` directly; `.widget()` is
     // deprecated in ratatui-textarea 0.9.
@@ -505,7 +466,16 @@ fn full_width_rect(area: Rect, height: u16) -> Rect {
     }
 }
 
+#[cfg(test)]
 fn build_transcript(state: &CliState) -> Text<'_> {
+    build_transcript_inner(state, None)
+}
+
+fn build_transcript_for_width(state: &CliState, width: u16) -> Text<'_> {
+    build_transcript_inner(state, Some(width))
+}
+
+fn build_transcript_inner(state: &CliState, width: Option<u16>) -> Text<'_> {
     let mut lines: Vec<Line<'_>> = Vec::new();
 
     for entry in state
@@ -513,25 +483,20 @@ fn build_transcript(state: &CliState) -> Text<'_> {
         .iter()
         .filter(|entry| should_render_transcript_entry(state, entry))
     {
-        if !lines.is_empty() {
-            lines.push(Line::raw(""));
-        }
-        append_transcript_entry(&mut lines, entry);
+        append_transcript_entry_if_visible(&mut lines, entry, width);
     }
 
     if state.show_thinking
         && let Some(thinking) = &state.streaming_thinking
     {
-        if !lines.is_empty() {
-            lines.push(Line::raw(""));
-        }
-        append_thinking_lines(&mut lines, thinking);
+        append_rendered_lines_if_visible(&mut lines, |entry| {
+            append_thinking_lines(entry, thinking, width);
+        });
     }
     if let Some(stream) = &state.streaming {
-        if !lines.is_empty() {
-            lines.push(Line::raw(""));
-        }
-        append_assistant_lines(&mut lines, stream);
+        append_rendered_lines_if_visible(&mut lines, |entry| {
+            append_assistant_lines(entry, stream, width);
+        });
     }
 
     Text::from(lines)
@@ -541,64 +506,147 @@ fn should_render_transcript_entry(state: &CliState, entry: &TranscriptLine) -> b
     state.show_thinking || !matches!(entry, TranscriptLine::Thinking(_))
 }
 
-fn append_transcript_entry<'a>(lines: &mut Vec<Line<'a>>, entry: &'a TranscriptLine) {
+fn append_transcript_entry<'a>(
+    lines: &mut Vec<Line<'a>>,
+    entry: &'a TranscriptLine,
+    width: Option<u16>,
+) {
     match entry {
-        TranscriptLine::User(text) => append_user_lines(lines, text),
-        TranscriptLine::Assistant(text) => append_assistant_lines(lines, text),
-        TranscriptLine::Thinking(text) => append_thinking_lines(lines, text),
-        TranscriptLine::Compact(text) => append_compact_lines(lines, text),
-        TranscriptLine::Error(text) => append_error_lines(lines, text),
+        TranscriptLine::User(text) => append_user_lines(lines, text, width),
+        TranscriptLine::Assistant(text) => append_assistant_lines(lines, text, width),
+        TranscriptLine::Thinking(text) => append_thinking_lines(lines, text, width),
+        TranscriptLine::Compact(text) => append_compact_lines(lines, text, width),
+        TranscriptLine::Error(text) => append_error_lines(lines, text, width),
     }
+}
+
+fn append_transcript_entry_if_visible<'a>(
+    lines: &mut Vec<Line<'a>>,
+    entry: &'a TranscriptLine,
+    width: Option<u16>,
+) {
+    append_rendered_lines_if_visible(lines, |entry_lines| {
+        append_transcript_entry(entry_lines, entry, width);
+    });
+}
+
+fn append_rendered_lines_if_visible<'a>(
+    lines: &mut Vec<Line<'a>>,
+    render: impl FnOnce(&mut Vec<Line<'a>>),
+) {
+    let mut entry_lines = Vec::new();
+    render(&mut entry_lines);
+    if entry_lines.is_empty() {
+        return;
+    }
+    if !lines.is_empty() {
+        lines.push(Line::raw(""));
+    }
+    lines.extend(entry_lines);
 }
 
 /// Compact summary boundary, rendered in Codex's `• `-prefixed info
 /// style (see `agent-examples/codex/codex-rs/tui/src/history_cell.rs`'s
 /// `new_info_event`). Continuation rows align under the message text.
-fn append_compact_lines<'a>(lines: &mut Vec<Line<'a>>, text: &'a str) {
+fn append_compact_lines<'a>(lines: &mut Vec<Line<'a>>, text: &'a str, width: Option<u16>) {
     for (i, line) in text.split('\n').enumerate() {
         let prefix = if i == 0 { "• " } else { "  " };
-        lines.push(Line::from(vec![
-            Span::styled(prefix, dim_style()),
-            Span::styled(line, dim_style().add_modifier(Modifier::ITALIC)),
-        ]));
+        append_prefixed_line(
+            lines,
+            prefix,
+            CONTINUATION_PREFIX,
+            dim_style(),
+            line,
+            dim_style().add_modifier(Modifier::ITALIC),
+            width,
+        );
     }
 }
 
-fn append_thinking_lines<'a>(lines: &mut Vec<Line<'a>>, text: &'a str) {
+fn append_thinking_lines<'a>(lines: &mut Vec<Line<'a>>, text: &'a str, width: Option<u16>) {
     for (i, line) in text.split('\n').enumerate() {
         let prefix = if i == 0 {
             "  thinking · "
         } else {
             "             "
         };
-        lines.push(Line::from(vec![
-            Span::styled(prefix, dim_style().add_modifier(Modifier::ITALIC)),
-            Span::styled(line, dim_style().add_modifier(Modifier::ITALIC)),
-        ]));
+        append_prefixed_line(
+            lines,
+            prefix,
+            "             ",
+            dim_style().add_modifier(Modifier::ITALIC),
+            line,
+            dim_style().add_modifier(Modifier::ITALIC),
+            width,
+        );
     }
 }
 
-fn append_user_lines<'a>(lines: &mut Vec<Line<'a>>, text: &'a str) {
+fn append_user_lines<'a>(lines: &mut Vec<Line<'a>>, text: &'a str, width: Option<u16>) {
     for (i, line) in text.split('\n').enumerate() {
-        let prefix = if i == 0 { "› " } else { "  " };
-        lines.push(Line::from(vec![
-            Span::styled(prefix, prompt_style()),
-            Span::styled(line, Style::default().add_modifier(Modifier::BOLD)),
-        ]));
+        let prefix = if i == 0 {
+            PROMPT_PREFIX
+        } else {
+            CONTINUATION_PREFIX
+        };
+        append_prefixed_line(
+            lines,
+            prefix,
+            CONTINUATION_PREFIX,
+            prompt_style(),
+            line,
+            Style::default().add_modifier(Modifier::BOLD),
+            width,
+        );
     }
 }
 
-fn append_assistant_lines<'a>(lines: &mut Vec<Line<'a>>, text: &'a str) {
-    markdown::Engine::render_into(lines, text);
+fn append_assistant_lines<'a>(lines: &mut Vec<Line<'a>>, text: &'a str, width: Option<u16>) {
+    if let Some(width) = width {
+        markdown::Engine::render_into_width(lines, text, width);
+    } else {
+        markdown::Engine::render_into(lines, text);
+    }
 }
 
-fn append_error_lines<'a>(lines: &mut Vec<Line<'a>>, text: &'a str) {
+fn append_error_lines<'a>(lines: &mut Vec<Line<'a>>, text: &'a str, width: Option<u16>) {
     for (i, line) in text.split('\n').enumerate() {
         let prefix = if i == 0 { "• " } else { "  " };
-        lines.push(Line::from(vec![
-            Span::styled(prefix, Style::default().fg(Color::Red)),
-            Span::styled(line, Style::default().fg(Color::Red)),
-        ]));
+        append_prefixed_line(
+            lines,
+            prefix,
+            CONTINUATION_PREFIX,
+            Style::default().fg(Color::Red),
+            line,
+            Style::default().fg(Color::Red),
+            width,
+        );
+    }
+}
+
+fn append_prefixed_line<'a>(
+    lines: &mut Vec<Line<'a>>,
+    initial_prefix: &'static str,
+    subsequent_prefix: &'static str,
+    prefix_style: Style,
+    text: &'a str,
+    text_style: Style,
+    width: Option<u16>,
+) {
+    let initial_prefix = Span::styled(initial_prefix, prefix_style);
+    let content = Span::styled(text, text_style);
+    let subsequent_prefix = Span::styled(subsequent_prefix, prefix_style);
+    if let Some(width) = width {
+        let content = [content];
+        markdown::push_wrapped_line(
+            lines,
+            vec![initial_prefix],
+            &content,
+            vec![subsequent_prefix],
+            usize::from(width.max(1)),
+        );
+    } else {
+        lines.push(Line::from(vec![initial_prefix, content]));
     }
 }
 
@@ -668,9 +716,10 @@ fn dim_style() -> Style {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_transcript, has_transcript_content};
+    use super::{build_transcript, build_transcript_for_width, has_transcript_content, render};
     use crate::cli::{CliState, Line as TranscriptLine};
     use ratatui::text::Text;
+    use ratatui::{Terminal, backend::TestBackend, buffer::Buffer};
 
     #[test]
     fn transcript_hides_thinking_when_configured() {
@@ -736,6 +785,82 @@ mod tests {
         );
     }
 
+    #[test]
+    fn whitespace_only_streaming_assistant_does_not_add_separator() {
+        let state = CliState {
+            transcript: vec![TranscriptLine::User("今天是几号啊".to_string())],
+            streaming: Some("\n\n".to_string()),
+            ..CliState::default()
+        };
+
+        assert_eq!(text_to_plain(&build_transcript(&state)), "› 今天是几号啊");
+    }
+
+    #[test]
+    fn date_answer_with_leading_newlines_uses_one_separator() {
+        let state = CliState {
+            transcript: vec![
+                TranscriptLine::User("今天是几号啊".to_string()),
+                TranscriptLine::Assistant("\n\n今天是 2026 年 4 月 27 日。".to_string()),
+            ],
+            ..CliState::default()
+        };
+
+        assert_eq!(
+            text_to_plain(&build_transcript(&state)),
+            "› 今天是几号啊\n\n今天是 2026 年 4 月 27 日。"
+        );
+    }
+
+    #[test]
+    fn composer_prompt_aligns_with_transcript_user_prompt() {
+        let backend = TestBackend::new(40, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut state = CliState {
+            transcript: vec![TranscriptLine::User("query".to_string())],
+            ..CliState::default()
+        };
+        state.input.insert_str("draft");
+
+        terminal.draw(|f| render(f, &mut state)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let transcript_line = buffer_line(buffer, 2);
+        let input_line = buffer_line(buffer, 8);
+
+        assert_eq!(transcript_line.find('›'), input_line.find('›'));
+        assert_eq!(transcript_line.find("query"), input_line.find("draft"));
+    }
+
+    #[test]
+    fn user_transcript_wraps_under_prompt_gutter() {
+        let state = CliState {
+            transcript: vec![TranscriptLine::User(
+                "one two three four five six seven".to_string(),
+            )],
+            ..CliState::default()
+        };
+
+        assert_eq!(
+            text_to_plain(&build_transcript_for_width(&state, 14)),
+            "› one two\n  three four\n  five six\n  seven"
+        );
+    }
+
+    #[test]
+    fn assistant_markdown_wraps_structural_prefixes() {
+        let state = CliState {
+            transcript: vec![TranscriptLine::Assistant(
+                "# Header\nBody paragraph\n\n> quoted content that wraps".to_string(),
+            )],
+            ..CliState::default()
+        };
+
+        assert_eq!(
+            text_to_plain(&build_transcript_for_width(&state, 20)),
+            "# Header\n\nBody paragraph\n\n> quoted content\n> that wraps"
+        );
+    }
+
     fn text_to_plain(text: &Text<'_>) -> String {
         text.lines
             .iter()
@@ -747,5 +872,11 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    fn buffer_line(buffer: &Buffer, y: u16) -> String {
+        (0..buffer.area.width)
+            .map(|x| buffer.cell((x, y)).unwrap().symbol())
+            .collect()
     }
 }

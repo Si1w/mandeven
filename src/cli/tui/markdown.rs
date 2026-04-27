@@ -1,53 +1,61 @@
 //! Markdown renderer for assistant output.
 //!
 //! This module keeps the TUI-facing API intentionally small:
-//! [`Engine::render_into`] turns assistant markdown into ratatui lines
-//! and [`Engine::line_count`] mirrors the same rendering path for
-//! scroll accounting. The implementation uses `pulldown-cmark` for
-//! CommonMark/GFM block parsing, then maps parser events onto the
-//! compact terminal styling used by the rest of the transcript.
+//! [`Engine::render_into`] turns assistant markdown into ratatui lines,
+//! while [`Engine::render_into_width`] uses the same path with explicit
+//! terminal-width wrapping. The implementation uses `pulldown-cmark` for
+//! CommonMark/GFM block parsing, then maps parser events onto the compact
+//! terminal styling used by the rest of the transcript.
 
 use pulldown_cmark::{Alignment, CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 pub(super) struct Engine;
 
 impl Engine {
     pub(super) fn render_into(out: &mut Vec<Line<'_>>, text: &str) {
-        let mut renderer = Renderer::new(out);
-        renderer.render(text);
+        let mut state = EngineState::new(out, None);
+        state.render(text);
     }
 
-    pub(super) fn line_count(text: &str) -> usize {
-        let mut lines: Vec<Line<'static>> = Vec::new();
-        Self::render_into(&mut lines, text);
-        lines.len()
+    pub(super) fn render_into_width(out: &mut Vec<Line<'_>>, text: &str, width: u16) {
+        let mut state = EngineState::new(out, Some(usize::from(width.max(1))));
+        state.render(text);
     }
 }
 
-struct Renderer<'a, 'out> {
+struct EngineState<'a, 'out> {
     out: &'out mut Vec<Line<'a>>,
     frames: Vec<BlockFrame>,
+    current_initial_prefix: Vec<Span<'a>>,
+    current_subsequent_prefix: Vec<Span<'a>>,
     spans: Vec<Span<'a>>,
     inline_stack: Vec<InlineKind>,
     heading: Option<usize>,
     pending_item_marker: Option<String>,
     pending_block_gap: bool,
+    wrap_width: Option<usize>,
+    current_line_wrappable: bool,
     code_line: Option<String>,
     table: Option<TableState>,
 }
 
-impl<'a, 'out> Renderer<'a, 'out> {
-    fn new(out: &'out mut Vec<Line<'a>>) -> Self {
+impl<'a, 'out> EngineState<'a, 'out> {
+    fn new(out: &'out mut Vec<Line<'a>>, wrap_width: Option<usize>) -> Self {
         Self {
             out,
             frames: Vec::new(),
+            current_initial_prefix: Vec::new(),
+            current_subsequent_prefix: Vec::new(),
             spans: Vec::new(),
             inline_stack: Vec::new(),
             heading: None,
             pending_item_marker: None,
             pending_block_gap: false,
+            wrap_width,
+            current_line_wrappable: true,
             code_line: None,
             table: None,
         }
@@ -88,8 +96,7 @@ impl<'a, 'out> Renderer<'a, 'out> {
     fn start_tag(&mut self, tag: Tag<'_>) {
         match tag {
             Tag::Heading { level, .. } => {
-                self.heading = Some(heading_level(level));
-                self.push_heading_prefix(level);
+                self.start_heading(level);
             }
             Tag::BlockQuote(_) => {
                 self.flush_current_line();
@@ -145,6 +152,7 @@ impl<'a, 'out> Renderer<'a, 'out> {
             TagEnd::Heading(_) => {
                 self.flush_current_line();
                 self.heading = None;
+                self.mark_block_gap();
             }
             TagEnd::BlockQuote(_) => {
                 self.flush_current_line();
@@ -256,6 +264,16 @@ impl<'a, 'out> Renderer<'a, 'out> {
         self.mark_block_gap();
     }
 
+    fn start_heading(&mut self, level: HeadingLevel) {
+        self.flush_current_line();
+        if !self.out.is_empty() && !last_line_is_blank(self.out) {
+            self.out.push(Line::raw(""));
+        }
+        self.pending_block_gap = false;
+        self.heading = Some(heading_level(level));
+        self.push_heading_prefix(level);
+    }
+
     fn push_task_marker(&mut self, checked: bool) {
         self.pending_item_marker = Some(if checked { "☑ " } else { "☐ " }.to_string());
     }
@@ -300,6 +318,7 @@ impl<'a, 'out> Renderer<'a, 'out> {
             display_code_info(info),
             dim_style().add_modifier(Modifier::ITALIC),
         ));
+        self.current_line_wrappable = false;
         self.flush_current_line();
         self.code_line = Some(String::new());
     }
@@ -330,6 +349,7 @@ impl<'a, 'out> Renderer<'a, 'out> {
 
         self.ensure_line();
         self.spans.push(Span::styled("  ╰─", dim_style()));
+        self.current_line_wrappable = false;
         self.flush_current_line();
         self.mark_block_gap();
     }
@@ -339,6 +359,7 @@ impl<'a, 'out> Renderer<'a, 'out> {
         self.spans.push(Span::styled("  │ ", dim_style()));
         self.spans
             .push(Span::styled(line.to_string(), code_style()));
+        self.current_line_wrappable = false;
         self.flush_current_line();
     }
 
@@ -359,6 +380,7 @@ impl<'a, 'out> Renderer<'a, 'out> {
                 };
                 self.spans.push(Span::styled(text, style));
             }
+            self.current_line_wrappable = false;
             self.flush_current_line();
         }
     }
@@ -373,8 +395,10 @@ impl<'a, 'out> Renderer<'a, 'out> {
         }
         self.pending_block_gap = false;
 
-        let (prefix, consumed_marker) = self.line_prefix();
-        self.spans.extend(prefix);
+        let (initial_prefix, consumed_marker) = self.line_prefix(true);
+        let (subsequent_prefix, _) = self.line_prefix(false);
+        self.current_initial_prefix = initial_prefix;
+        self.current_subsequent_prefix = subsequent_prefix;
         if consumed_marker {
             self.pending_item_marker = None;
         }
@@ -383,7 +407,18 @@ impl<'a, 'out> Renderer<'a, 'out> {
     fn flush_current_line(&mut self) {
         if !self.spans.is_empty() {
             let spans = std::mem::take(&mut self.spans);
-            self.out.push(Line::from(spans));
+            let initial_prefix = std::mem::take(&mut self.current_initial_prefix);
+            let subsequent_prefix = std::mem::take(&mut self.current_subsequent_prefix);
+            if let Some(width) = self.wrap_width
+                && self.current_line_wrappable
+            {
+                push_wrapped_line(self.out, initial_prefix, &spans, subsequent_prefix, width);
+            } else {
+                let mut rendered = initial_prefix;
+                rendered.extend(spans);
+                self.out.push(Line::from(rendered));
+            }
+            self.current_line_wrappable = true;
         }
     }
 
@@ -393,18 +428,22 @@ impl<'a, 'out> Renderer<'a, 'out> {
         }
     }
 
-    fn line_prefix(&self) -> (Vec<Span<'a>>, bool) {
+    fn line_prefix(&self, include_pending_marker: bool) -> (Vec<Span<'a>>, bool) {
         let mut spans = Vec::new();
         let mut consumed_marker = false;
-        let marker_list_idx = self.pending_item_marker.as_ref().and_then(|_| {
-            self.frames
-                .iter()
-                .rposition(|frame| matches!(frame, BlockFrame::List(_)))
-        });
+        let marker_list_idx = include_pending_marker
+            .then(|| {
+                self.pending_item_marker.as_ref().and_then(|_| {
+                    self.frames
+                        .iter()
+                        .rposition(|frame| matches!(frame, BlockFrame::List(_)))
+                })
+            })
+            .flatten();
 
         for (idx, frame) in self.frames.iter().enumerate() {
             match frame {
-                BlockFrame::Quote => spans.push(Span::styled("│ ", dim_style())),
+                BlockFrame::Quote => spans.push(Span::styled("> ", dim_style())),
                 BlockFrame::List(list) => {
                     if marker_list_idx == Some(idx) {
                         if let Some(marker) = &self.pending_item_marker {
@@ -634,13 +673,210 @@ fn pad_cell(text: &str, width: usize, alignment: Alignment) -> String {
 }
 
 fn display_width(text: &str) -> usize {
-    text.chars().count()
+    UnicodeWidthStr::width(text)
 }
 
 fn last_line_is_blank(lines: &[Line<'_>]) -> bool {
     lines
         .last()
         .is_some_and(|line| line.spans.iter().all(|span| span.content.trim().is_empty()))
+}
+
+pub(super) fn push_wrapped_line<'a>(
+    out: &mut Vec<Line<'a>>,
+    initial_prefix: Vec<Span<'a>>,
+    content: &[Span<'a>],
+    subsequent_prefix: Vec<Span<'a>>,
+    width: usize,
+) {
+    let mut wrapper = LineWrapper::new(out, initial_prefix, subsequent_prefix, width.max(1));
+    for span in content {
+        wrapper.push_span(span);
+    }
+    wrapper.finish();
+}
+
+struct LineWrapper<'a, 'out> {
+    out: &'out mut Vec<Line<'a>>,
+    current: Vec<Span<'a>>,
+    current_width: usize,
+    content_width: usize,
+    subsequent_prefix: Vec<Span<'a>>,
+    subsequent_prefix_width: usize,
+    width: usize,
+}
+
+impl<'a, 'out> LineWrapper<'a, 'out> {
+    fn new(
+        out: &'out mut Vec<Line<'a>>,
+        initial_prefix: Vec<Span<'a>>,
+        subsequent_prefix: Vec<Span<'a>>,
+        width: usize,
+    ) -> Self {
+        let current_width = spans_width(&initial_prefix);
+        let subsequent_prefix_width = spans_width(&subsequent_prefix);
+        Self {
+            out,
+            current: initial_prefix,
+            current_width,
+            content_width: 0,
+            subsequent_prefix,
+            subsequent_prefix_width,
+            width,
+        }
+    }
+
+    fn push_span(&mut self, span: &Span<'a>) {
+        let style = span.style;
+        for token in split_wrap_tokens(span.content.as_ref()) {
+            if token.is_whitespace {
+                self.push_whitespace(token.text, style);
+            } else {
+                self.push_word(token.text, style);
+            }
+        }
+    }
+
+    fn push_whitespace(&mut self, text: &str, style: Style) {
+        if self.content_width == 0 {
+            return;
+        }
+
+        let token_width = display_width(text);
+        if self.current_width.saturating_add(token_width) > self.width {
+            self.break_line();
+            return;
+        }
+
+        self.push_piece(text, style, token_width);
+    }
+
+    fn push_word(&mut self, text: &str, style: Style) {
+        let token_width = display_width(text);
+        if self.current_width.saturating_add(token_width) <= self.width {
+            self.push_piece(text, style, token_width);
+            return;
+        }
+
+        if self.content_width > 0 {
+            self.break_line();
+        }
+
+        if self.current_width.saturating_add(token_width) <= self.width {
+            self.push_piece(text, style, token_width);
+            return;
+        }
+
+        let mut piece = String::new();
+        let mut piece_width = 0usize;
+        for ch in text.chars() {
+            let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
+            if piece_width > 0
+                && self
+                    .current_width
+                    .saturating_add(piece_width)
+                    .saturating_add(ch_width)
+                    > self.width
+            {
+                self.push_piece(&piece, style, piece_width);
+                piece.clear();
+                piece_width = 0;
+                self.break_line();
+            } else if piece_width == 0
+                && self.content_width > 0
+                && self.current_width.saturating_add(ch_width) > self.width
+            {
+                self.break_line();
+            }
+
+            piece.push(ch);
+            piece_width += ch_width;
+        }
+
+        if !piece.is_empty() {
+            self.push_piece(&piece, style, piece_width);
+        }
+    }
+
+    fn push_piece(&mut self, text: &str, style: Style, width: usize) {
+        self.current.push(Span::styled(text.to_string(), style));
+        self.current_width += width;
+        self.content_width += width;
+    }
+
+    fn break_line(&mut self) {
+        if self.content_width > 0 {
+            trim_trailing_whitespace(&mut self.current);
+        }
+        self.out.push(Line::from(std::mem::take(&mut self.current)));
+        self.current = self.subsequent_prefix.clone();
+        self.current_width = self.subsequent_prefix_width;
+        self.content_width = 0;
+    }
+
+    fn finish(mut self) {
+        if self.content_width > 0 {
+            trim_trailing_whitespace(&mut self.current);
+        }
+        self.out.push(Line::from(self.current));
+    }
+}
+
+struct WrapToken<'a> {
+    text: &'a str,
+    is_whitespace: bool,
+}
+
+fn split_wrap_tokens(text: &str) -> Vec<WrapToken<'_>> {
+    let mut tokens = Vec::new();
+    let mut start = 0usize;
+    let mut current_run_is_space = None;
+
+    for (idx, ch) in text.char_indices() {
+        let char_is_space = ch.is_whitespace();
+        match current_run_is_space {
+            Some(current) if current == char_is_space => {}
+            Some(current) => {
+                tokens.push(WrapToken {
+                    text: &text[start..idx],
+                    is_whitespace: current,
+                });
+                start = idx;
+                current_run_is_space = Some(char_is_space);
+            }
+            None => current_run_is_space = Some(char_is_space),
+        }
+    }
+
+    if let Some(is_whitespace) = current_run_is_space {
+        tokens.push(WrapToken {
+            text: &text[start..],
+            is_whitespace,
+        });
+    }
+
+    tokens
+}
+
+fn spans_width(spans: &[Span<'_>]) -> usize {
+    spans
+        .iter()
+        .map(|span| display_width(span.content.as_ref()))
+        .sum()
+}
+
+fn trim_trailing_whitespace(spans: &mut Vec<Span<'_>>) {
+    while let Some(last) = spans.last_mut() {
+        let trimmed = last.content.trim_end();
+        if trimmed.is_empty() {
+            spans.pop();
+        } else if trimmed.len() < last.content.len() {
+            last.content = trimmed.to_string().into();
+            break;
+        } else {
+            break;
+        }
+    }
 }
 
 fn dim_style() -> Style {
@@ -678,6 +914,20 @@ mod tests {
         lines.into_iter().map(|line| line.to_string()).collect()
     }
 
+    fn render_to_strings_width(input: &str, width: u16) -> Vec<String> {
+        let mut lines = Vec::new();
+        Engine::render_into_width(&mut lines, input, width);
+        lines.into_iter().map(|line| line.to_string()).collect()
+    }
+
+    #[test]
+    fn single_paragraph_has_no_surrounding_blank_lines() {
+        assert_eq!(
+            render_to_strings("今天是 2026 年 4 月 27 日。"),
+            vec!["今天是 2026 年 4 月 27 日。"]
+        );
+    }
+
     #[test]
     fn hides_code_fences_but_keeps_code_body() {
         assert_eq!(
@@ -690,7 +940,23 @@ mod tests {
     fn renders_common_block_shapes() {
         assert_eq!(
             render_to_strings("# Title\n- item\n1. next\n> quote"),
-            vec!["# Title", "• item", "1. next", "│ quote"]
+            vec!["# Title", "", "• item", "1. next", "> quote"]
+        );
+    }
+
+    #[test]
+    fn heading_keeps_one_blank_line_from_previous_block() {
+        assert_eq!(
+            render_to_strings("Intro paragraph\n# Header\nBody paragraph"),
+            vec!["Intro paragraph", "", "# Header", "", "Body paragraph"]
+        );
+        assert_eq!(
+            render_to_strings("- list item\n# Header"),
+            vec!["• list item", "", "# Header"]
+        );
+        assert_eq!(
+            render_to_strings("> quote\n# Header"),
+            vec!["> quote", "", "# Header"]
         );
     }
 
@@ -727,7 +993,7 @@ mod tests {
     fn resolves_reference_links_and_setext_headings() {
         assert_eq!(
             render_to_strings("Title\n=====\nSee [docs][d].\n\n[d]: https://example.com"),
-            vec!["# Title", "See docs."]
+            vec!["# Title", "", "See docs."]
         );
     }
 
@@ -736,6 +1002,26 @@ mod tests {
         assert_eq!(
             render_to_strings("<div>\ncontent\n</div>"),
             vec!["<div>", "content", "</div>"]
+        );
+    }
+
+    #[test]
+    fn wraps_lists_and_quotes_with_continuation_prefixes() {
+        assert_eq!(
+            render_to_strings_width("- first second third fourth", 14),
+            vec!["• first second", "  third fourth"]
+        );
+        assert_eq!(
+            render_to_strings_width("> block quote with content that should wrap nicely", 22),
+            vec![
+                "> block quote with",
+                "> content that should",
+                "> wrap nicely"
+            ]
+        );
+        assert_eq!(
+            render_to_strings_width("1. ordered item contains many words for wrapping", 18).len(),
+            4
         );
     }
 }

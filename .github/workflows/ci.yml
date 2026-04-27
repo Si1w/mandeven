@@ -1,0 +1,91 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+# Cancel an in-flight CI run when a newer commit lands on the same
+# ref. The release workflow does not cancel — that one publishes
+# artifacts and must always finish.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  RUST_BACKTRACE: short
+
+jobs:
+  fmt:
+    name: cargo fmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all -- --check
+
+  clippy-test:
+    name: clippy + test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      # `grep` tool calls the `rg` binary at runtime; the suite tests
+      # that path. Without ripgrep on PATH those tests degrade to the
+      # `rg_available()` early-return and stop catching argv changes.
+      - name: Install ripgrep
+        run: sudo apt-get update && sudo apt-get install -y ripgrep
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-ci-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            cargo-ci-
+
+      - name: Clippy (pedantic, warnings denied)
+        run: |
+          cargo clippy --all-targets --all-features -- \
+            -W clippy::pedantic \
+            -D warnings
+
+      - name: Tests
+        run: cargo test --all-features --locked
+
+  build-macos:
+    name: macOS build check
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-macos-check-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            cargo-macos-check-
+
+      # `cargo check` (not `build`) is enough — release.yml is the one
+      # that actually produces shipping artifacts. This job only proves
+      # the macOS target still type-checks before the next tag.
+      - run: cargo check --release --target aarch64-apple-darwin --locked

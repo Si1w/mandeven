@@ -12,7 +12,9 @@
 //! the inner submodules.
 
 pub mod commands;
+pub mod network;
 pub mod policy;
 
 pub use commands::ensure_safe_command;
+pub use network::{NetworkError, validate_resolved_host, validate_url_target};
 pub use policy::{SandboxConfig, SandboxPolicy, ensure_writable_now};

@@ -18,6 +18,7 @@ pub mod grep;
 pub mod heartbeat;
 pub mod shell;
 pub mod skill;
+pub mod web;
 
 pub use error::{Error, Result};
 
@@ -223,7 +224,8 @@ fn error_content(message: &str) -> String {
 }
 
 /// Install the built-in tool set ([`file::FileRead`], [`file::FileWrite`],
-/// [`file::FileEdit`], [`grep::Grep`], [`shell::Shell`]) into `registry`.
+/// [`file::FileEdit`], [`grep::Grep`], [`shell::Shell`],
+/// [`web::WebSearch`], [`web::WebFetch`]) into `registry`.
 /// Callers who want a different subset can register tools directly instead.
 pub fn register_builtins(registry: &mut Registry) {
     registry.register(Arc::new(file::FileRead));
@@ -231,4 +233,6 @@ pub fn register_builtins(registry: &mut Registry) {
     registry.register(Arc::new(file::FileEdit));
     registry.register(Arc::new(grep::Grep));
     registry.register(Arc::new(shell::Shell));
+    registry.register(Arc::new(web::WebSearch));
+    registry.register(Arc::new(web::WebFetch));
 }

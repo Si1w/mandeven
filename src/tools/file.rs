@@ -33,7 +33,7 @@ use super::error::{Error, Result};
 use super::{BaseTool, MAX_TOOL_RESULT_BYTES, ToolOutcome};
 use crate::llm::Tool;
 use crate::security::{SandboxPolicy, ensure_writable_now};
-use crate::workspace;
+use crate::utils::workspace;
 
 /// Default number of lines returned by `file_read` when `limit` is
 /// unset.

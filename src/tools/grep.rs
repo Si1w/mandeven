@@ -41,7 +41,7 @@ use tokio::time::timeout;
 use super::error::{Error, Result};
 use super::{BaseTool, MAX_TOOL_RESULT_BYTES, ToolOutcome};
 use crate::llm::Tool;
-use crate::workspace;
+use crate::utils::workspace;
 
 /// Hard timeout on a single `rg` invocation. Mirrors codex's choice.
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(30);

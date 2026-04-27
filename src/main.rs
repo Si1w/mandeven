@@ -28,7 +28,7 @@ use mandeven::security::SandboxPolicy;
 use mandeven::session;
 use mandeven::skill::{self, SkillIndex};
 use mandeven::tools;
-use mandeven::workspace;
+use mandeven::utils::workspace;
 
 /// Identifier for the built-in TUI channel.
 const TUI_CHANNEL: &str = "tui";

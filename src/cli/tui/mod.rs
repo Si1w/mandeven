@@ -21,7 +21,7 @@ use super::{CliState, Line as TranscriptLine, Mode, Overlay};
 mod markdown;
 
 const PROMPT: &str = "› ";
-const HELP_BODY_LINES: u16 = 12;
+const HELP_BODY_LINES: u16 = 20;
 const QUEUED_PREVIEW_LIMIT: usize = 3;
 
 const BRAND: Color = Color::Rgb(215, 119, 87);
@@ -565,12 +565,20 @@ fn build_help_text() -> Text<'static> {
         section_header("Commands"),
         Line::raw(""),
         help_entry("/help", "show this panel"),
+        help_entry("/skills", "list loaded skills"),
+        help_entry("/new", "start a fresh session"),
+        help_entry("/list", "list saved sessions"),
+        help_entry("/load <n>", "switch to a listed session"),
+        help_entry("/switch [model]", "list or switch LLM profile"),
+        help_entry("/compact [focus]", "compact conversation history"),
+        help_entry("/heartbeat", "show or control heartbeat"),
+        help_entry("/cron", "list or control cron jobs"),
         help_entry("/exit", "quit"),
-        help_entry("/quit", "quit"),
         Line::raw(""),
         section_header("Keys"),
         Line::raw(""),
         help_entry("Enter", "send input"),
+        help_entry("Enter while busy", "queue follow-up input"),
         help_entry("PgUp/PgDn", "scroll transcript when closed"),
         help_entry("Mouse wheel", "scroll transcript when closed"),
         help_entry("Esc", "dismiss this overlay"),
@@ -583,7 +591,7 @@ fn section_header(text: &'static str) -> Line<'static> {
 
 fn help_entry(key: &'static str, desc: &'static str) -> Line<'static> {
     Line::from(vec![
-        Span::styled(format!("  {key:<12}"), accent_style()),
+        Span::styled(format!("  {key:<20}"), accent_style()),
         Span::styled(desc, dim_style()),
     ])
 }

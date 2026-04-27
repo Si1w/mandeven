@@ -665,67 +665,6 @@ async fn apply_outbound(
     Ok(())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::{CliState, Line, Mode, apply_outbound};
-    use crate::bus::OutboundPayload;
-    use crate::session;
-    use std::sync::{Arc, Mutex};
-    use uuid::Uuid;
-
-    #[test]
-    fn queued_inputs_are_fifo() {
-        let mut state = CliState::default();
-
-        state.queue_input("first".to_string());
-        state.queue_input("second".to_string());
-
-        assert_eq!(state.pop_next_queued_input().as_deref(), Some("first"));
-        assert_eq!(state.pop_next_queued_input().as_deref(), Some("second"));
-        assert!(state.pop_next_queued_input().is_none());
-    }
-
-    #[tokio::test]
-    async fn reply_end_does_not_end_turn_until_turn_end() {
-        let dir = std::env::temp_dir().join(format!("mandeven-cli-test-{}", Uuid::now_v7()));
-        let sessions = Arc::new(session::Manager::new(dir.clone()).await.unwrap());
-        let state = Arc::new(Mutex::new(CliState {
-            mode: Mode::Replying,
-            ..CliState::default()
-        }));
-        let stream_id = Uuid::now_v7();
-
-        apply_outbound(
-            &state,
-            &sessions,
-            OutboundPayload::ReplyDelta {
-                stream_id,
-                delta: "hello".to_string(),
-            },
-        )
-        .await
-        .unwrap();
-        apply_outbound(&state, &sessions, OutboundPayload::ReplyEnd { stream_id })
-            .await
-            .unwrap();
-
-        {
-            let state = state.lock().unwrap();
-            assert_eq!(state.mode, Mode::Replying);
-            assert!(
-                matches!(state.transcript.last(), Some(Line::Assistant(text)) if text == "hello")
-            );
-        }
-
-        apply_outbound(&state, &sessions, OutboundPayload::TurnEnd)
-            .await
-            .unwrap();
-
-        assert_eq!(state.lock().unwrap().mode, Mode::Idle);
-        let _ = tokio::fs::remove_dir_all(dir).await;
-    }
-}
-
 /// Project one persisted [`Message`] into the transcript. System
 /// prompts and raw tool exchanges are omitted because they are
 /// internal plumbing — the transcript shows the user-visible
@@ -791,5 +730,66 @@ impl Drop for TerminalGuard {
     fn drop(&mut self) {
         let _ = execute!(io::stdout(), DisableMouseCapture, LeaveAlternateScreen);
         let _ = disable_raw_mode();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CliState, Line, Mode, apply_outbound};
+    use crate::bus::OutboundPayload;
+    use crate::session;
+    use std::sync::{Arc, Mutex};
+    use uuid::Uuid;
+
+    #[test]
+    fn queued_inputs_are_fifo() {
+        let mut state = CliState::default();
+
+        state.queue_input("first".to_string());
+        state.queue_input("second".to_string());
+
+        assert_eq!(state.pop_next_queued_input().as_deref(), Some("first"));
+        assert_eq!(state.pop_next_queued_input().as_deref(), Some("second"));
+        assert!(state.pop_next_queued_input().is_none());
+    }
+
+    #[tokio::test]
+    async fn reply_end_does_not_end_turn_until_turn_end() {
+        let dir = std::env::temp_dir().join(format!("mandeven-cli-test-{}", Uuid::now_v7()));
+        let sessions = Arc::new(session::Manager::new(dir.clone()).await.unwrap());
+        let state = Arc::new(Mutex::new(CliState {
+            mode: Mode::Replying,
+            ..CliState::default()
+        }));
+        let stream_id = Uuid::now_v7();
+
+        apply_outbound(
+            &state,
+            &sessions,
+            OutboundPayload::ReplyDelta {
+                stream_id,
+                delta: "hello".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        apply_outbound(&state, &sessions, OutboundPayload::ReplyEnd { stream_id })
+            .await
+            .unwrap();
+
+        {
+            let state = state.lock().unwrap();
+            assert_eq!(state.mode, Mode::Replying);
+            assert!(
+                matches!(state.transcript.last(), Some(Line::Assistant(text)) if text == "hello")
+            );
+        }
+
+        apply_outbound(&state, &sessions, OutboundPayload::TurnEnd)
+            .await
+            .unwrap();
+
+        assert_eq!(state.lock().unwrap().mode, Mode::Idle);
+        let _ = tokio::fs::remove_dir_all(dir).await;
     }
 }

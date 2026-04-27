@@ -190,7 +190,7 @@ fn count_logical_lines(state: &CliState) -> usize {
             | TranscriptLine::Error(t)
             | TranscriptLine::Thinking(t)
             | TranscriptLine::Compact(t) => t.matches('\n').count() + 1,
-            TranscriptLine::Assistant(t) => markdown::Engine::line_count(t),
+            TranscriptLine::Assistant(t) => markdown::Engine::line_count(trim_leading_blanks(t)),
         };
         rendered_any = true;
     }
@@ -207,7 +207,7 @@ fn count_logical_lines(state: &CliState) -> usize {
         if rendered_any {
             count += 1;
         }
-        count += markdown::Engine::line_count(stream);
+        count += markdown::Engine::line_count(trim_leading_blanks(stream));
     }
     count
 }
@@ -589,7 +589,23 @@ fn append_user_lines<'a>(lines: &mut Vec<Line<'a>>, text: &'a str) {
 }
 
 fn append_assistant_lines<'a>(lines: &mut Vec<Line<'a>>, text: &'a str) {
-    markdown::Engine::render_into(lines, text);
+    markdown::Engine::render_into(lines, trim_leading_blanks(text));
+}
+
+/// Strip leading newlines from assistant text before rendering.
+///
+/// [`build_transcript`] already inserts one blank line between
+/// entries. Our markdown engine ([`markdown::Engine::render_into`]) is
+/// a line-by-line splitter, so a reply that happens to start with
+/// `\n` or `\n\n` would emit each leading `\n` as another
+/// `Line::raw("")` and stack on top of the layout-supplied separator
+/// (Codex avoids this for free because `pulldown-cmark` collapses
+/// consecutive blank lines at parse time; we don't have that). Trim
+/// only leading `\n`/`\r` — trailing whitespace stays untouched so a
+/// reply ending in a trailing newline still gets the cosmetic empty
+/// final line if the model wrote one.
+fn trim_leading_blanks(text: &str) -> &str {
+    text.trim_start_matches(['\n', '\r'])
 }
 
 fn append_error_lines<'a>(lines: &mut Vec<Line<'a>>, text: &'a str) {
@@ -702,6 +718,43 @@ mod tests {
         };
 
         assert!(!has_transcript_content(&state));
+    }
+
+    /// Reply text that opens with a leading newline must not stack
+    /// extra blank lines on top of the entry separator that
+    /// [`build_transcript`] already inserts. Without
+    /// [`super::trim_leading_blanks`] the markdown engine would emit
+    /// each leading `\n` as its own `Line::raw("")`, so the user
+    /// would see several blank rows between their question and the
+    /// reply — visible after the prompt was expanded with markdown
+    /// headings, since DeepSeek-style models then started replying
+    /// with leading blank lines.
+    #[test]
+    fn leading_newlines_in_assistant_reply_do_not_stack_blank_lines() {
+        let state = CliState {
+            transcript: vec![
+                TranscriptLine::User("question".to_string()),
+                TranscriptLine::Assistant("\n\n\nactual answer".to_string()),
+            ],
+            ..CliState::default()
+        };
+
+        let rendered = text_to_plain(&build_transcript(&state));
+        let lines: Vec<&str> = rendered.split('\n').collect();
+
+        let user_idx = lines.iter().position(|l| l.contains("question")).unwrap();
+        let answer_idx = lines
+            .iter()
+            .position(|l| l.contains("actual answer"))
+            .unwrap();
+
+        // Exactly one blank line between user and assistant —
+        // the entry separator, no leading-newline pile-up.
+        assert_eq!(
+            answer_idx - user_idx,
+            2,
+            "expected user and answer separated by exactly one blank line, got: {lines:?}"
+        );
     }
 
     fn text_to_plain(text: &Text<'_>) -> String {

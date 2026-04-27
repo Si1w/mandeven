@@ -21,9 +21,10 @@ pub mod types;
 pub use error::{Error, Result};
 pub use types::{CallOutcome, Iteration};
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
+use std::fmt::Write as _;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use futures::StreamExt;
 use uuid::Uuid;
@@ -36,7 +37,7 @@ use crate::bus::{
     ChannelID, InboundPayload, OutboundMessage, OutboundPayload, OutboundSender, SessionID,
 };
 use crate::command::{CommandOutcome, Router};
-use crate::config::{AgentConfig, AppConfig, LLMProfile};
+use crate::config::{AgentConfig, AppConfig, LLMConfig, LLMProfile};
 use crate::cron;
 use crate::gateway::{ActiveSessions, DispatchReceiver, InboundDispatch};
 use crate::heartbeat::{HeartbeatEngine, HeartbeatTick};
@@ -81,8 +82,8 @@ const HEARTBEAT_DECIDE_MAX_TOKENS: u32 = 256;
 /// additional wrapping layer — `agent` composes domain capabilities
 /// directly.
 pub struct Agent {
-    profile: LLMProfile,
-    client: Arc<dyn BaseLLMClient>,
+    model: Arc<RwLock<ModelSnapshot>>,
+    model_catalog: Arc<ModelCatalog>,
     sessions: Arc<session::Manager>,
     tools: tools::Registry,
     inbox: DispatchReceiver,
@@ -141,6 +142,68 @@ pub struct Agent {
     /// stable for the lifetime of the run — the agent never `cd`s —
     /// matching Claude Code's `getOriginalCwd`.
     cwd: PathBuf,
+}
+
+#[derive(Clone)]
+struct ModelSnapshot {
+    id: String,
+    profile: LLMProfile,
+    client: Arc<dyn BaseLLMClient>,
+}
+
+struct ModelCatalog {
+    entries: BTreeMap<String, ModelSnapshot>,
+}
+
+impl ModelCatalog {
+    fn from_config(cfg: &LLMConfig) -> Result<Self> {
+        let mut entries = BTreeMap::new();
+        for (provider, models) in &cfg.providers {
+            let client = llm::providers::client_for(provider)
+                .ok_or_else(|| Error::UnknownProvider(provider.clone()))?;
+            for (model, profile) in models {
+                let id = format!("{provider}/{model}");
+                entries.insert(
+                    id.clone(),
+                    ModelSnapshot {
+                        id,
+                        profile: profile.clone(),
+                        client: client.clone(),
+                    },
+                );
+            }
+        }
+        Ok(Self { entries })
+    }
+
+    fn get(&self, raw: &str) -> Result<ModelSnapshot> {
+        let (provider, model) = parse_profile_id(raw)?;
+        self.entries
+            .get(raw)
+            .cloned()
+            .ok_or_else(|| Error::ProfileNotFound {
+                provider: provider.to_string(),
+                model: model.to_string(),
+            })
+    }
+
+    fn contains(&self, raw: &str) -> bool {
+        self.entries.contains_key(raw)
+    }
+
+    fn ids(&self) -> impl Iterator<Item = &str> {
+        self.entries.keys().map(String::as_str)
+    }
+}
+
+fn parse_profile_id(raw: &str) -> Result<(&str, &str)> {
+    let (provider, model) = raw
+        .split_once('/')
+        .ok_or_else(|| Error::MalformedProfileId(raw.to_string()))?;
+    if provider.is_empty() || model.is_empty() || model.contains('/') {
+        return Err(Error::MalformedProfileId(raw.to_string()));
+    }
+    Ok((provider, model))
 }
 
 /// Options for the optional heartbeat wiring. Constructed by
@@ -211,25 +274,8 @@ impl Agent {
         hook: Arc<HookEngine>,
         cwd: PathBuf,
     ) -> Result<Self> {
-        let (provider_name, model_name) = cfg
-            .llm
-            .default
-            .split_once('/')
-            .ok_or_else(|| Error::MalformedProfileId(cfg.llm.default.clone()))?;
-
-        let profile = cfg
-            .llm
-            .providers
-            .get(provider_name)
-            .and_then(|models| models.get(model_name))
-            .ok_or_else(|| Error::ProfileNotFound {
-                provider: provider_name.to_string(),
-                model: model_name.to_string(),
-            })?
-            .clone();
-
-        let client = llm::providers::client_for(provider_name)
-            .ok_or_else(|| Error::UnknownProvider(provider_name.to_string()))?;
+        let model_catalog = Arc::new(ModelCatalog::from_config(&cfg.llm)?);
+        let model = Arc::new(RwLock::new(model_catalog.get(&cfg.llm.default)?));
 
         // Agent-level command router. Routing / session-level
         // commands (`/new`, `/list`, `/load`) live in the gateway;
@@ -248,8 +294,8 @@ impl Agent {
         };
 
         Ok(Self {
-            profile,
-            client,
+            model,
+            model_catalog,
             sessions,
             tools,
             inbox,
@@ -534,12 +580,13 @@ impl Agent {
     /// folded into [`HeartbeatDecision::Skip`] so a confused model
     /// errs on the side of staying silent.
     async fn heartbeat_decide(&self, tick: &HeartbeatTick) -> Result<HeartbeatDecision> {
+        let model = self.model_snapshot();
         let request = Request {
             messages: self
                 .prompt
                 .heartbeat_decide_messages(&tick.content, tick.at),
             tools: vec![heartbeat_decide_tool()],
-            model_name: self.profile.model_name.clone(),
+            model_name: model.profile.model_name.clone(),
             max_tokens: Some(HEARTBEAT_DECIDE_MAX_TOKENS),
             // Temperature deliberately left unset — see the title
             // generation comment for the reasoning.
@@ -554,7 +601,7 @@ impl Agent {
             }),
         };
 
-        let response = self.client.complete(request).await?;
+        let response = model.client.complete(request).await?;
         let Some(call) = response
             .tool_calls
             .into_iter()
@@ -585,6 +632,12 @@ impl Agent {
         session: SessionID,
         body: &str,
     ) -> Result<()> {
+        if let Some(payload) = self.maybe_run_switch_command(body) {
+            let reply = OutboundMessage::new(channel, session, payload);
+            self.out.send(reply).await?;
+            return Ok(());
+        }
+
         // `/compact [focus]` is special-cased rather than registered
         // on the router because its execution needs an `&self` LLM
         // call + session write — neither fits the static
@@ -629,6 +682,54 @@ impl Agent {
         Ok(())
     }
 
+    fn maybe_run_switch_command(&self, body: &str) -> Option<OutboundPayload> {
+        let trimmed = body.trim();
+        if trimmed == "switch" {
+            return Some(OutboundPayload::Notice(self.format_model_list()));
+        }
+
+        let rest = trimmed.strip_prefix("switch")?;
+        if !rest.starts_with(char::is_whitespace) {
+            return None;
+        }
+
+        let target = rest.trim();
+        if target.is_empty() {
+            return Some(OutboundPayload::Notice(self.format_model_list()));
+        }
+        if !self.model_catalog.contains(target) {
+            return Some(OutboundPayload::Error(format!(
+                "unknown model profile: {target}; run /switch to list available profiles"
+            )));
+        }
+
+        let snapshot = match self.model_catalog.get(target) {
+            Ok(snapshot) => snapshot,
+            Err(err) => return Some(OutboundPayload::Error(err.to_string())),
+        };
+        let upstream = snapshot.profile.model_name.clone();
+        *self.model.write().expect("model lock poisoned") = snapshot;
+        self.prompt.clear_cache();
+        Some(OutboundPayload::Notice(format!(
+            "switched model to {target} ({upstream})"
+        )))
+    }
+
+    fn format_model_list(&self) -> String {
+        let current = self.model_snapshot().id;
+        let mut out = format!("current model: {current}\nAvailable models:");
+        for id in self.model_catalog.ids() {
+            let marker = if id == current { "*" } else { " " };
+            let _ = write!(out, "\n  {marker} {id}");
+        }
+        out.push_str("\nType /switch <provider/profile> to switch.");
+        out
+    }
+
+    fn model_snapshot(&self) -> ModelSnapshot {
+        self.model.read().expect("model lock poisoned").clone()
+    }
+
     /// Auto-compact gate. Called by [`Self::iteration`] just before
     /// each LLM call. Returns the (possibly compacted) message list
     /// the call should use. Auto compaction is silent on success per
@@ -639,7 +740,8 @@ impl Agent {
         iter: &Iteration,
         messages: Vec<Message>,
     ) -> Result<Vec<Message>> {
-        if !compact::should_compact(&messages, &self.profile, &self.compact_config) {
+        let model = self.model_snapshot();
+        if !compact::should_compact(&messages, &model.profile, &self.compact_config) {
             return Ok(messages);
         }
         let mut state = self.compact_state.lock().await;
@@ -668,8 +770,8 @@ impl Agent {
             .await;
         match compact::compact_messages(
             messages.clone(),
-            &self.profile,
-            self.client.as_ref(),
+            &model.profile,
+            model.client.as_ref(),
             &self.compact_config,
             &mut state,
             CompactTrigger::Auto,
@@ -734,10 +836,11 @@ impl Agent {
             )
             .await;
         let mut state = self.compact_state.lock().await;
+        let model = self.model_snapshot();
         let result = compact::compact_messages(
             messages,
-            &self.profile,
-            self.client.as_ref(),
+            &model.profile,
+            model.client.as_ref(),
             &self.compact_config,
             &mut state,
             CompactTrigger::Manual,
@@ -982,8 +1085,9 @@ impl Agent {
     /// Issue one LLM call within an iteration and aggregate the
     /// resulting stream.
     async fn call(&self, iter: &Iteration, messages: Vec<Message>) -> Result<CallOutcome> {
-        let request = self.build_request(messages);
-        let stream = self.client.stream(request).await?;
+        let model = self.model_snapshot();
+        let request = self.build_request(&model.profile, messages);
+        let stream = model.client.stream(request).await?;
         self.stream_to_channel(iter, stream).await
     }
 
@@ -992,8 +1096,9 @@ impl Agent {
     /// and heartbeat-decide call paths use their own specialized
     /// prompts and must not see the iteration system block.
     fn prepend_iteration_system(&self, mut messages: Vec<Message>) -> Vec<Message> {
+        let model = self.model_snapshot();
         let ctx = PromptContext {
-            model_id: &self.profile.model_name,
+            model_id: &model.profile.model_name,
             cwd: &self.cwd,
         };
         let system = self.prompt.iteration_system(&ctx).into_message();
@@ -1116,7 +1221,9 @@ impl Agent {
     /// Generate a short session title from the first user message
     /// using a non-streaming completion.
     async fn generate_title(&self, user_input: &str) -> Result<String> {
-        let mut request = self.build_request(self.prompt.title_messages(user_input));
+        let model = self.model_snapshot();
+        let mut request =
+            self.build_request(&model.profile, self.prompt.title_messages(user_input));
         // Title generation overrides the profile defaults: no tools
         // advertised, tighter token budget. Temperature is left to
         // the provider — not every API honors it (DeepSeek's
@@ -1125,7 +1232,7 @@ impl Agent {
         // matter.
         request.tools = Vec::new();
         request.max_tokens = Some(TITLE_MAX_TOKENS);
-        let response = self.client.complete(request).await?;
+        let response = model.client.complete(request).await?;
         Ok(response
             .content
             .unwrap_or_default()
@@ -1147,7 +1254,7 @@ impl Agent {
     /// `timeout_secs` is a transport-level concern and therefore pulled
     /// from the shared [`crate::config::LLMConfig::timeout_secs`] rather
     /// than the per-profile block.
-    fn build_request(&self, messages: Vec<Message>) -> Request {
+    fn build_request(&self, profile: &LLMProfile, messages: Vec<Message>) -> Request {
         // Translate the per-profile `thinking: Option<bool>` knob
         // into a wire-shape `Option<Thinking>`:
         //
@@ -1158,16 +1265,16 @@ impl Agent {
         // - `Some(true)`  → explicit enable.
         // - `Some(false)` → explicit disable on a model that would
         //                   otherwise think (avoids surprise cost).
-        let thinking = self.profile.thinking.map(|enabled| Thinking {
+        let thinking = profile.thinking.map(|enabled| Thinking {
             enabled,
             reasoning_effort: None,
         });
         Request {
             messages,
             tools: self.tools.schemas(),
-            model_name: self.profile.model_name.clone(),
-            max_tokens: self.profile.max_tokens,
-            temperature: self.profile.temperature,
+            model_name: profile.model_name.clone(),
+            max_tokens: profile.max_tokens,
+            temperature: profile.temperature,
             timeout_secs: self.timeout_secs,
             thinking,
         }

@@ -6,10 +6,10 @@
 //!   relative paths against the process CWD and reject writes outside
 //!   that workspace, including existing symlink prefixes that
 //!   canonicalize elsewhere. The path-resolution logic is shared with
-//!   [`super::workspace`] so [`super::grep::Grep`] and the shell tool
+//!   [`crate::utils::workspace`] so [`super::grep::Grep`] and the shell tool
 //!   reach for the same primitives.
 //! - **Sandbox policy**: write paths additionally pass through
-//!   [`super::policy::ensure_writable_now`], so [`super::policy::SandboxPolicy::ReadOnly`]
+//!   [`crate::security::ensure_writable_now`], so [`crate::security::SandboxPolicy::ReadOnly`]
 //!   rejects every write before any disk work happens.
 //! - **Device-path blocklist**: [`FileRead`] refuses anything starting
 //!   with `/dev/` so the model cannot read `/dev/random` and fill
@@ -372,8 +372,11 @@ fn find_trim(content: &str, needle: &str) -> Vec<MatchSpan> {
     let mut out = Vec::new();
     let mut i = 0;
     while i + window <= lines.len() {
-        let actual: Vec<&str> = lines[i..i + window].iter().map(|l| l.trim()).collect();
-        if actual == trimmed_needle {
+        let matches_window = lines[i..i + window]
+            .iter()
+            .map(|line| line.trim())
+            .eq(trimmed_needle.iter().copied());
+        if matches_window {
             let start = line_offsets[i];
             let mut end = line_offsets[i + window];
             // Drop the terminating newline from the match span so the

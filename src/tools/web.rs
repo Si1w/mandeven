@@ -33,12 +33,12 @@
 //!   and the egress check on the original URL would not catch it. We
 //!   disable reqwest redirects and walk them ourselves, calling
 //!   [`crate::security::validate_url_target`] on every hop. Cap at
-//!   [`MAX_REDIRECTS`] = 5 (mirrors nanobot).
+//!   `MAX_REDIRECTS` = 5 (mirrors nanobot).
 //! - **HTML → Markdown via `htmd`**: only Markdown output is supported
 //!   right now. A `format` parameter would mostly be `htmd` output
 //!   minus a few characters; the surface stays small.
 //! - **Untrusted-content banner**: every successful response is
-//!   prefixed with [`UNTRUSTED_BANNER`]. Cheap defense against prompt
+//!   prefixed with `UNTRUSTED_BANNER`. Cheap defense against prompt
 //!   injection from a fetched page (mirrors nanobot's
 //!   `_UNTRUSTED_BANNER`).
 //! - **Bounded output**: the body is truncated to

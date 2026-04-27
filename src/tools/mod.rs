@@ -9,7 +9,7 @@
 //! produces is folded into the reply content so the model can see it
 //! on the next turn.
 //!
-//! Built-in tools live in sibling files ([`file`], [`shell`]) and are
+//! Built-in tools live in sibling files ([`mod@file`], [`shell`]) and are
 //! registered in bulk via [`register_builtins`].
 
 pub mod error;
@@ -43,7 +43,7 @@ use crate::llm::{Message, Tool, ToolCall};
 /// to splice an additional [`Message::User`] (the SKILL.md body)
 /// into the conversation alongside the regular tool result. This
 /// matches Claude Code's `newMessages` mechanism on `SkillTool` (see
-/// [`agent-examples/claude-code-analysis/src/tools/SkillTool/SkillTool.ts:766`]).
+/// `agent-examples/claude-code-analysis/src/tools/SkillTool/SkillTool.ts:766`).
 ///
 /// `Result(value)` is freely constructed via `.into()` from any
 /// [`serde_json::Value`].

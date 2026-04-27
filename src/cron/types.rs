@@ -13,7 +13,7 @@ use super::Schedule;
 
 /// On-disk store version. Bump only when the JSON shape stops being
 /// backward-compatible — adding new optional fields does not require
-/// a bump because [`serde(default)`] handles missing keys.
+/// a bump because `serde(default)` handles missing keys.
 pub const STORE_VERSION: u32 = 1;
 
 /// Terminal status of one execution.
@@ -87,7 +87,7 @@ pub struct CronJob {
 
     /// Prompt string fed to the agent as the user message. Cron does
     /// not run a phase-1 decide step (unlike heartbeat), so this text
-    /// flows directly into [`crate::agent::Agent::iteration`].
+    /// flows directly into `Agent::iteration`.
     pub prompt: String,
 
     /// Mutable state. Defaults to all-`None` at creation; the engine

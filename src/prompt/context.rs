@@ -122,7 +122,7 @@ pub fn skills_index_section(entries: &[(String, String)]) -> Option<Section> {
 /// Build the `env_info` section: model id and working directory.
 ///
 /// Mirrors Claude Code's `computeSimpleEnvInfo` (see
-/// [`agent-examples/claude-code-analysis/src/constants/prompts.ts:651`])
+/// `agent-examples/claude-code-analysis/src/constants/prompts.ts:651`)
 /// stripped to the two fields that actually matter for a v1 agent.
 /// Does not carry a timestamp — see the module docstring.
 #[must_use]

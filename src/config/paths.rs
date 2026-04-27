@@ -1,9 +1,9 @@
 //! Filesystem layout for mandeven's per-user installation.
 //!
 //! Mirrors Claude Code's `~/.claude/` convention — see
-//! [`agent-examples/claude-code-analysis/src/utils/envUtils.ts:7`] for
+//! `agent-examples/claude-code-analysis/src/utils/envUtils.ts:7` for
 //! the original `getClaudeConfigHomeDir` and
-//! [`agent-examples/claude-code-analysis/src/utils/sessionStoragePortable.ts:325`]
+//! `agent-examples/claude-code-analysis/src/utils/sessionStoragePortable.ts:325`
 //! for `getProjectsDir` / `getProjectDir` / `sanitizePath`. The on-disk
 //! layout is:
 //!

@@ -2,7 +2,7 @@
 //!
 //! Tier-1 of the safety story (the [`crate::tools::shell`] deny patterns
 //! are tier-0, always on). When the policy is `ReadOnly`,
-//! [`crate::tools::shell::Shell::call`] routes the model's command
+//! the shell tool routes the model's command
 //! through [`ensure_safe_command`] before anything is spawned. The
 //! function rejects:
 //!
@@ -10,13 +10,13 @@
 //!    background jobs, etc. `ReadOnly` mode is for "look at the project,
 //!    don't touch it"; chaining commands defeats the static analysis
 //!    that this allow-list relies on.
-//! 2. Any command whose first token is not on [`ALWAYS_SAFE`].
+//! 2. Any command whose first token is not on `ALWAYS_SAFE`.
 //! 3. `find` invocations using mutating flags
-//!    ([`UNSAFE_FIND`]).
+//!    (`UNSAFE_FIND`).
 //! 4. `rg` invocations using flags that shell out to external programs
-//!    ([`UNSAFE_RG_NO_ARG`], [`UNSAFE_RG_WITH_ARG`]) — taken straight
+//!    (`UNSAFE_RG_NO_ARG`, `UNSAFE_RG_WITH_ARG`) — taken straight
 //!    from codex's `is_known_safe_command`.
-//! 5. `git` invocations whose subcommand is not on [`SAFE_GIT_SUBCMDS`].
+//! 5. `git` invocations whose subcommand is not on `SAFE_GIT_SUBCMDS`.
 //!
 //! **Tokenisation is intentionally naive**: we split on whitespace, no
 //! shell quoting. A command like `echo "hello world"` works because the

@@ -60,7 +60,7 @@ impl AppConfig {
     /// # Errors
     ///
     /// Surfaces every failure mode of [`Self::load`], plus those from
-    /// [`bootstrap::interactive`] and [`Self::save`]:
+    /// `bootstrap::interactive` and [`Self::save`]:
     /// [`ConfigError::NotInteractive`] when stdin is not a tty,
     /// [`ConfigError::Aborted`] on Ctrl-D during the prompt,
     /// [`ConfigError::Io`] on terminal I/O failures, and
@@ -77,7 +77,7 @@ impl AppConfig {
         Ok(cfg)
     }
 
-    /// Persist this configuration to [`Self::source_path`].
+    /// Persist this configuration to `source_path`.
     ///
     /// Writes via the standard `write → rename` pattern: TOML text is
     /// serialized in full, written to `<path>.tmp`, then `rename`-d

@@ -248,7 +248,7 @@ pub enum CompactError {
 }
 
 /// Token estimate for a single message — char count divided by
-/// [`CHARS_PER_TOKEN`].
+/// `CHARS_PER_TOKEN`.
 #[must_use]
 pub fn estimate_tokens(msg: &Message) -> u32 {
     let chars = match msg {

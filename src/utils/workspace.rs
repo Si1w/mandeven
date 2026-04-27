@@ -65,8 +65,8 @@ pub enum Error {
         root: String,
     },
 
-    /// Filename matches [`SENSITIVE_FILENAMES`] or path crosses a
-    /// [`SENSITIVE_DIR_COMPONENTS`] segment.
+    /// Filename matches `SENSITIVE_FILENAMES` or path crosses a
+    /// `SENSITIVE_DIR_COMPONENTS` segment.
     #[error("writing sensitive path {0} is blocked")]
     SensitivePath(String),
 
@@ -156,14 +156,14 @@ pub fn lexical_normalize(path: &Path) -> PathBuf {
 /// 2. Anchor relative paths against [`root`].
 /// 3. Lexically normalise and require the result to start with the
 ///    workspace root (catches `../escape` even before the file exists).
-/// 4. Reject [`SENSITIVE_FILENAMES`] basenames and any path that crosses
-///    a [`SENSITIVE_DIR_COMPONENTS`] segment.
+/// 4. Reject `SENSITIVE_FILENAMES` basenames and any path that crosses
+///    a `SENSITIVE_DIR_COMPONENTS` segment.
 /// 5. Resolve the longest existing prefix and re-check it canonicalises
 ///    inside the workspace (catches `dir/symlink-pointing-outside/file`).
 ///
 /// # Errors
 ///
-/// Returns [`Error`] when any layer rejects the path.
+/// Returns [`enum@Error`] when any layer rejects the path.
 pub async fn resolve_for_write(raw: &str) -> Result<PathBuf> {
     if raw.trim().is_empty() {
         return Err(Error::EmptyPath);
@@ -234,7 +234,7 @@ pub async fn resolve_for_read(raw: Option<&str>) -> Result<PathBuf> {
         })
 }
 
-/// True if `name` matches one of [`SENSITIVE_FILENAMES`]
+/// True if `name` matches one of `SENSITIVE_FILENAMES`
 /// (case-insensitive) or is a `.env.*` variant (`.env.local`,
 /// `.env.production`, …).
 #[must_use]

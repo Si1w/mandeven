@@ -32,7 +32,7 @@ const BRAND: Color = Color::Rgb(215, 119, 87);
 
 /// Paint the entire frame from `state`.
 ///
-/// Takes `&mut CliState` because [`render_transcript`] synchronises
+/// Takes `&mut CliState` because `render_transcript` synchronises
 /// `state.scroll_offset` with the render-time `max_offset` (so a
 /// subsequent arrow-up from follow-mode moves relative to the current
 /// bottom, not from zero).

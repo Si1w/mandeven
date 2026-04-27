@@ -8,7 +8,7 @@
 //!   disk; the shell only runs commands on the
 //!   [`super::commands`] allow-list.
 //! - [`SandboxPolicy::WorkspaceWrite`] (default): writes are confined to
-//!   the workspace canonical CWD by [`crate::tools::workspace`]; shell
+//!   the workspace canonical CWD by [`crate::utils::workspace`]; shell
 //!   commands run subject to the existing deny patterns in
 //!   [`crate::tools::shell`].
 //!
@@ -42,7 +42,7 @@ pub enum SandboxPolicy {
     /// known-safe allow-list.
     ReadOnly,
 
-    /// Default. Writes confined to the workspace by [`crate::tools::workspace`];
+    /// Default. Writes confined to the workspace by [`crate::utils::workspace`];
     /// shell still subject to its deny patterns but otherwise unrestricted.
     #[default]
     WorkspaceWrite,

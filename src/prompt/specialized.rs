@@ -9,7 +9,7 @@
 //!
 //! Mirrors Claude Code's `services/compact/prompt.ts` and
 //! `services/SessionMemory/prompts.ts` pattern (see
-//! [`agent-examples/claude-code-analysis/analysis/04g-prompt-management.md`]
+//! `agent-examples/claude-code-analysis/analysis/04g-prompt-management.md`
 //! §9): a per-task protocol prompt that happens not to share *any*
 //! sections with the main system prompt.
 
@@ -18,17 +18,14 @@ use chrono::{DateTime, Utc};
 use crate::llm::Message;
 
 /// System prompt that asks the model for a short, descriptive
-/// session title from the user's first message. Migrated verbatim
-/// from the previous inline constant on
-/// [`crate::agent::Agent::generate_title`].
+/// session title from the user's first message.
 pub const TITLE_SYSTEM: &str = "Generate a short, descriptive title (max 8 words) for a conversation \
      starting with the following user message. Reply with only the title, \
      no quotes or punctuation.";
 
 /// System prompt for heartbeat phase-1 — constrains the model to a
 /// single `heartbeat_decide` tool call so the answer is structured
-/// rather than free text. Migrated verbatim from
-/// [`crate::agent::Agent::heartbeat_decide`].
+/// rather than free text.
 pub const HEARTBEAT_DECIDE_SYSTEM: &str = "You are the heartbeat decision step. \
     Read the heartbeat checklist provided and call the heartbeat_decide tool exactly once. \
     Use action=\"skip\" when nothing in the checklist needs attention right now. \
@@ -37,8 +34,7 @@ pub const HEARTBEAT_DECIDE_SYSTEM: &str = "You are the heartbeat decision step. 
 
 /// Base instructions for the conversation-compaction summarizer.
 /// Tuned for "preserve what later turns will need" rather than "make
-/// it short". Migrated verbatim from
-/// [`crate::agent::compact::COMPACT_SYSTEM_PROMPT`].
+/// it short".
 pub const COMPACT_SUMMARY_SYSTEM: &str = "You are summarizing the older portion of a conversation \
 between a user and an AI agent. Produce a concise prose summary that preserves: \
 (1) the user's goals and any standing constraints they declared; \

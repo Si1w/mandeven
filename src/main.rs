@@ -6,8 +6,9 @@
 //! [`agent`](mandeven::agent) for the iteration loop,
 //! [`channels`](mandeven::channels) for the channel registry + router,
 //! and [`cli`](mandeven::cli) as the currently-registered TUI channel.
-//! Requires the configured provider's API key in the environment and
-//! `~/.mandeven/mandeven.toml` (or the path under `$MANDEVEN_HOME`).
+//! Requires the configured provider's API key in the environment.
+//! Configuration is loaded from `~/.mandeven/mandeven.toml` (or the
+//! path under `$MANDEVEN_HOME`) and created interactively on first run.
 
 use std::collections::HashMap;
 use std::sync::Arc;

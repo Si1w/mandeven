@@ -2,7 +2,7 @@
 //!
 //! Scans `<data_dir>/skills/<name>/SKILL.md` once at boot — same
 //! shape Claude Code uses for `~/.claude/skills/<name>/SKILL.md` (see
-//! [`agent-examples/claude-code-analysis/src/skills/loadSkillsDir.ts`]).
+//! `agent-examples/claude-code-analysis/src/skills/loadSkillsDir.ts`).
 //!
 //! Frontmatter parsing is hand-rolled for the v1 minimal shape (just
 //! `name` and `description`). Once the schema grows beyond flat

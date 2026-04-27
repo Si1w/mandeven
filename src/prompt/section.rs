@@ -3,7 +3,7 @@
 //!
 //! Loosely modeled on Claude Code's `systemPromptSection` /
 //! `clearSystemPromptSections` design (see
-//! [`agent-examples/claude-code-analysis/src/constants/systemPromptSections.ts`]),
+//! `agent-examples/claude-code-analysis/src/constants/systemPromptSections.ts`),
 //! pared down to what mandeven needs today:
 //!
 //! - One named slice of system-prompt text per [`Section`].

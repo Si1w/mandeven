@@ -2,7 +2,7 @@
 //! loop.
 //!
 //! The outer [`Agent::run`] loop consumes [`crate::bus::InboundMessage`]s
-//! and dispatches each into [`Agent::iteration`], forwarding per-iteration
+//! and dispatches each into `Agent::iteration`, forwarding per-iteration
 //! failures back to the source channel as
 //! [`crate::bus::OutboundPayload::Error`] without stopping the loop.
 //!

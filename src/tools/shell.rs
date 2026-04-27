@@ -7,8 +7,8 @@
 //!   per call via `login: true`, which switches to `$SHELL -lc <cmd>`
 //!   and pulls in the user's PATH/aliases — useful for `gh`, `nvm`-shimmed
 //!   `node`, etc. Defaults to `sh` (`/bin/sh`) when `$SHELL` is unset.
-//! - **Sandbox policy gate**: under [`super::policy::SandboxPolicy::ReadOnly`]
-//!   every invocation is routed through [`super::safe_commands::ensure_safe_command`]
+//! - **Sandbox policy gate**: under [`crate::security::SandboxPolicy::ReadOnly`]
+//!   every invocation is routed through [`crate::security::ensure_safe_command`]
 //!   first; commands not on the allow-list are rejected before any
 //!   `spawn`. Under `WorkspaceWrite` the gate is skipped — the existing
 //!   deny patterns and the workspace-anchored CWD are the only guards.
@@ -60,7 +60,7 @@ const MAX_TIMEOUT_SECS: u64 = 600;
 /// is included so `login: true` can locate the user's preferred shell.
 const PASS_ENV_KEYS: &[&str] = &["HOME", "PATH", "LANG", "TERM", "USER", "SHELL"];
 
-/// Patterns that cause [`Shell::call`] to refuse the command outright.
+/// Patterns that cause the shell tool to refuse the command outright.
 /// Matched against the lowercased command. Compiled once into
 /// [`DENY_RE`] on first use.
 const DENY_PATTERNS: &[&str] = &[
@@ -107,7 +107,7 @@ struct ShellParams {
 /// guard, and bounded output.
 ///
 /// Zero-sized: the regex deny list is a program-wide constant held in
-/// [`DENY_RE`], so no per-instance state is needed.
+/// `DENY_RE`, so no per-instance state is needed.
 pub struct Shell;
 
 #[async_trait]

@@ -3,9 +3,9 @@
 //!
 //! The engine owns:
 //!
-//! - The boot-time `AGENTS.md` string (read once at [`Self::load`]).
+//! - The boot-time `AGENTS.md` string (read once at [`PromptEngine::load`]).
 //! - A [`SectionCache`] keyed by section name so every section of
-//!   [`Self::iteration_system`] is byte-identical from one call to
+//!   [`PromptEngine::iteration_system`] is byte-identical from one call to
 //!   the next, keeping `DeepSeek`'s prefix cache hot.
 //!
 //! Specialized prompts (`title`, `heartbeat_decide`,
@@ -45,7 +45,7 @@ pub struct PromptContext<'a> {
     /// Upstream model identifier (e.g. `"deepseek-v4-flash"`).
     pub model_id: &'a str,
     /// Working directory the agent process was launched from. Already
-    /// captured once at [`crate::main`] so feeding it through here
+    /// captured once in `main.rs` so feeding it through here
     /// avoids re-reading on every iteration.
     pub cwd: &'a Path,
 }

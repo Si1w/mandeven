@@ -10,8 +10,7 @@ use thiserror::Error;
 pub enum Error {
     /// The skills directory exists but a read against it failed.
     /// Distinguished from "missing directory": absent dir is normal
-    /// ([`crate::skill::SkillIndex::load`] returns an empty index in
-    /// that case).
+    /// (`crate::skill::load` returns an empty index in that case).
     #[error("failed to read skills directory {}: {source}", path.display())]
     DirRead {
         /// Resolved on-disk path.

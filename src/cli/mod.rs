@@ -265,12 +265,12 @@ const CLI_PEER_ID: &str = "cli-user";
 ///
 /// The channel no longer owns a `SessionID`; the gateway is the
 /// session authority. The channel tags inbound messages with its
-/// [`ChannelID`] and [`CLI_PEER_ID`] identity, and the gateway
+/// [`ChannelID`] and `CLI_PEER_ID` identity, and the gateway
 /// looks up (or creates) the bound session before the message
 /// reaches the agent.
 ///
 /// The channel holds a read-capable handle to the session store
-/// ([`sessions`](Self::sessions)) so it can rebuild its transcript
+/// (`sessions`) so it can rebuild its transcript
 /// when the gateway announces a session switch via
 /// [`OutboundPayload::SessionSwitched`].
 pub struct CliChannel {
@@ -820,39 +820,19 @@ async fn apply_outbound(
                 .push_str(&delta);
         }
         OutboundPayload::ReplyEnd { .. } => {
-            if let Some(thinking) = state.streaming_thinking.take() {
-                state.transcript.push(Line::Thinking(thinking));
-            }
-            if let Some(content) = state.streaming.take() {
-                state.transcript.push(Line::Assistant(content));
-            }
+            flush_streaming(&mut state);
         }
         OutboundPayload::TurnEnd => {
-            if let Some(thinking) = state.streaming_thinking.take() {
-                state.transcript.push(Line::Thinking(thinking));
-            }
-            if let Some(content) = state.streaming.take() {
-                state.transcript.push(Line::Assistant(content));
-            }
+            flush_streaming(&mut state);
             state.mode = Mode::Idle;
         }
         OutboundPayload::Reply(text) => {
-            if let Some(thinking) = state.streaming_thinking.take() {
-                state.transcript.push(Line::Thinking(thinking));
-            }
-            if let Some(content) = state.streaming.take() {
-                state.transcript.push(Line::Assistant(content));
-            }
+            flush_streaming(&mut state);
             state.transcript.push(Line::Assistant(text));
             state.mode = Mode::Idle;
         }
         OutboundPayload::Error(err) => {
-            if let Some(thinking) = state.streaming_thinking.take() {
-                state.transcript.push(Line::Thinking(thinking));
-            }
-            if let Some(content) = state.streaming.take() {
-                state.transcript.push(Line::Assistant(content));
-            }
+            flush_streaming(&mut state);
             state.transcript.push(Line::Error(err));
         }
         OutboundPayload::Notice(text) => {
@@ -867,6 +847,15 @@ async fn apply_outbound(
         }
     }
     Ok(())
+}
+
+fn flush_streaming(state: &mut CliState) {
+    if let Some(thinking) = state.streaming_thinking.take() {
+        state.transcript.push(Line::Thinking(thinking));
+    }
+    if let Some(content) = state.streaming.take() {
+        state.transcript.push(Line::Assistant(content));
+    }
 }
 
 /// Project one persisted [`Message`] into the transcript. System

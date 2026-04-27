@@ -4,7 +4,7 @@
 //!
 //! The runtime form keeps the parsed [`cron::Schedule`] eagerly compiled
 //! so per-tick `next_after` calls are allocation-free; serde round-trips
-//! through [`ScheduleSpec`] (JSON shape) so the file store keeps just the
+//! through `ScheduleSpec` (JSON shape) so the file store keeps just the
 //! expression string.
 
 use std::str::FromStr;
@@ -37,7 +37,7 @@ pub enum ScheduleError {
 
 /// One scheduling rule attached to a [`crate::cron::CronJob`].
 ///
-/// Uses [`ScheduleSpec`] as its serde shape so the persisted JSON only
+/// Uses `ScheduleSpec` as its serde shape so the persisted JSON only
 /// stores raw fields (no compiled cron AST). Construct via the typed
 /// helpers ([`Schedule::at`] / [`Schedule::every`] / [`Schedule::cron`])
 /// rather than building variants directly — they centralize validation.

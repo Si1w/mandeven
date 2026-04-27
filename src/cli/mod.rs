@@ -21,6 +21,7 @@
 pub mod commands;
 pub mod tui;
 
+use std::collections::VecDeque;
 use std::io;
 use std::sync::{Arc, Mutex};
 
@@ -94,7 +95,7 @@ pub enum Mode {
     /// Awaiting user input.
     #[default]
     Idle,
-    /// Agent is streaming a reply. Regular messages are blocked;
+    /// Agent is processing a turn. Regular messages are queued;
     /// slash commands (`/help`, `/exit`) still work.
     Replying,
 }
@@ -122,6 +123,10 @@ pub struct CliState {
     /// What the user is currently typing. Backed by
     /// [`TextArea`] for proper cursor + editing behavior.
     pub input: TextArea<'static>,
+    /// Regular user inputs submitted while the agent is still busy.
+    /// The CLI owns the real queue; the TUI layer only renders a
+    /// derived preview, matching Codex's chat-widget/bottom-pane split.
+    pub queued_inputs: VecDeque<String>,
     /// Idle or Replying.
     pub mode: Mode,
     /// Active modal overlay, if any.
@@ -159,12 +164,23 @@ impl Default for CliState {
             streaming: None,
             streaming_thinking: None,
             input,
+            queued_inputs: VecDeque::new(),
             mode: Mode::default(),
             overlay: None,
             scroll_offset: 0,
             follow_bottom: true,
             skills: Vec::new(),
         }
+    }
+}
+
+impl CliState {
+    fn queue_input(&mut self, text: String) {
+        self.queued_inputs.push_back(text);
+    }
+
+    fn pop_next_queued_input(&mut self) -> Option<String> {
+        self.queued_inputs.pop_front()
     }
 }
 
@@ -190,6 +206,7 @@ pub struct CliChannel {
     id: ChannelID,
     state: Arc<Mutex<CliState>>,
     redraw: Arc<Notify>,
+    inbound: Arc<Mutex<Option<InboundSender>>>,
     /// Slash-command registry for commands that affect only this
     /// channel (overlay toggles, exit). Unknown commands fall
     /// through to a skill lookup, then to the gateway via
@@ -236,6 +253,7 @@ impl CliChannel {
             id,
             state: Arc::new(Mutex::new(state)),
             redraw: Arc::new(Notify::new()),
+            inbound: Arc::new(Mutex::new(None)),
             router,
             sessions,
             skills,
@@ -250,6 +268,7 @@ impl Channel for CliChannel {
     }
 
     async fn start(&self, inbound: InboundSender) -> Result<()> {
+        *self.inbound.lock().unwrap() = Some(inbound.clone());
         let _guard = TerminalGuard::enter()?;
 
         // Render task — sole owner of the Terminal handle.
@@ -282,11 +301,13 @@ impl Channel for CliChannel {
 
         render_task.abort();
         let _ = render_task.await;
+        *self.inbound.lock().unwrap() = None;
         Ok(())
     }
 
     async fn send(&self, msg: OutboundMessage) -> Result<()> {
         apply_outbound(&self.state, &self.sessions, msg.payload).await?;
+        self.maybe_send_next_queued_input().await?;
         self.redraw.notify_one();
         Ok(())
     }
@@ -403,42 +424,40 @@ impl CliChannel {
     }
 
     /// Handle Enter. Commands (`/xxx`) always run. Regular messages
-    /// require Idle — during Replying, Enter is a no-op and the input
-    /// is preserved so the user can review / switch to a command.
+    /// submit immediately when idle; while replying, they are queued
+    /// as follow-up input and shown in the composer preview.
     async fn handle_submit(&self, inbound: &InboundSender) -> Result<bool> {
-        let (text, is_command, is_replying) = {
-            let state = self.state.lock().unwrap();
-            let text = state.input.lines().join("\n");
-            let is_command = text.trim().starts_with('/');
-            (text, is_command, state.mode == Mode::Replying)
-        };
-
-        let trimmed = text.trim();
-        if trimmed.is_empty() {
-            return Ok(true);
-        }
-        if !is_command && is_replying {
-            // Silent no-op: input stays, user can see `● Thinking...`
-            // and either wait or re-edit into a command.
-            return Ok(true);
-        }
-
-        // Snapshot trimmed content before clearing the textarea.
-        let payload = trimmed.to_string();
-        let command = payload.strip_prefix('/').map(|s| s.trim().to_string());
-
-        // Clear input after consumption (preserves TextArea config —
-        // cursor style, block if set, etc.) AND snap the conversation
-        // back to follow-bottom: user just submitted, so whatever
-        // lands next (echoed user line, command overlay / error, or
-        // a streaming reply) must be visible. Outbound payloads from
-        // the agent do NOT trigger this — if the user scrolled up to
-        // read old content during a stream, their view stays frozen.
-        {
+        let (payload, command) = {
             let mut state = self.state.lock().unwrap();
+            let text = state.input.lines().join("\n");
+            let trimmed = text.trim();
+            if trimmed.is_empty() {
+                return Ok(true);
+            }
+
+            let payload = trimmed.to_string();
+            let command = payload.strip_prefix('/').map(|s| s.trim().to_string());
+
+            if command.is_none() && state.mode == Mode::Replying {
+                state.queue_input(payload);
+                state.input.clear();
+                state.follow_bottom = true;
+                drop(state);
+                self.redraw.notify_one();
+                return Ok(true);
+            }
+
+            // Clear input after consumption (preserves TextArea config —
+            // cursor style, block if set, etc.) AND snap the conversation
+            // back to follow-bottom: user just submitted, so whatever
+            // lands next (echoed user line, command overlay / error, or
+            // a streaming reply) must be visible. Outbound payloads from
+            // the agent do NOT trigger this — if the user scrolled up to
+            // read old content during a stream, their view stays frozen.
             state.input.clear();
             state.follow_bottom = true;
-        }
+            (payload, command)
+        };
         self.redraw.notify_one();
 
         if let Some(cmd) = command {
@@ -461,6 +480,35 @@ impl CliChannel {
             return Ok(false);
         }
         Ok(true)
+    }
+
+    async fn maybe_send_next_queued_input(&self) -> Result<()> {
+        let Some(inbound) = self.inbound.lock().unwrap().clone() else {
+            return Ok(());
+        };
+
+        let payload = {
+            let mut state = self.state.lock().unwrap();
+            if state.mode != Mode::Idle {
+                return Ok(());
+            }
+            let Some(payload) = state.pop_next_queued_input() else {
+                return Ok(());
+            };
+            state.transcript.push(Line::User(payload.clone()));
+            state.mode = Mode::Replying;
+            state.follow_bottom = true;
+            payload
+        };
+        self.redraw.notify_one();
+
+        let msg = InboundMessage::with_peer(
+            self.id.clone(),
+            CLI_PEER_ID,
+            InboundPayload::UserInput(payload),
+        );
+        inbound.send(msg).await?;
+        Ok(())
     }
 
     /// Execute one slash command via the channel-local [`Router`].
@@ -544,6 +592,8 @@ async fn apply_outbound(
         let mut st = state.lock().unwrap();
         st.transcript.clear();
         st.streaming = None;
+        st.streaming_thinking = None;
+        st.queued_inputs.clear();
         st.mode = Mode::Idle;
         for record in records {
             push_record_as_line(&mut st.transcript, record.message);
@@ -572,6 +622,14 @@ async fn apply_outbound(
             if let Some(content) = state.streaming.take() {
                 state.transcript.push(Line::Assistant(content));
             }
+        }
+        OutboundPayload::TurnEnd => {
+            if let Some(thinking) = state.streaming_thinking.take() {
+                state.transcript.push(Line::Thinking(thinking));
+            }
+            if let Some(content) = state.streaming.take() {
+                state.transcript.push(Line::Assistant(content));
+            }
             state.mode = Mode::Idle;
         }
         OutboundPayload::Reply(text) => {
@@ -592,7 +650,6 @@ async fn apply_outbound(
                 state.transcript.push(Line::Assistant(content));
             }
             state.transcript.push(Line::Error(err));
-            state.mode = Mode::Idle;
         }
         OutboundPayload::Notice(text) => {
             // Ambient system message (e.g. gateway command feedback).
@@ -606,6 +663,67 @@ async fn apply_outbound(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CliState, Line, Mode, apply_outbound};
+    use crate::bus::OutboundPayload;
+    use crate::session;
+    use std::sync::{Arc, Mutex};
+    use uuid::Uuid;
+
+    #[test]
+    fn queued_inputs_are_fifo() {
+        let mut state = CliState::default();
+
+        state.queue_input("first".to_string());
+        state.queue_input("second".to_string());
+
+        assert_eq!(state.pop_next_queued_input().as_deref(), Some("first"));
+        assert_eq!(state.pop_next_queued_input().as_deref(), Some("second"));
+        assert!(state.pop_next_queued_input().is_none());
+    }
+
+    #[tokio::test]
+    async fn reply_end_does_not_end_turn_until_turn_end() {
+        let dir = std::env::temp_dir().join(format!("mandeven-cli-test-{}", Uuid::now_v7()));
+        let sessions = Arc::new(session::Manager::new(dir.clone()).await.unwrap());
+        let state = Arc::new(Mutex::new(CliState {
+            mode: Mode::Replying,
+            ..CliState::default()
+        }));
+        let stream_id = Uuid::now_v7();
+
+        apply_outbound(
+            &state,
+            &sessions,
+            OutboundPayload::ReplyDelta {
+                stream_id,
+                delta: "hello".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        apply_outbound(&state, &sessions, OutboundPayload::ReplyEnd { stream_id })
+            .await
+            .unwrap();
+
+        {
+            let state = state.lock().unwrap();
+            assert_eq!(state.mode, Mode::Replying);
+            assert!(
+                matches!(state.transcript.last(), Some(Line::Assistant(text)) if text == "hello")
+            );
+        }
+
+        apply_outbound(&state, &sessions, OutboundPayload::TurnEnd)
+            .await
+            .unwrap();
+
+        assert_eq!(state.lock().unwrap().mode, Mode::Idle);
+        let _ = tokio::fs::remove_dir_all(dir).await;
+    }
 }
 
 /// Project one persisted [`Message`] into the transcript. System

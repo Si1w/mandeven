@@ -348,13 +348,16 @@ impl Agent {
                 };
                 if let Err(err) = self.iteration(&iter, text).await {
                     let reply = OutboundMessage::new(
-                        channel,
-                        session,
+                        channel.clone(),
+                        session.clone(),
                         OutboundPayload::Error(err.to_string()),
                     );
                     if self.out.send(reply).await.is_err() {
                         return Ok(false);
                     }
+                }
+                if self.send_turn_end(&iter).await.is_err() {
+                    return Ok(false);
                 }
                 Ok(true)
             }
@@ -421,14 +424,18 @@ impl Agent {
             channel: target.clone(),
         };
         if let Err(err) = self.iteration(&iter, prompt).await {
-            let reply =
-                OutboundMessage::new(target, session, OutboundPayload::Error(err.to_string()));
+            let reply = OutboundMessage::new(
+                target.clone(),
+                session.clone(),
+                OutboundPayload::Error(err.to_string()),
+            );
             // Outbound bus closed during error reporting just means
             // the channel layer is gone — same shutdown signal the
             // dispatch path treats as `Ok(false)`. Heartbeat ticks
             // can't propagate that, so drop and move on.
             let _ = self.out.send(reply).await;
         }
+        let _ = self.send_turn_end(&iter).await;
         Ok(())
     }
 
@@ -510,13 +517,14 @@ impl Agent {
                         .await;
                 }
                 let reply = OutboundMessage::new(
-                    target,
-                    session,
+                    target.clone(),
+                    session.clone(),
                     OutboundPayload::Error(format!("[cron:{}] {err_text}", tick.job_name)),
                 );
                 let _ = self.out.send(reply).await;
             }
         }
+        let _ = self.send_turn_end(&iter).await;
         Ok(())
     }
 
@@ -780,6 +788,16 @@ impl Agent {
             OutboundPayload::Notice(text.to_string()),
         );
         let _ = self.out.send(msg).await;
+    }
+
+    async fn send_turn_end(&self, iter: &Iteration) -> Result<()> {
+        let msg = OutboundMessage::new(
+            iter.channel.clone(),
+            iter.session.clone(),
+            OutboundPayload::TurnEnd,
+        );
+        self.out.send(msg).await?;
+        Ok(())
     }
 
     /// Execute one conversation iteration — from a user message to the

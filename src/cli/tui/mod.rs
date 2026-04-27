@@ -22,6 +22,7 @@ mod markdown;
 
 const PROMPT: &str = "› ";
 const HELP_BODY_LINES: u16 = 12;
+const QUEUED_PREVIEW_LIMIT: usize = 3;
 
 const BRAND: Color = Color::Rgb(215, 119, 87);
 
@@ -32,12 +33,14 @@ const BRAND: Color = Color::Rgb(215, 119, 87);
 /// subsequent `PgUp` from follow-mode moves relative to the current
 /// bottom, not from zero).
 pub fn render(f: &mut Frame<'_>, state: &mut CliState) {
+    let queued_preview_height = queued_preview_height(state);
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(2), // identity header
             Constraint::Min(0),    // transcript
             Constraint::Length(1), // status strip
+            Constraint::Length(queued_preview_height),
             Constraint::Length(3), // composer
         ])
         .split(f.area());
@@ -45,7 +48,8 @@ pub fn render(f: &mut Frame<'_>, state: &mut CliState) {
     render_header(f, chunks[0], state);
     render_transcript(f, chunks[1], state);
     render_status_line(f, chunks[2], state);
-    render_input(f, chunks[3], state);
+    render_queued_preview(f, chunks[3], state);
+    render_input(f, chunks[4], state);
 
     match state.overlay {
         Some(Overlay::Help) => render_help_overlay(f, chunks[1]),
@@ -208,13 +212,15 @@ fn render_status_line(f: &mut Frame<'_>, area: Rect, state: &CliState) {
         Mode::Replying => (Color::Yellow, "Thinking"),
     };
     let detail = if state.overlay.is_some() {
-        "Esc dismiss overlay"
+        "Esc dismiss overlay".to_string()
     } else if !state.follow_bottom {
-        "history view · PgDn to latest"
+        "history view · PgDn to latest".to_string()
+    } else if !state.queued_inputs.is_empty() {
+        format!("queued {} · Esc to interrupt", state.queued_inputs.len())
     } else if state.mode == Mode::Replying {
-        "Esc to interrupt"
+        "Esc to interrupt".to_string()
     } else {
-        "Enter to send"
+        "Enter to send".to_string()
     };
 
     let mut spans = vec![
@@ -231,6 +237,64 @@ fn render_status_line(f: &mut Frame<'_>, area: Rect, state: &CliState) {
     }
 
     f.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
+fn queued_preview_height(state: &CliState) -> u16 {
+    if state.queued_inputs.is_empty() {
+        return 0;
+    }
+
+    let visible = state.queued_inputs.len().min(QUEUED_PREVIEW_LIMIT);
+    let overflow = usize::from(state.queued_inputs.len() > visible);
+    u16::try_from(1 + visible + overflow).unwrap_or(u16::MAX)
+}
+
+fn render_queued_preview(f: &mut Frame<'_>, area: Rect, state: &CliState) {
+    if area.height == 0 || state.queued_inputs.is_empty() {
+        return;
+    }
+
+    let mut lines = Vec::new();
+    lines.push(Line::from(vec![
+        Span::raw(" "),
+        Span::styled("• ", dim_style()),
+        Span::styled("Queued follow-up inputs", dim_style()),
+    ]));
+
+    let available_items = usize::from(area.height.saturating_sub(1));
+    let visible_items = available_items
+        .min(QUEUED_PREVIEW_LIMIT)
+        .min(state.queued_inputs.len());
+    for text in state.queued_inputs.iter().take(visible_items) {
+        lines.push(Line::from(vec![
+            Span::raw(" "),
+            Span::styled("  ↳ ", dim_style()),
+            Span::styled(
+                preview_input(text),
+                dim_style().add_modifier(Modifier::ITALIC),
+            ),
+        ]));
+    }
+
+    if state.queued_inputs.len() > visible_items && lines.len() < usize::from(area.height) {
+        let remaining = state.queued_inputs.len() - visible_items;
+        lines.push(Line::from(vec![
+            Span::raw(" "),
+            Span::styled(format!("    … {remaining} more queued"), dim_style()),
+        ]));
+    }
+
+    f.render_widget(Paragraph::new(Text::from(lines)), area);
+}
+
+fn preview_input(text: &str) -> String {
+    let mut lines = text.lines();
+    let first = lines.next().unwrap_or("").trim();
+    if lines.next().is_some() {
+        format!("{first} …")
+    } else {
+        first.to_string()
+    }
 }
 
 fn render_input(f: &mut Frame<'_>, area: Rect, state: &CliState) {

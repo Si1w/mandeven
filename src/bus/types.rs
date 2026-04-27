@@ -201,6 +201,10 @@ pub enum OutboundPayload {
         /// Identifier of the finished stream; matches its deltas.
         stream_id: Uuid,
     },
+    /// End marker for a full user turn, after all model/tool loops
+    /// are complete. Channels should use this, not [`Self::ReplyEnd`],
+    /// to leave their busy state or drain queued follow-up input.
+    TurnEnd,
     /// Error surfaced to the channel for display.
     Error(String),
     /// Ambient system message from the agent or a command handler —

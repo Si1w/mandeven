@@ -29,7 +29,10 @@ use super::context::{
 use super::error::Result;
 use super::section::{Section, SectionCache, SystemPrompt};
 use super::specialized;
-use super::templates::{INTRO, INTRO_NAME, SYSTEM_RULES, SYSTEM_RULES_NAME, TONE, TONE_NAME};
+use super::templates::{
+    ACTIONS, ACTIONS_NAME, DOING_TASKS, DOING_TASKS_NAME, INTRO, INTRO_NAME, SYSTEM_RULES,
+    SYSTEM_RULES_NAME, TONE, TONE_NAME, USING_TOOLS, USING_TOOLS_NAME,
+};
 
 /// Per-call inputs threaded into [`PromptEngine::iteration_system`].
 ///
@@ -97,6 +100,9 @@ impl PromptEngine {
     /// ```text
     /// intro                     ← static, cached
     /// system_rules              ← static, cached
+    /// doing_tasks               ← static, cached
+    /// actions                   ← static, cached
+    /// using_tools               ← static, cached
     /// tone                      ← static, cached
     /// skills_index (optional)   ← cached, omitted when no skills
     /// agents_md (optional)      ← cached
@@ -125,6 +131,9 @@ impl PromptEngine {
 
         prompt.push(self.cached(INTRO_NAME, || INTRO.to_string()));
         prompt.push(self.cached(SYSTEM_RULES_NAME, || SYSTEM_RULES.to_string()));
+        prompt.push(self.cached(DOING_TASKS_NAME, || DOING_TASKS.to_string()));
+        prompt.push(self.cached(ACTIONS_NAME, || ACTIONS.to_string()));
+        prompt.push(self.cached(USING_TOOLS_NAME, || USING_TOOLS.to_string()));
         prompt.push(self.cached(TONE_NAME, || TONE.to_string()));
 
         if !self.skill_entries.is_empty() {
@@ -239,7 +248,18 @@ mod tests {
         let prompt = engine.iteration_system(&ctx(&dir));
 
         let names: Vec<&str> = prompt.iter_named().map(|(n, _)| n).collect();
-        assert_eq!(names, vec!["intro", "system_rules", "tone", "env_info"]);
+        assert_eq!(
+            names,
+            vec![
+                "intro",
+                "system_rules",
+                "doing_tasks",
+                "actions",
+                "using_tools",
+                "tone",
+                "env_info",
+            ]
+        );
     }
 
     #[test]
@@ -255,6 +275,9 @@ mod tests {
             vec![
                 "intro",
                 "system_rules",
+                "doing_tasks",
+                "actions",
+                "using_tools",
                 "tone",
                 "skills_index",
                 "agents_md",

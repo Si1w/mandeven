@@ -127,7 +127,9 @@ async fn main() -> Result<(), DynError> {
         &cfg.data_dir(),
         &config::project_bucket(&cwd),
     ));
-    tools::memory::register(&mut tool_registry, memory_manager.clone());
+    if cfg.agent.memory.enabled {
+        tools::memory::register(&mut tool_registry, memory_manager.clone());
+    }
     if let Some(wiring) = cron_wiring.as_ref() {
         tools::cron::register(&mut tool_registry, wiring.engine.clone());
     }

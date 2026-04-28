@@ -51,6 +51,12 @@ max_context_window = 256000
 [llm.deepseek.deepseek-v4-flash]
 model_name         = "deepseek-v4-flash"
 max_context_window = 1000000
+
+[agent.memory]
+enabled = true
+session_snapshot = true
+profile_enabled = true
+snapshot_limit = 8
 ```
 
 **3. Chat**
@@ -81,8 +87,9 @@ The agent talks to the user through a pluggable channel layer.
 
 ## 🧩 Extra features
 
-Opt-in subsystems wired through `~/.mandeven/`. Each is off until you
-drop the matching file or flip the switch in `mandeven.toml`.
+Optional subsystems are wired through `~/.mandeven/`. Runtime-mutable
+state lives in sidecar files; durable enable/budget knobs live in
+`mandeven.toml`.
 
 | Feature     | Source                                | Effect                                                  |
 | ----------- | ------------------------------------- | ------------------------------------------------------- |
@@ -90,6 +97,7 @@ drop the matching file or flip the switch in `mandeven.toml`.
 | `hooks`     | `~/.mandeven/hooks.json`              | Shell commands fired on lifecycle events                |
 | `cron`      | `~/.mandeven/cron/jobs.json`          | Cron-scheduled prompts that re-enter the agent loop     |
 | `heartbeat` | `[agent.heartbeat]` in `mandeven.toml`| Periodic self-check that can queue follow-up prompts    |
+| `memory`    | `[agent.memory]` in `mandeven.toml`   | Durable memories + frozen per-session prompt snapshot   |
 
 ## 📜 License
 

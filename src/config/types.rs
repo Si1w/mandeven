@@ -14,6 +14,7 @@ use crate::agent::compact::CompactConfig;
 use crate::cron::CronConfig;
 use crate::heartbeat::HeartbeatConfig;
 use crate::hook::HookConfig;
+use crate::memory::MemoryConfig;
 use crate::security::SandboxConfig;
 use crate::skill::SkillConfig;
 
@@ -155,6 +156,12 @@ pub struct AgentConfig {
     /// at boot. Same pattern as cron and skill.
     #[serde(default)]
     pub hook: HookConfig,
+
+    /// Per-agent memory configuration. Records remain in JSON stores under
+    /// `~/.mandeven/`; this block only controls model access and the frozen
+    /// session snapshot budget.
+    #[serde(default)]
+    pub memory: MemoryConfig,
 }
 
 impl AppConfig {

@@ -40,13 +40,68 @@ pub const PROFILE_STORE_FILENAME: &str = "profile.json";
 /// Current memory store schema version.
 pub const STORE_VERSION: u32 = 1;
 
-const CONTEXT_MEMORY_LIMIT: usize = 8;
+const DEFAULT_SNAPSHOT_LIMIT: usize = 8;
 const MAX_TITLE_CHARS: usize = 120;
 const MAX_SUMMARY_CHARS: usize = 320;
 const MAX_BODY_CHARS: usize = 2_000;
 const MAX_TAG_CHARS: usize = 40;
 const MAX_TAGS: usize = 12;
 const PROFILE_ITEM_LIMIT: usize = 8;
+
+/// User-tunable knobs for durable memory.
+///
+/// Runtime memory records live in JSON stores under `~/.mandeven/` and the
+/// current project bucket. `mandeven.toml` only controls whether the model can
+/// use memory and how much compact context is frozen into a new session.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct MemoryConfig {
+    /// When `false`, the model-facing `memory` tool is not registered and new
+    /// sessions do not receive memory snapshots. `/memory` remains available as
+    /// a governance surface for inspecting or archiving existing records.
+    #[serde(default = "default_enabled")]
+    pub enabled: bool,
+
+    /// Include a frozen memory snapshot in each newly-created session's system
+    /// prompt. Writes during the session persist to disk but do not mutate the
+    /// snapshot, preserving prompt-prefix stability.
+    #[serde(default = "default_session_snapshot")]
+    pub session_snapshot: bool,
+
+    /// Include the lightweight derived user profile in the frozen snapshot.
+    #[serde(default = "default_profile_enabled")]
+    pub profile_enabled: bool,
+
+    /// Maximum active memory summaries included in the frozen snapshot.
+    #[serde(default = "default_snapshot_limit")]
+    pub snapshot_limit: usize,
+}
+
+impl Default for MemoryConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_enabled(),
+            session_snapshot: default_session_snapshot(),
+            profile_enabled: default_profile_enabled(),
+            snapshot_limit: default_snapshot_limit(),
+        }
+    }
+}
+
+fn default_enabled() -> bool {
+    true
+}
+
+fn default_session_snapshot() -> bool {
+    true
+}
+
+fn default_profile_enabled() -> bool {
+    true
+}
+
+fn default_snapshot_limit() -> usize {
+    DEFAULT_SNAPSHOT_LIMIT
+}
 
 /// Memory visibility / storage scope.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -311,7 +366,7 @@ impl Manager {
     /// Returns store I/O or JSON errors.
     pub async fn search(&self, query: MemoryQuery) -> Result<Vec<MemoryMatch>> {
         let terms = query.query.as_deref().map(tokenize).unwrap_or_default();
-        let limit = query.limit.unwrap_or(CONTEXT_MEMORY_LIMIT).max(1);
+        let limit = query.limit.unwrap_or(DEFAULT_SNAPSHOT_LIMIT).max(1);
         let memories = self.load_filtered(&query).await?;
         let mut matches = memories
             .into_iter()
@@ -404,17 +459,22 @@ impl Manager {
     /// # Errors
     ///
     /// Returns store I/O or JSON errors.
-    pub async fn render_system_snapshot(&self) -> Result<Option<String>> {
-        let profile = self.profile().await?;
+    pub async fn render_system_snapshot(&self, config: &MemoryConfig) -> Result<Option<String>> {
+        let profile = if config.profile_enabled {
+            Some(self.profile().await?)
+        } else {
+            None
+        };
         let memories = self
             .search(MemoryQuery {
                 query: None,
                 include_archived: false,
-                limit: Some(CONTEXT_MEMORY_LIMIT),
+                limit: Some(config.snapshot_limit),
                 ..MemoryQuery::default()
             })
             .await?;
-        if profile_is_empty(&profile) && memories.is_empty() {
+        let has_profile = profile.as_ref().is_some_and(|p| !profile_is_empty(p));
+        if !has_profile && memories.is_empty() {
             return Ok(None);
         }
 
@@ -425,8 +485,8 @@ impl Manager {
              when you need details not shown here, and verify file, function, flag, dependency, \
              or current-state claims before acting.\n",
         );
-        if !profile_is_empty(&profile) {
-            write_profile_section(&mut out, &profile);
+        if let Some(profile) = profile.as_ref().filter(|p| !profile_is_empty(p)) {
+            write_profile_section(&mut out, profile);
         }
         if !memories.is_empty() {
             let _ = writeln!(out, "\n## Active Memories");
@@ -938,7 +998,11 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = manager.render_system_snapshot().await.unwrap().unwrap();
+        let snapshot = manager
+            .render_system_snapshot(&MemoryConfig::default())
+            .await
+            .unwrap()
+            .unwrap();
 
         assert!(snapshot.contains("# Memory Snapshot"));
         assert!(snapshot.contains("## Active Memories"));

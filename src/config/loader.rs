@@ -139,6 +139,7 @@ impl AppConfig {
     ///    and non-empty sides.
     /// 3. The referenced provider and model both exist in `providers`.
     /// 4. `agent.heartbeat.interval_secs` is greater than zero.
+    /// 5. `agent.memory.snapshot_limit` is greater than zero.
     fn validate(&self) -> Result<()> {
         if self.llm.providers.is_empty() {
             return Err(ConfigError::Invalid {
@@ -168,6 +169,13 @@ impl AppConfig {
         if self.agent.heartbeat.interval_secs == 0 {
             return Err(ConfigError::Invalid {
                 field: "agent.heartbeat.interval_secs",
+                reason: "must be greater than zero".into(),
+            });
+        }
+
+        if self.agent.memory.snapshot_limit == 0 {
+            return Err(ConfigError::Invalid {
+                field: "agent.memory.snapshot_limit",
                 reason: "must be greater than zero".into(),
             });
         }
@@ -249,6 +257,10 @@ mod tests {
         assert_eq!(prof.max_tokens, Some(2048));
         assert_eq!(prof.temperature, None);
         assert!(!parsed.tui.show_thinking);
+        assert!(parsed.agent.memory.enabled);
+        assert!(parsed.agent.memory.session_snapshot);
+        assert!(parsed.agent.memory.profile_enabled);
+        assert_eq!(parsed.agent.memory.snapshot_limit, 8);
     }
 
     #[test]
@@ -286,6 +298,28 @@ mod tests {
         let err = AppConfig::from_file(&path).unwrap_err().to_string();
 
         assert!(err.contains("agent.heartbeat.interval_secs"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn from_file_rejects_zero_memory_snapshot_limit() {
+        let path = std::env::temp_dir().join(format!("mandeven-config-{}.toml", Uuid::now_v7()));
+        let text = r#"
+            [llm]
+            default = "acme/my-profile"
+
+            [llm.acme.my-profile]
+            model_name = "upstream-model"
+            max_context_window = 128000
+
+            [agent.memory]
+            snapshot_limit = 0
+        "#;
+        std::fs::write(&path, text).unwrap();
+
+        let err = AppConfig::from_file(&path).unwrap_err().to_string();
+
+        assert!(err.contains("agent.memory.snapshot_limit"));
         let _ = std::fs::remove_file(path);
     }
 }

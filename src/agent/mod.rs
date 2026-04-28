@@ -1205,7 +1205,14 @@ impl Agent {
     }
 
     async fn capture_memory_snapshot(&self, iter: &Iteration) -> Option<String> {
-        match self.memory.render_system_snapshot().await {
+        if !self.config.memory.enabled || !self.config.memory.session_snapshot {
+            return Some(String::new());
+        }
+        match self
+            .memory
+            .render_system_snapshot(&self.config.memory)
+            .await
+        {
             Ok(context) => Some(context.unwrap_or_default()),
             Err(err) => {
                 self.send_notice(iter, &format!("memory snapshot unavailable: {err}"))

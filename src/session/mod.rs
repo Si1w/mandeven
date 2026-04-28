@@ -11,7 +11,7 @@
 //!
 //! ```text
 //! <base_dir>/<uuid>.jsonl:
-//!   {"_type":"metadata","title":"...","created_at":"...","updated_at":"..."}
+//!   {"_type":"metadata","title":"...","created_at":"...","updated_at":"...","memory_snapshot":"..."}
 //!   {"role":"user","content":"hi","timestamp":"..."}
 //!   {"role":"assistant","content":"hello","timestamp":"..."}
 //! ```
@@ -76,6 +76,13 @@ pub struct Metadata {
     /// metadata line; readers derive a fresher value from the last
     /// record timestamp when needed.
     pub updated_at: DateTime<Utc>,
+    /// Frozen memory/profile snapshot captured when the session starts.
+    ///
+    /// `None` means this session predates the field or capture failed and
+    /// should be retried. `Some("")` means capture succeeded but there was no
+    /// memory to surface.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_snapshot: Option<String>,
 }
 
 /// One message entry in a session file, carrying its wall-clock
@@ -145,6 +152,27 @@ impl Manager {
     /// Returns [`Error::Io`] or [`Error::Json`] on filesystem or
     /// serialization failure.
     pub async fn create(&self, id: &SessionID, title: String, channel: ChannelID) -> Result<()> {
+        self.create_with_memory_snapshot(id, title, channel, None)
+            .await
+    }
+
+    /// Write a fresh session file with a frozen memory snapshot.
+    ///
+    /// See [`Self::create`]; the snapshot is metadata rather than a message so
+    /// it can be injected into the transient system prompt without becoming
+    /// part of the user-visible transcript.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Io`] or [`Error::Json`] on filesystem or
+    /// serialization failure.
+    pub async fn create_with_memory_snapshot(
+        &self,
+        id: &SessionID,
+        title: String,
+        channel: ChannelID,
+        memory_snapshot: Option<String>,
+    ) -> Result<()> {
         let lock = self.lock_for(id).await;
         let _guard = lock.lock().await;
 
@@ -155,6 +183,7 @@ impl Manager {
                 channel,
                 created_at: now,
                 updated_at: now,
+                memory_snapshot,
             },
             records: Vec::new(),
         };
@@ -177,6 +206,34 @@ impl Manager {
         }
         let state = self.read_state(&path).await?;
         Ok(Some(state.metadata))
+    }
+
+    /// Replace the session's frozen memory snapshot in metadata.
+    ///
+    /// Used to lazily backfill sessions created before this field existed, or
+    /// to retry capture after a transient memory-store error.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::NotFound`] when the session file does not exist, and
+    /// [`Error::Io`], [`Error::Json`], or [`Error::InvalidFormat`] on
+    /// filesystem or parsing failure.
+    pub async fn set_memory_snapshot(
+        &self,
+        id: &SessionID,
+        memory_snapshot: Option<String>,
+    ) -> Result<()> {
+        let lock = self.lock_for(id).await;
+        let _guard = lock.lock().await;
+
+        let path = self.session_path(id);
+        if !tokio::fs::try_exists(&path).await? {
+            return Err(Error::NotFound(id.clone()));
+        }
+
+        let mut state = self.read_state(&path).await?;
+        state.metadata.memory_snapshot = memory_snapshot;
+        self.write_state(id, &state).await
     }
 
     /// Append one message to a session as a single JSONL line.
@@ -447,6 +504,34 @@ mod tests {
         let metadata = manager.metadata(&id).await.unwrap().unwrap();
 
         assert_eq!(metadata.updated_at, records[0].timestamp);
+        let _ = tokio::fs::remove_dir_all(dir).await;
+    }
+
+    #[tokio::test]
+    async fn memory_snapshot_is_stored_in_metadata() {
+        let dir = temp_session_dir();
+        let manager = Manager::new(dir.clone()).await.unwrap();
+        let id = SessionID::new();
+        manager
+            .create_with_memory_snapshot(
+                &id,
+                "test".to_string(),
+                ChannelID::new("tui"),
+                Some("snapshot".to_string()),
+            )
+            .await
+            .unwrap();
+
+        let metadata = manager.metadata(&id).await.unwrap().unwrap();
+        assert_eq!(metadata.memory_snapshot.as_deref(), Some("snapshot"));
+
+        manager
+            .set_memory_snapshot(&id, Some("updated".to_string()))
+            .await
+            .unwrap();
+        let metadata = manager.metadata(&id).await.unwrap().unwrap();
+        assert_eq!(metadata.memory_snapshot.as_deref(), Some("updated"));
+
         let _ = tokio::fs::remove_dir_all(dir).await;
     }
 }

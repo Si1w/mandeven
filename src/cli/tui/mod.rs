@@ -681,6 +681,8 @@ fn build_help_text() -> Text<'static> {
         help_entry("/compact [focus]", "compact conversation history"),
         help_entry("/heartbeat", "show or control heartbeat"),
         help_entry("/cron", "list or control cron jobs"),
+        help_entry("/memory", "list or inspect memories"),
+        help_entry("/memory profile", "show derived user profile"),
         help_entry("/discord", "toggle Discord gateway connection"),
         help_entry("/discord status", "show enabled/disabled + allow count"),
         help_entry("/discord list", "show Discord allow list"),

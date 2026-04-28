@@ -25,6 +25,7 @@ use mandeven::cron::CronEngine;
 use mandeven::gateway::{Gateway, dispatch_channel};
 use mandeven::heartbeat::HeartbeatEngine;
 use mandeven::hook::HookEngine;
+use mandeven::memory;
 use mandeven::prompt::PromptEngine;
 use mandeven::security::SandboxPolicy;
 use mandeven::session;
@@ -122,6 +123,11 @@ async fn main() -> Result<(), DynError> {
     tools::register_builtins(&mut tool_registry);
     let task_manager = Arc::new(task::Manager::new(&config::project_bucket(&cwd)));
     tools::task::register(&mut tool_registry, task_manager);
+    let memory_manager = Arc::new(memory::Manager::new(
+        &cfg.data_dir(),
+        &config::project_bucket(&cwd),
+    ));
+    tools::memory::register(&mut tool_registry, memory_manager.clone());
     if let Some(wiring) = cron_wiring.as_ref() {
         tools::cron::register(&mut tool_registry, wiring.engine.clone());
     }
@@ -143,6 +149,7 @@ async fn main() -> Result<(), DynError> {
         active_sessions.clone(),
         heartbeat_wiring,
         cron_wiring,
+        memory_manager,
         discord_wiring,
         prompts,
         hooks,

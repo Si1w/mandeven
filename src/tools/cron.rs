@@ -15,7 +15,7 @@ use serde_json::{Value, json};
 
 use super::error::{Error, Result};
 use super::{BaseTool, Registry, ToolOutcome};
-use crate::cron::{self, CronEngine, CronJobUpdate, RunStatus, Schedule};
+use crate::cron::{self, CronEngine, RunStatus, Schedule};
 use crate::llm::Tool;
 
 /// Register all model-facing cron tools.
@@ -23,19 +23,10 @@ pub fn register(registry: &mut Registry, engine: Arc<CronEngine>) {
     registry.register(Arc::new(CronCreate {
         engine: engine.clone(),
     }));
-    registry.register(Arc::new(CronGet {
-        engine: engine.clone(),
-    }));
     registry.register(Arc::new(CronList {
         engine: engine.clone(),
     }));
-    registry.register(Arc::new(CronUpdateTool {
-        engine: engine.clone(),
-    }));
-    registry.register(Arc::new(CronDelete {
-        engine: engine.clone(),
-    }));
-    registry.register(Arc::new(CronTrigger { engine }));
+    registry.register(Arc::new(CronDelete { engine }));
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -48,9 +39,6 @@ struct CronCreateParams {
     prompt: String,
     /// Short quote or paraphrase from the user's request authorizing this schedule.
     user_authorization: String,
-    /// Whether the job should start active. Defaults to true.
-    #[serde(default)]
-    enabled: Option<bool>,
 }
 
 /// Create a new cron job from explicit user scheduling intent.
@@ -85,21 +73,11 @@ impl BaseTool for CronCreate {
         )?;
         let schedule = params.schedule.into_schedule("cron_create")?;
 
-        let mut job = self
+        let job = self
             .engine
             .add(name, schedule, prompt)
             .await
             .map_err(|err| exec("cron_create", &err))?;
-
-        if params.enabled == Some(false) {
-            self.engine
-                .set_enabled(&job.id, false)
-                .await
-                .map_err(|err| exec("cron_create", &err))?;
-            if let Some(disabled) = find_job(&self.engine, &job.id).await {
-                job = disabled;
-            }
-        }
 
         Ok(json!({
             "job": job_detail(&job),
@@ -111,49 +89,7 @@ impl BaseTool for CronCreate {
 }
 
 #[derive(Deserialize, JsonSchema)]
-struct CronGetParams {
-    /// Cron job id.
-    job_id: String,
-}
-
-/// Retrieve one cron job.
-pub struct CronGet {
-    engine: Arc<CronEngine>,
-}
-
-#[async_trait]
-impl BaseTool for CronGet {
-    fn schema(&self) -> Tool {
-        Tool {
-            name: "cron_get".into(),
-            description: "Retrieve a persisted cron job by id, including the prompt and \
-                execution history."
-                .into(),
-            parameters: serde_json::to_value(schema_for!(CronGetParams))
-                .expect("JsonSchema derive always serializes"),
-        }
-    }
-
-    async fn call(&self, args: Value) -> Result<ToolOutcome> {
-        let params: CronGetParams = parse_params("cron_get", args)?;
-        let job = find_job(&self.engine, &params.job_id).await;
-        Ok(json!({
-            "job": job.as_ref().map(job_detail),
-            "message": if job.is_some() { "Cron job found" } else { "Cron job not found" },
-        })
-        .into())
-    }
-}
-
-#[derive(Deserialize, JsonSchema)]
-struct CronListParams {
-    /// Optional enabled-state filter.
-    #[serde(default)]
-    enabled: Option<bool>,
-    /// Include full prompts in each row. Defaults to false for compactness.
-    #[serde(default)]
-    include_prompt: Option<bool>,
-}
+struct CronListParams {}
 
 /// List persisted cron jobs.
 pub struct CronList {
@@ -174,104 +110,13 @@ impl BaseTool for CronList {
     }
 
     async fn call(&self, args: Value) -> Result<ToolOutcome> {
-        let params: CronListParams = parse_params("cron_list", args)?;
+        let _: CronListParams = parse_params("cron_list", args)?;
         let status = self.engine.status().await;
-        let include_prompt = params.include_prompt.unwrap_or(false);
-        let jobs: Vec<Value> = status
-            .jobs
-            .iter()
-            .filter(|job| params.enabled.is_none_or(|enabled| job.enabled == enabled))
-            .map(|job| job_summary(job, include_prompt))
-            .collect();
+        let jobs: Vec<Value> = status.jobs.iter().map(job_summary).collect();
         Ok(json!({
             "enabled": status.enabled,
             "jobs": jobs,
             "count": jobs.len(),
-        })
-        .into())
-    }
-}
-
-#[derive(Deserialize, JsonSchema)]
-struct CronUpdateParams {
-    /// Cron job id.
-    job_id: String,
-    /// Replacement human-readable label.
-    #[serde(default)]
-    name: Option<String>,
-    /// Replacement structured schedule.
-    #[serde(default)]
-    schedule: Option<ScheduleParam>,
-    /// Replacement prompt fed to the agent when the job fires.
-    #[serde(default)]
-    prompt: Option<String>,
-    /// Replacement enabled state.
-    #[serde(default)]
-    enabled: Option<bool>,
-}
-
-/// Update a cron job definition.
-pub struct CronUpdateTool {
-    engine: Arc<CronEngine>,
-}
-
-#[async_trait]
-impl BaseTool for CronUpdateTool {
-    fn schema(&self) -> Tool {
-        Tool {
-            name: "cron_update".into(),
-            description: "Update a persisted cron job's definition or enabled state. Use this \
-                when the user asks to change an existing automated schedule. If a schedule \
-                update would create new autonomous behavior, the user must have clearly \
-                requested that change."
-                .into(),
-            parameters: serde_json::to_value(schema_for!(CronUpdateParams))
-                .expect("JsonSchema derive always serializes"),
-        }
-    }
-
-    async fn call(&self, args: Value) -> Result<ToolOutcome> {
-        let params: CronUpdateParams = parse_params("cron_update", args)?;
-        let name = params
-            .name
-            .map(|value| required_text("cron_update", "name", &value))
-            .transpose()?;
-        let prompt = params
-            .prompt
-            .map(|value| required_text("cron_update", "prompt", &value))
-            .transpose()?;
-        let schedule = params
-            .schedule
-            .map(|value| value.into_schedule("cron_update"))
-            .transpose()?;
-
-        let outcome = self
-            .engine
-            .update(
-                &params.job_id,
-                CronJobUpdate {
-                    name,
-                    schedule,
-                    prompt,
-                    enabled: params.enabled,
-                },
-            )
-            .await
-            .map_err(|err| exec("cron_update", &err))?;
-        let Some(outcome) = outcome else {
-            return Ok(json!({
-                "success": false,
-                "job_id": params.job_id,
-                "message": "Cron job not found",
-            })
-            .into());
-        };
-
-        Ok(json!({
-            "success": true,
-            "job_id": outcome.job.id,
-            "updated_fields": outcome.updated_fields,
-            "job": job_detail(&outcome.job),
         })
         .into())
     }
@@ -321,62 +166,6 @@ impl BaseTool for CronDelete {
     }
 }
 
-#[derive(Deserialize, JsonSchema)]
-struct CronTriggerParams {
-    /// Cron job id.
-    job_id: String,
-}
-
-/// Trigger a cron job on the next scheduler pass.
-pub struct CronTrigger {
-    engine: Arc<CronEngine>,
-}
-
-#[async_trait]
-impl BaseTool for CronTrigger {
-    fn schema(&self) -> Tool {
-        Tool {
-            name: "cron_trigger".into(),
-            description: "Request an immediate run of an enabled cron job. Disabled jobs are \
-                not triggered; enable the job first if the user asks for that."
-                .into(),
-            parameters: serde_json::to_value(schema_for!(CronTriggerParams))
-                .expect("JsonSchema derive always serializes"),
-        }
-    }
-
-    async fn call(&self, args: Value) -> Result<ToolOutcome> {
-        let params: CronTriggerParams = parse_params("cron_trigger", args)?;
-        let Some(job) = find_job(&self.engine, &params.job_id).await else {
-            return Ok(json!({
-                "success": false,
-                "job_id": params.job_id,
-                "message": "Cron job not found",
-            })
-            .into());
-        };
-        if !job.enabled {
-            return Ok(json!({
-                "success": false,
-                "job_id": params.job_id,
-                "message": "Cron job is disabled",
-            })
-            .into());
-        }
-
-        self.engine
-            .trigger(&params.job_id)
-            .await
-            .map_err(|err| exec("cron_trigger", &err))?;
-        Ok(json!({
-            "success": true,
-            "job_id": params.job_id,
-            "message": "Cron job trigger requested",
-        })
-        .into())
-    }
-}
-
 #[derive(Clone, Debug, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum ScheduleParam {
@@ -421,30 +210,18 @@ impl ScheduleParam {
     }
 }
 
-async fn find_job(engine: &CronEngine, job_id: &str) -> Option<cron::CronJob> {
-    engine
-        .status()
-        .await
-        .jobs
-        .into_iter()
-        .find(|job| job.id == job_id)
-}
-
-fn job_summary(job: &cron::CronJob, include_prompt: bool) -> Value {
-    let mut value = json!({
+fn job_summary(job: &cron::CronJob) -> Value {
+    json!({
         "id": &job.id,
         "name": &job.name,
         "enabled": job.enabled,
         "schedule": job.schedule.describe(),
+        "prompt": &job.prompt,
         "next_run_at": job.state.next_run_at.map(|time| time.to_rfc3339()),
         "last_run_at": job.state.last_run_at.map(|time| time.to_rfc3339()),
         "last_status": job.state.last_status.map(status_name),
         "consecutive_errors": job.state.consecutive_errors,
-    });
-    if include_prompt {
-        value["prompt"] = json!(&job.prompt);
-    }
-    value
+    })
 }
 
 fn job_detail(job: &cron::CronJob) -> Value {
@@ -524,13 +301,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cron_tools_create_update_list_and_delete() {
+    async fn cron_tools_create_list_and_delete() {
         let dir = tempdir();
         let engine = engine(&dir).await;
         let create = CronCreate {
-            engine: engine.clone(),
-        };
-        let update = CronUpdateTool {
             engine: engine.clone(),
         };
         let list = CronList {
@@ -554,27 +328,13 @@ mod tests {
         };
         let job_id = value["job"]["id"].as_str().unwrap().to_string();
 
-        update
-            .call(json!({
-                "job_id": job_id,
-                "name": "Morning issue check",
-                "enabled": false
-            }))
-            .await
-            .unwrap();
-        let result = list
-            .call(json!({
-                "enabled": false,
-                "include_prompt": true
-            }))
-            .await
-            .unwrap();
+        let result = list.call(json!({})).await.unwrap();
         let ToolOutcome::Result(value) = result else {
             panic!("cron_list should return plain result");
         };
         assert_eq!(value["count"], 1);
-        assert_eq!(value["jobs"][0]["name"], "Morning issue check");
-        assert_eq!(value["jobs"][0]["enabled"], false);
+        assert_eq!(value["jobs"][0]["name"], "Daily issue check");
+        assert_eq!(value["jobs"][0]["enabled"], true);
         assert!(
             value["jobs"][0]["prompt"]
                 .as_str()

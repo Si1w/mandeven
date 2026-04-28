@@ -32,9 +32,7 @@ use tokio::time::sleep;
 use super::error::{Error, Result};
 use super::schedule::Schedule;
 use super::store::{Store, StoreFile};
-use super::types::{
-    CronJob, CronJobUpdate, CronJobUpdateOutcome, CronStatus, CronTick, RunStatus, STORE_VERSION,
-};
+use super::types::{CronJob, CronStatus, CronTick, RunStatus, STORE_VERSION};
 use super::{CRON_SUBDIR, CronConfig};
 
 /// Capacity of the engine → agent tick queue. Cron ticks are rare
@@ -220,86 +218,6 @@ impl CronEngine {
         drop(state);
         self.wake.notify_one();
         Ok(())
-    }
-
-    /// Update definition-level fields on an existing job.
-    ///
-    /// Recomputes `next_run_at` when the schedule or enabled flag
-    /// changes. Prompt/name-only edits keep the existing next fire so
-    /// editing text does not shift a recurring job's cadence.
-    ///
-    /// # Errors
-    ///
-    /// - [`Error::Io`] / [`Error::Json`] on persist failure.
-    pub async fn update(
-        &self,
-        id: &str,
-        update: CronJobUpdate,
-    ) -> Result<Option<CronJobUpdateOutcome>> {
-        let now = Utc::now();
-        let mut state = self.state.lock().await;
-        let Some(job) = state.jobs.iter_mut().find(|j| j.id == id) else {
-            return Ok(None);
-        };
-
-        let mut updated_fields = Vec::new();
-        let mut reschedule = false;
-
-        if let Some(name) = update.name
-            && job.name != name
-        {
-            job.name = name;
-            updated_fields.push("name");
-        }
-        if let Some(schedule) = update.schedule {
-            job.schedule = schedule;
-            updated_fields.push("schedule");
-            reschedule = true;
-        }
-        if let Some(prompt) = update.prompt
-            && job.prompt != prompt
-        {
-            job.prompt = prompt;
-            updated_fields.push("prompt");
-        }
-        if let Some(enabled) = update.enabled
-            && job.enabled != enabled
-        {
-            job.enabled = enabled;
-            updated_fields.push("enabled");
-            reschedule = true;
-        }
-
-        if reschedule {
-            job.state.next_run_at = if job.enabled {
-                job.schedule.next_after(now)
-            } else {
-                None
-            };
-            if job.enabled && job.state.next_run_at.is_none() {
-                job.enabled = false;
-                if !updated_fields.contains(&"enabled") {
-                    updated_fields.push("enabled");
-                }
-            }
-        }
-
-        if !updated_fields.is_empty() {
-            job.updated_at = now;
-            let outcome = CronJobUpdateOutcome {
-                job: job.clone(),
-                updated_fields,
-            };
-            self.persist_locked(&state).await?;
-            drop(state);
-            self.wake.notify_one();
-            return Ok(Some(outcome));
-        }
-
-        Ok(Some(CronJobUpdateOutcome {
-            job: job.clone(),
-            updated_fields,
-        }))
     }
 
     /// Force a job to fire on the next tick by setting its
@@ -588,46 +506,6 @@ mod tests {
         assert_eq!(status.jobs[0].id, job.id);
         assert_eq!(status.jobs[0].name, "summary");
         assert!(status.jobs[0].enabled);
-    }
-
-    #[tokio::test]
-    async fn update_changes_definition_and_recomputes_schedule() {
-        let dir = tempdir();
-        let cfg = CronConfig { enabled: true };
-        let (engine, _rx) = CronEngine::new(&cfg, &dir).await.unwrap();
-        let job = engine
-            .add(
-                "summary".into(),
-                Schedule::cron("0 9 * * *").unwrap(),
-                "go".into(),
-            )
-            .await
-            .unwrap();
-
-        let outcome = engine
-            .update(
-                &job.id,
-                CronJobUpdate {
-                    name: Some("morning summary".into()),
-                    schedule: Some(
-                        Schedule::every(ChronoDuration::minutes(30), Utc::now()).unwrap(),
-                    ),
-                    prompt: Some("run summary".into()),
-                    enabled: Some(false),
-                },
-            )
-            .await
-            .unwrap()
-            .unwrap();
-
-        assert_eq!(
-            outcome.updated_fields,
-            vec!["name", "schedule", "prompt", "enabled"]
-        );
-        assert_eq!(outcome.job.name, "morning summary");
-        assert_eq!(outcome.job.prompt, "run summary");
-        assert!(!outcome.job.enabled);
-        assert!(outcome.job.state.next_run_at.is_none());
     }
 
     #[tokio::test]

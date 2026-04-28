@@ -31,6 +31,8 @@ pub enum SlashCommand {
     Heartbeat(HeartbeatCommand),
     /// `/cron ...`
     Cron(CronCommand),
+    /// `/memory ...`
+    Memory(MemoryCommand),
     /// `/discord ...`
     Discord(DiscordCommand),
     /// Unknown slash command. CLI uses this for skill lookup; the
@@ -79,6 +81,21 @@ pub enum CronCommand {
     Disable { id: String },
     /// `/cron remove <id>`
     Remove { id: String },
+}
+
+/// Parsed `/memory` command.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MemoryCommand {
+    /// `/memory` or `/memory list`
+    List,
+    /// `/memory search <query...>`
+    Search { query: String },
+    /// `/memory show <id>`
+    Show { id: String },
+    /// `/memory forget <id>`
+    Forget { id: String },
+    /// `/memory profile`
+    Profile,
 }
 
 /// Parsed `/discord` command.
@@ -145,6 +162,7 @@ enum RawCommand {
     Compact(CompactArgs),
     Heartbeat(HeartbeatArgs),
     Cron(CronArgs),
+    Memory(MemoryArgs),
     Discord(DiscordArgs),
     #[command(external_subcommand)]
     External(Vec<String>),
@@ -221,6 +239,37 @@ enum CronSubcommand {
 }
 
 #[derive(Debug, Args)]
+struct MemoryArgs {
+    #[command(subcommand)]
+    command: Option<MemorySubcommand>,
+}
+
+#[derive(Debug, Subcommand)]
+enum MemorySubcommand {
+    List,
+    Search(MemorySearchArgs),
+    Show {
+        #[arg(value_name = "id")]
+        id: String,
+    },
+    Forget {
+        #[arg(value_name = "id")]
+        id: String,
+    },
+    Profile,
+}
+
+#[derive(Debug, Args)]
+struct MemorySearchArgs {
+    #[arg(
+        value_name = "query",
+        trailing_var_arg = true,
+        allow_hyphen_values = true
+    )]
+    query: Vec<String>,
+}
+
+#[derive(Debug, Args)]
 struct DiscordArgs {
     #[command(subcommand)]
     command: Option<DiscordSubcommand>,
@@ -275,6 +324,7 @@ impl TryFrom<RawCommand> for SlashCommand {
             }),
             RawCommand::Heartbeat(args) => Ok(Self::Heartbeat(args.into())),
             RawCommand::Cron(args) => Ok(Self::Cron(args.into())),
+            RawCommand::Memory(args) => args.try_into().map(Self::Memory),
             RawCommand::Discord(args) => Ok(Self::Discord(args.into())),
             RawCommand::External(raw) => external_command(&raw),
         }
@@ -325,6 +375,22 @@ impl From<CronArgs> for CronCommand {
             Some(CronSubcommand::Enable { id }) => Self::Enable { id },
             Some(CronSubcommand::Disable { id }) => Self::Disable { id },
             Some(CronSubcommand::Remove { id }) => Self::Remove { id },
+        }
+    }
+}
+
+impl TryFrom<MemoryArgs> for MemoryCommand {
+    type Error = String;
+
+    fn try_from(value: MemoryArgs) -> Result<Self, Self::Error> {
+        match value.command {
+            None | Some(MemorySubcommand::List) => Ok(Self::List),
+            Some(MemorySubcommand::Search(args)) => non_empty_join(&args.query)
+                .map(|query| Self::Search { query })
+                .ok_or_else(|| "usage: /memory search <query>".to_string()),
+            Some(MemorySubcommand::Show { id }) => Ok(Self::Show { id }),
+            Some(MemorySubcommand::Forget { id }) => Ok(Self::Forget { id }),
+            Some(MemorySubcommand::Profile) => Ok(Self::Profile),
         }
     }
 }
@@ -451,6 +517,33 @@ mod tests {
                 id: "job-1".to_string(),
             })
         );
+        assert_eq!(
+            parse("memory").unwrap(),
+            SlashCommand::Memory(MemoryCommand::List)
+        );
+        assert_eq!(
+            parse("memory search response style").unwrap(),
+            SlashCommand::Memory(MemoryCommand::Search {
+                query: "response style".to_string(),
+            })
+        );
+        assert_eq!(
+            parse("memory show mem-1").unwrap(),
+            SlashCommand::Memory(MemoryCommand::Show {
+                id: "mem-1".to_string(),
+            })
+        );
+        assert_eq!(
+            parse("memory forget mem-1").unwrap(),
+            SlashCommand::Memory(MemoryCommand::Forget {
+                id: "mem-1".to_string(),
+            })
+        );
+        assert_eq!(
+            parse("memory profile").unwrap(),
+            SlashCommand::Memory(MemoryCommand::Profile)
+        );
+        assert!(parse("memory search").is_err());
         assert_eq!(
             parse("discord").unwrap(),
             SlashCommand::Discord(DiscordCommand::Toggle)

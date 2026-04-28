@@ -752,6 +752,7 @@ impl CliChannel {
             | SlashCommand::Compact { .. }
             | SlashCommand::Heartbeat(_)
             | SlashCommand::Cron(_)
+            | SlashCommand::Memory(_)
             | SlashCommand::Discord(_) => self.forward_command(body, inbound).await,
         }
     }

@@ -14,6 +14,7 @@ pub mod gateway;
 pub mod heartbeat;
 pub mod hook;
 pub mod llm;
+pub mod memory;
 pub mod prompt;
 pub mod security;
 pub mod session;

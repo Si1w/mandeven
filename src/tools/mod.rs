@@ -17,6 +17,7 @@ pub mod error;
 pub mod file;
 pub mod grep;
 pub mod heartbeat;
+pub mod memory;
 pub mod shell;
 pub mod skill;
 pub mod task;

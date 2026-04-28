@@ -47,6 +47,7 @@ use crate::llm::{
     self, BaseLLMClient, CompactTrigger, FinishReason, Message, Request, ResponseStream, Thinking,
     ToolCall, Usage,
 };
+use crate::memory;
 use crate::prompt::{PromptContext, PromptEngine};
 use crate::session;
 use crate::tools;
@@ -56,7 +57,7 @@ use crate::tools::heartbeat::{
 
 use self::command::{
     AgentCommandCtx, format_compact_report, run_cron_command, run_discord_command,
-    run_heartbeat_command,
+    run_heartbeat_command, run_memory_command,
 };
 
 /// Upper bound on completion tokens for title generation.
@@ -110,6 +111,9 @@ pub struct Agent {
     /// Receiver paired with the cron engine. Raced against `inbox`
     /// (and the heartbeat receiver, when present) in [`Agent::run`].
     cron_rx: Option<mpsc::Receiver<cron::CronTick>>,
+    /// Durable memory/profile manager. The model writes through the
+    /// `memory` tool; `/memory` is the user-facing governance surface.
+    memory: Arc<memory::Manager>,
     /// Discord adapter control handle, present iff the channel was
     /// registered. Cloned into [`AgentCommandCtx`] so `/discord
     /// allow|deny|list` can mutate the runtime allow list.
@@ -279,6 +283,7 @@ impl Agent {
         active_sessions: ActiveSessions,
         heartbeat: Option<HeartbeatWiring>,
         cron: Option<CronWiring>,
+        memory: Arc<memory::Manager>,
         discord: Option<DiscordWiring>,
         prompt: Arc<PromptEngine>,
         hook: Arc<HookEngine>,
@@ -311,6 +316,7 @@ impl Agent {
             heartbeat_rx,
             cron: cron_handle,
             cron_rx,
+            memory,
             discord: discord_handle,
             active_sessions,
             compact_config: cfg.agent.compact.clone(),
@@ -658,6 +664,7 @@ impl Agent {
             session: session.clone(),
             heartbeat: self.heartbeat.clone(),
             cron: self.cron.clone(),
+            memory: self.memory.clone(),
             discord: self.discord.clone(),
             app_config: self.app_config.clone(),
         };
@@ -673,6 +680,14 @@ impl Agent {
                 }
             },
             SlashCommand::Cron(command) => match run_cron_command(command, &ctx).await {
+                CommandOutcome::Completed => return Ok(()),
+                CommandOutcome::Feedback(msg) => OutboundPayload::Notice(msg),
+                CommandOutcome::Exit => {
+                    eprintln!("[agent] command {body:?} returned Exit at agent layer; ignoring");
+                    return Ok(());
+                }
+            },
+            SlashCommand::Memory(command) => match run_memory_command(command, &ctx).await {
                 CommandOutcome::Completed => return Ok(()),
                 CommandOutcome::Feedback(msg) => OutboundPayload::Notice(msg),
                 CommandOutcome::Exit => {
@@ -1002,7 +1017,7 @@ impl Agent {
             return Ok(());
         }
 
-        self.ensure_session(iter, &user_text).await?;
+        let memory_snapshot = self.ensure_session(iter, &user_text).await?;
         self.sessions
             .append(&iter.session, Message::User { content: user_text })
             .await?;
@@ -1025,6 +1040,7 @@ impl Agent {
             // toolUseContext.renderedSystemPrompt per call, never
             // appended to the transcript.
             let messages = self.prepend_iteration_system(messages);
+            let messages = self.prepend_memory_snapshot(messages, &memory_snapshot);
             let outcome = self.call(iter, messages).await?;
             let CallOutcome {
                 content,
@@ -1180,6 +1196,25 @@ impl Agent {
         out
     }
 
+    fn prepend_memory_snapshot(
+        &self,
+        messages: Vec<Message>,
+        memory_snapshot: &str,
+    ) -> Vec<Message> {
+        append_memory_snapshot(messages, memory_snapshot)
+    }
+
+    async fn capture_memory_snapshot(&self, iter: &Iteration) -> Option<String> {
+        match self.memory.render_system_snapshot().await {
+            Ok(context) => Some(context.unwrap_or_default()),
+            Err(err) => {
+                self.send_notice(iter, &format!("memory snapshot unavailable: {err}"))
+                    .await;
+                None
+            }
+        }
+    }
+
     /// Consume a [`ResponseStream`], forwarding text chunks to the bus
     /// as [`OutboundPayload::ReplyDelta`] and emitting
     /// [`OutboundPayload::ReplyEnd`] once the stream terminates.
@@ -1261,16 +1296,31 @@ impl Agent {
     /// Create a session on first encounter, generating a short title
     /// from the user's opening message. If title generation fails or
     /// returns empty, falls back to a truncated prefix of the input.
-    async fn ensure_session(&self, iter: &Iteration, first_text: &str) -> Result<()> {
-        if self.sessions.metadata(&iter.session).await?.is_some() {
-            return Ok(());
+    async fn ensure_session(&self, iter: &Iteration, first_text: &str) -> Result<String> {
+        if let Some(metadata) = self.sessions.metadata(&iter.session).await? {
+            if let Some(snapshot) = metadata.memory_snapshot {
+                return Ok(snapshot);
+            }
+            if let Some(snapshot) = self.capture_memory_snapshot(iter).await {
+                self.sessions
+                    .set_memory_snapshot(&iter.session, Some(snapshot.clone()))
+                    .await?;
+                return Ok(snapshot);
+            }
+            return Ok(String::new());
         }
         let title = match self.generate_title(first_text).await {
             Ok(t) if !t.is_empty() => t,
             _ => fallback_title(first_text),
         };
+        let memory_snapshot = self.capture_memory_snapshot(iter).await;
         self.sessions
-            .create(&iter.session, title, iter.channel.clone())
+            .create_with_memory_snapshot(
+                &iter.session,
+                title,
+                iter.channel.clone(),
+                memory_snapshot.clone(),
+            )
             .await?;
         // SessionStart hook fires once per fresh session — never on
         // resume, never per iteration. `source: startup` distinguishes
@@ -1287,7 +1337,7 @@ impl Agent {
                 &self.cwd,
             )
             .await;
-        Ok(())
+        Ok(memory_snapshot.unwrap_or_default())
     }
 
     /// Generate a short session title from the first user message
@@ -1350,6 +1400,65 @@ impl Agent {
             timeout_secs: self.timeout_secs,
             thinking,
         }
+    }
+}
+
+fn append_memory_snapshot(mut messages: Vec<Message>, memory_snapshot: &str) -> Vec<Message> {
+    let snapshot = memory_snapshot.trim();
+    if snapshot.is_empty() {
+        return messages;
+    }
+    if let Some(Message::System { content }) = messages.first_mut() {
+        content.push_str("\n\n");
+        content.push_str(snapshot);
+    }
+    messages
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn memory_snapshot_is_appended_to_system_message() {
+        let messages = vec![
+            Message::System {
+                content: "system".to_string(),
+            },
+            Message::User {
+                content: "old".to_string(),
+            },
+            Message::Assistant {
+                content: Some("older answer".to_string()),
+                tool_calls: None,
+                reasoning: None,
+            },
+            Message::User {
+                content: "current".to_string(),
+            },
+        ];
+        let messages = append_memory_snapshot(messages, "# Memory Snapshot\n- x");
+
+        let Message::System { content } = &messages[0] else {
+            panic!("expected system message");
+        };
+        assert_eq!(content, "system\n\n# Memory Snapshot\n- x");
+        let Message::User { content } = &messages[3] else {
+            panic!("expected user message");
+        };
+        assert_eq!(content, "current");
+    }
+
+    #[test]
+    fn empty_memory_snapshot_leaves_messages_unchanged() {
+        let messages = vec![Message::System {
+            content: "system".to_string(),
+        }];
+        let updated = append_memory_snapshot(messages.clone(), " \n");
+        let Message::System { content } = &updated[0] else {
+            panic!("expected system message");
+        };
+        assert_eq!(content, "system");
     }
 }
 

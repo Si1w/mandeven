@@ -3,6 +3,7 @@
 //! Parsing lives in [`crate::command::slash`]. This module receives typed
 //! command enums and applies them to agent-owned state.
 
+use std::fmt::Write as _;
 use std::sync::{Arc, RwLock};
 
 use super::compact::CompactReport;
@@ -11,11 +12,12 @@ use crate::channels::discord::DiscordControl;
 use crate::command::CommandOutcome;
 use crate::command::slash::{
     CronCommand as ParsedCronCommand, DiscordCommand as ParsedDiscordCommand,
-    HeartbeatCommand as ParsedHeartbeatCommand,
+    HeartbeatCommand as ParsedHeartbeatCommand, MemoryCommand as ParsedMemoryCommand,
 };
 use crate::config::AppConfig;
 use crate::cron::{CronEngine, CronJob, CronStatus, RunStatus};
 use crate::heartbeat::{HeartbeatEngine, HeartbeatStatus};
+use crate::memory::{self, Memory, MemoryQuery, UserProfile};
 
 /// Execution context for agent-level commands.
 pub struct AgentCommandCtx {
@@ -30,6 +32,9 @@ pub struct AgentCommandCtx {
     /// Cron engine handle, present iff the agent has cron enabled.
     /// `/cron` subcommands list, trigger, and pause jobs through it.
     pub cron: Option<Arc<CronEngine>>,
+    /// Durable memory/profile manager. `/memory` subcommands inspect
+    /// and archive records through it.
+    pub memory: Arc<memory::Manager>,
     /// Discord allowlist control, present iff the Discord channel is
     /// registered. `/discord` subcommands mutate the runtime allow
     /// list and persist to the JSON sidecar through it.
@@ -206,6 +211,59 @@ pub async fn run_cron_command(command: ParsedCronCommand, ctx: &AgentCommandCtx)
     }
 }
 
+pub async fn run_memory_command(
+    command: ParsedMemoryCommand,
+    ctx: &AgentCommandCtx,
+) -> CommandOutcome {
+    match command {
+        ParsedMemoryCommand::List => match ctx
+            .memory
+            .search(MemoryQuery {
+                limit: Some(20),
+                ..MemoryQuery::default()
+            })
+            .await
+        {
+            Ok(matches) => CommandOutcome::Feedback(format_memory_list(
+                matches.into_iter().map(|item| item.memory).collect(),
+            )),
+            Err(err) => CommandOutcome::Feedback(format!("memory list failed: {err}")),
+        },
+        ParsedMemoryCommand::Search { query } => match ctx
+            .memory
+            .search(MemoryQuery {
+                query: Some(query.clone()),
+                limit: Some(20),
+                ..MemoryQuery::default()
+            })
+            .await
+        {
+            Ok(matches) => CommandOutcome::Feedback(format_memory_list(
+                matches.into_iter().map(|item| item.memory).collect(),
+            )),
+            Err(err) => CommandOutcome::Feedback(format!("memory search failed: {err}")),
+        },
+        ParsedMemoryCommand::Show { id } => match ctx.memory.get(&id).await {
+            Ok(Some(memory)) => CommandOutcome::Feedback(format_memory_detail(&memory)),
+            Ok(None) => CommandOutcome::Feedback(format!("memory {id:?} not found")),
+            Err(err) => CommandOutcome::Feedback(format!("memory show failed: {err}")),
+        },
+        ParsedMemoryCommand::Forget { id } => match ctx.memory.forget(&id).await {
+            Ok(Some(memory)) => CommandOutcome::Feedback(format!(
+                "memory {} archived: {}",
+                memory::short_id(&memory.id),
+                memory.title
+            )),
+            Ok(None) => CommandOutcome::Feedback(format!("memory {id:?} not found")),
+            Err(err) => CommandOutcome::Feedback(format!("memory forget failed: {err}")),
+        },
+        ParsedMemoryCommand::Profile => match ctx.memory.profile().await {
+            Ok(profile) => CommandOutcome::Feedback(format_profile(&profile)),
+            Err(err) => CommandOutcome::Feedback(format!("memory profile failed: {err}")),
+        },
+    }
+}
+
 /// Multi-line status block rendered by `/cron` (no args). Header
 /// summarizes engine state; one line per job follows.
 fn format_cron_status(status: &CronStatus) -> String {
@@ -256,6 +314,81 @@ fn truncate(s: &str, max: usize) -> String {
     }
     let cut: String = s.chars().take(max.saturating_sub(1)).collect();
     format!("{cut}…")
+}
+
+fn format_memory_list(memories: Vec<Memory>) -> String {
+    if memories.is_empty() {
+        return "memory: no active memories".to_string();
+    }
+    let mut out = format!("memory: {} active record(s)", memories.len());
+    for memory in memories {
+        let _ = write!(
+            out,
+            "\n  {} [{}/{}] {} — {}",
+            memory::short_id(&memory.id),
+            memory::scope_name(memory.scope),
+            memory::kind_name(memory.kind),
+            truncate(&memory.title, 36),
+            truncate(&memory.summary, 72)
+        );
+    }
+    out
+}
+
+fn format_memory_detail(memory: &Memory) -> String {
+    let mut out = format!(
+        "memory {} [{}/{}/{}]\n{}\n\n{}",
+        memory::short_id(&memory.id),
+        memory::scope_name(memory.scope),
+        memory::kind_name(memory.kind),
+        memory::status_name(memory.status),
+        memory.title,
+        memory.body
+    );
+    if !memory.tags.is_empty() {
+        let _ = write!(out, "\n\ntags: {}", memory.tags.join(", "));
+    }
+    let _ = write!(
+        out,
+        "\ncreated: {}\nupdated: {}",
+        memory.created_at.to_rfc3339(),
+        memory.updated_at.to_rfc3339()
+    );
+    out
+}
+
+fn format_profile(profile: &UserProfile) -> String {
+    if profile.summary.is_empty()
+        && profile.communication_style.is_empty()
+        && profile.working_preferences.is_empty()
+        && profile.avoid.is_empty()
+    {
+        return "memory profile: empty".to_string();
+    }
+    let mut out = String::from("memory profile");
+    if !profile.summary.is_empty() {
+        let _ = write!(out, "\nsummary: {}", profile.summary);
+    }
+    write_profile_items(&mut out, "communication", &profile.communication_style);
+    write_profile_items(&mut out, "work", &profile.working_preferences);
+    write_profile_items(&mut out, "avoid", &profile.avoid);
+    if !profile.source_memory_ids.is_empty() {
+        let ids = profile
+            .source_memory_ids
+            .iter()
+            .map(|id| memory::short_id(id))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let _ = write!(out, "\nsources: {ids}");
+    }
+    out
+}
+
+fn write_profile_items(out: &mut String, label: &str, items: &[String]) {
+    if items.is_empty() {
+        return;
+    }
+    let _ = write!(out, "\n{label}: {}", items.join("; "));
 }
 
 /// One-line status summary rendered by `/heartbeat` (no args).

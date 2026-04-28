@@ -20,4 +20,6 @@ pub use paths::{
     CONFIG_FILENAME, HOME_ENV_VAR, HOME_SUBDIR, PROJECT_OVERRIDE_SUBDIR, PROJECTS_SUBDIR,
     config_path, home_dir, project_bucket, projects_dir,
 };
-pub use types::{AgentConfig, AppConfig, LLMConfig, LLMProfile, TuiConfig};
+pub use types::{
+    AgentConfig, AppConfig, ChannelsConfig, DiscordConfig, LLMConfig, LLMProfile, TuiConfig,
+};

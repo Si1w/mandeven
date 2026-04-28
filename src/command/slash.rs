@@ -4,7 +4,7 @@
 //! shape and arity; each layer still decides whether a parsed command belongs
 //! to it or should continue down the CLI → gateway → agent chain.
 
-use clap::{Args, Parser, Subcommand};
+use clap::{ArgAction, Args, Parser, Subcommand};
 
 /// Parsed slash command.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -31,6 +31,8 @@ pub enum SlashCommand {
     Heartbeat(HeartbeatCommand),
     /// `/cron ...`
     Cron(CronCommand),
+    /// `/discord ...`
+    Discord(DiscordCommand),
     /// Unknown slash command. CLI uses this for skill lookup; the
     /// agent turns surviving externals into "unknown command".
     External { name: String, args: Vec<String> },
@@ -79,6 +81,25 @@ pub enum CronCommand {
     Remove { id: String },
 }
 
+/// Parsed `/discord` command.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DiscordCommand {
+    /// `/discord` (no args) — flip the gateway connection. Off → on,
+    /// on → off. The current state is visible via [`Self::Status`].
+    Toggle,
+    /// `/discord status` — runtime snapshot.
+    Status,
+    /// `/discord list` — show the allow list.
+    List,
+    /// `/discord allow <user_id>`
+    Allow { user_id: u64 },
+    /// `/discord deny <user_id>`
+    Deny { user_id: u64 },
+    /// `/discord autostart on|off` — persist the boot-time
+    /// `[channels.discord].enabled` flag in `mandeven.toml`.
+    Autostart { on: bool },
+}
+
 /// Parse a slash-command body, excluding the leading `/`.
 ///
 /// # Errors
@@ -124,6 +145,7 @@ enum RawCommand {
     Compact(CompactArgs),
     Heartbeat(HeartbeatArgs),
     Cron(CronArgs),
+    Discord(DiscordArgs),
     #[command(external_subcommand)]
     External(Vec<String>),
 }
@@ -198,6 +220,43 @@ enum CronSubcommand {
     },
 }
 
+#[derive(Debug, Args)]
+struct DiscordArgs {
+    #[command(subcommand)]
+    command: Option<DiscordSubcommand>,
+}
+
+#[derive(Debug, Subcommand)]
+enum DiscordSubcommand {
+    Status,
+    List,
+    Allow {
+        #[arg(value_name = "user_id")]
+        user_id: u64,
+    },
+    Deny {
+        #[arg(value_name = "user_id")]
+        user_id: u64,
+    },
+    Autostart {
+        // `bool` would default to a `--on` flag; override the action
+        // so clap treats it as a positional carrying our parsed value.
+        #[arg(value_name = "on|off", action = ArgAction::Set, value_parser = parse_on_off)]
+        value: bool,
+    },
+}
+
+/// Accept the operator-friendly `on` / `off` literals (plus the more
+/// explicit `true` / `false`) for `/discord autostart`. Anything else
+/// errors so a typo doesn't silently flip the boot flag.
+fn parse_on_off(raw: &str) -> Result<bool, String> {
+    match raw.to_ascii_lowercase().as_str() {
+        "on" | "true" => Ok(true),
+        "off" | "false" => Ok(false),
+        other => Err(format!("expected 'on' or 'off', got {other:?}")),
+    }
+}
+
 impl TryFrom<RawCommand> for SlashCommand {
     type Error = String;
 
@@ -216,6 +275,7 @@ impl TryFrom<RawCommand> for SlashCommand {
             }),
             RawCommand::Heartbeat(args) => Ok(Self::Heartbeat(args.into())),
             RawCommand::Cron(args) => Ok(Self::Cron(args.into())),
+            RawCommand::Discord(args) => Ok(Self::Discord(args.into())),
             RawCommand::External(raw) => external_command(&raw),
         }
     }
@@ -265,6 +325,23 @@ impl From<CronArgs> for CronCommand {
             Some(CronSubcommand::Enable { id }) => Self::Enable { id },
             Some(CronSubcommand::Disable { id }) => Self::Disable { id },
             Some(CronSubcommand::Remove { id }) => Self::Remove { id },
+        }
+    }
+}
+
+impl From<DiscordArgs> for DiscordCommand {
+    fn from(value: DiscordArgs) -> Self {
+        match value.command {
+            // No args toggles the connection: typing `/discord`
+            // alone is the single switch — the response message
+            // reports the new state so users see the result of
+            // every flip without consulting `/discord status`.
+            None => Self::Toggle,
+            Some(DiscordSubcommand::Status) => Self::Status,
+            Some(DiscordSubcommand::List) => Self::List,
+            Some(DiscordSubcommand::Allow { user_id }) => Self::Allow { user_id },
+            Some(DiscordSubcommand::Deny { user_id }) => Self::Deny { user_id },
+            Some(DiscordSubcommand::Autostart { value }) => Self::Autostart { on: value },
         }
     }
 }
@@ -374,6 +451,44 @@ mod tests {
                 id: "job-1".to_string(),
             })
         );
+        assert_eq!(
+            parse("discord").unwrap(),
+            SlashCommand::Discord(DiscordCommand::Toggle)
+        );
+        assert_eq!(
+            parse("discord status").unwrap(),
+            SlashCommand::Discord(DiscordCommand::Status)
+        );
+        // `enable` / `disable` were folded into the toggle; the
+        // parser must reject them so a stale habit doesn't silently
+        // map to the External fallback.
+        assert!(parse("discord enable").is_err());
+        assert!(parse("discord disable").is_err());
+        assert_eq!(
+            parse("discord autostart on").unwrap(),
+            SlashCommand::Discord(DiscordCommand::Autostart { on: true })
+        );
+        assert_eq!(
+            parse("discord autostart off").unwrap(),
+            SlashCommand::Discord(DiscordCommand::Autostart { on: false })
+        );
+        assert!(parse("discord autostart maybe").is_err());
+        assert_eq!(
+            parse("discord list").unwrap(),
+            SlashCommand::Discord(DiscordCommand::List)
+        );
+        assert_eq!(
+            parse("discord allow 123456789012345678").unwrap(),
+            SlashCommand::Discord(DiscordCommand::Allow {
+                user_id: 123_456_789_012_345_678,
+            })
+        );
+        assert_eq!(
+            parse("discord deny 42").unwrap(),
+            SlashCommand::Discord(DiscordCommand::Deny { user_id: 42 })
+        );
+        assert!(parse("discord allow not-a-number").is_err());
+        assert!(parse("discord allow").is_err());
     }
 
     #[test]

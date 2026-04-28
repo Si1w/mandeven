@@ -55,7 +55,8 @@ use crate::tools::heartbeat::{
 };
 
 use self::command::{
-    AgentCommandCtx, format_compact_report, run_cron_command, run_heartbeat_command,
+    AgentCommandCtx, format_compact_report, run_cron_command, run_discord_command,
+    run_heartbeat_command,
 };
 
 /// Upper bound on completion tokens for title generation.
@@ -109,6 +110,10 @@ pub struct Agent {
     /// Receiver paired with the cron engine. Raced against `inbox`
     /// (and the heartbeat receiver, when present) in [`Agent::run`].
     cron_rx: Option<mpsc::Receiver<cron::CronTick>>,
+    /// Discord adapter control handle, present iff the channel was
+    /// registered. Cloned into [`AgentCommandCtx`] so `/discord
+    /// allow|deny|list` can mutate the runtime allow list.
+    discord: Option<crate::channels::discord::DiscordControl>,
     /// Live view of the gateway's per-channel session bindings.
     /// Heartbeat ticks read this to land in the user's main session
     /// rather than running isolated; written only by the gateway.
@@ -222,6 +227,16 @@ pub struct CronWiring {
     pub rx: mpsc::Receiver<cron::CronTick>,
 }
 
+/// Options for the optional Discord wiring. Carries only the runtime
+/// control handle — Discord has no tick stream, just the
+/// allowlist mutator. Threaded into [`Agent::new`] alongside
+/// [`HeartbeatWiring`] / [`CronWiring`] so all three optional
+/// subsystems follow the same registration shape.
+pub struct DiscordWiring {
+    /// Allowlist mutator, cloned into [`AgentCommandCtx`].
+    pub control: crate::channels::discord::DiscordControl,
+}
+
 /// Single iteration of the agent's `select!` loop. Names what was
 /// chosen so [`Agent::run`]'s `match` reads as a state machine.
 enum Event {
@@ -264,6 +279,7 @@ impl Agent {
         active_sessions: ActiveSessions,
         heartbeat: Option<HeartbeatWiring>,
         cron: Option<CronWiring>,
+        discord: Option<DiscordWiring>,
         prompt: Arc<PromptEngine>,
         hook: Arc<HookEngine>,
         cwd: PathBuf,
@@ -279,6 +295,7 @@ impl Agent {
             Some(CronWiring { engine, rx }) => (Some(engine), Some(rx)),
             None => (None, None),
         };
+        let discord_handle = discord.map(|w| w.control);
 
         Ok(Self {
             model,
@@ -294,6 +311,7 @@ impl Agent {
             heartbeat_rx,
             cron: cron_handle,
             cron_rx,
+            discord: discord_handle,
             active_sessions,
             compact_config: cfg.agent.compact.clone(),
             compact_state: Arc::new(AsyncMutex::new(CompactState::new())),
@@ -640,6 +658,8 @@ impl Agent {
             session: session.clone(),
             heartbeat: self.heartbeat.clone(),
             cron: self.cron.clone(),
+            discord: self.discord.clone(),
+            app_config: self.app_config.clone(),
         };
 
         let payload = match parsed {
@@ -653,6 +673,14 @@ impl Agent {
                 }
             },
             SlashCommand::Cron(command) => match run_cron_command(command, &ctx).await {
+                CommandOutcome::Completed => return Ok(()),
+                CommandOutcome::Feedback(msg) => OutboundPayload::Notice(msg),
+                CommandOutcome::Exit => {
+                    eprintln!("[agent] command {body:?} returned Exit at agent layer; ignoring");
+                    return Ok(());
+                }
+            },
+            SlashCommand::Discord(command) => match run_discord_command(command, &ctx).await {
                 CommandOutcome::Completed => return Ok(()),
                 CommandOutcome::Feedback(msg) => OutboundPayload::Notice(msg),
                 CommandOutcome::Exit => {

@@ -15,9 +15,10 @@ use std::sync::Arc;
 
 use tokio::sync::Mutex;
 
-use mandeven::agent::{Agent, CronWiring, HeartbeatWiring};
+use mandeven::agent::{Agent, CronWiring, DiscordWiring, HeartbeatWiring};
 use mandeven::bus::{Bus, ChannelID};
 use mandeven::channels::Manager;
+use mandeven::channels::discord::{self, DiscordChannel};
 use mandeven::cli::CliChannel;
 use mandeven::config::{self, AppConfig};
 use mandeven::cron::CronEngine;
@@ -33,6 +34,9 @@ use mandeven::utils::workspace;
 
 /// Identifier for the built-in TUI channel.
 const TUI_CHANNEL: &str = "tui";
+
+/// Identifier for the Discord channel adapter.
+const DISCORD_CHANNEL: &str = "discord";
 
 /// Boxed error alias used at the `main` boundary.
 type DynError = Box<dyn std::error::Error + Send + Sync>;
@@ -119,6 +123,11 @@ async fn main() -> Result<(), DynError> {
         None
     };
 
+    let (discord_channel, discord_wiring) = build_discord(&cfg).await?;
+    let discord_active_rx = discord_wiring
+        .as_ref()
+        .map(|w| w.control.subscribe_active());
+
     let agent = Agent::new(
         &cfg,
         sessions.clone(),
@@ -128,6 +137,7 @@ async fn main() -> Result<(), DynError> {
         active_sessions.clone(),
         heartbeat_wiring,
         cron_wiring,
+        discord_wiring,
         prompts,
         hooks,
         cwd,
@@ -147,7 +157,12 @@ async fn main() -> Result<(), DynError> {
         sessions,
         skill_index,
         cfg.tui.show_thinking,
+        discord_active_rx,
     )));
+
+    if let Some(channel) = discord_channel {
+        manager.register(Arc::new(channel));
+    }
 
     let agent_handle = tokio::spawn(agent.run());
     let gateway_handle = tokio::spawn(gateway.run());
@@ -155,4 +170,45 @@ async fn main() -> Result<(), DynError> {
     agent_handle.await??;
     gateway_handle.await??;
     Ok(())
+}
+
+/// Resolve the Discord channel + control pair from config.
+///
+/// Returns `(None, None)` when `[channels.discord]` is absent (the
+/// user has not opted into Discord at all). When the section exists
+/// the channel is **always** built — `enabled = true` only triggers
+/// an auto-enable here so the connection is open at boot. The user
+/// can flip the gateway connection at runtime via `/discord
+/// enable|disable` in either case.
+///
+/// Pulled out of `main` to keep the bootstrap sequence linear and
+/// stay under the `too_many_lines` lint threshold.
+async fn build_discord(
+    cfg: &AppConfig,
+) -> Result<(Option<DiscordChannel>, Option<DiscordWiring>), DynError> {
+    let Some(discord_cfg) = cfg.channels.discord.as_ref() else {
+        return Ok((None, None));
+    };
+    let store_path = discord::allowlist_path(&cfg.data_dir());
+    let initial_allowed = discord::store::load(&store_path).await.map_err(|err| {
+        format!(
+            "failed to load discord allowlist from {}: {err}",
+            store_path.display()
+        )
+    })?;
+    let (channel, control) = DiscordChannel::build(
+        ChannelID::new(DISCORD_CHANNEL),
+        discord_cfg,
+        initial_allowed,
+        store_path,
+    );
+    if discord_cfg.enabled
+        && let Err(err) = control.enable().await
+    {
+        return Err(format!(
+            "discord auto-enable failed (set channels.discord.enabled = false to skip): {err}"
+        )
+        .into());
+    }
+    Ok((Some(channel), Some(DiscordWiring { control })))
 }

@@ -47,8 +47,9 @@ impl Manager {
     /// Consume `self`: spawn each registered channel's
     /// `start(inbound.clone())`, then loop on the outbound bus
     /// delivering messages via `channel.send`. Returns when the
-    /// outbound bus closes (i.e. the agent drops its sender), after
-    /// joining every channel task.
+    /// outbound bus closes (i.e. the agent drops its sender) or when
+    /// any channel listener exits, aborting the remaining listeners so
+    /// the inbound sender drop chain can finish.
     ///
     /// Messages whose [`ChannelID`] is not registered are logged and
     /// dropped. A `send()` failure is logged — the channel stays in
@@ -100,42 +101,133 @@ impl Manager {
         }
         drop(inbound);
 
-        // Outbound routing loop.
-        while let Some(msg) = outbound_rx.recv().await {
-            let target = msg.channel.clone();
-            match channels.get(&target) {
-                Some(ch) => {
-                    if let Err(err) = ch.send(msg).await {
-                        eprintln!("[channels] send to {target:?} failed: {err}");
+        let mut first_err: Option<Error> = None;
+
+        // Outbound routing loop. Also watch listener completion: the
+        // TUI exiting is the user's shutdown signal, and passive
+        // external listeners (for example inactive Discord) would
+        // otherwise keep their inbound sender clone alive forever.
+        loop {
+            tokio::select! {
+                maybe_msg = outbound_rx.recv() => {
+                    let Some(msg) = maybe_msg else {
+                        break;
+                    };
+                    let target = msg.channel.clone();
+                    match channels.get(&target) {
+                        Some(ch) => {
+                            if let Err(err) = ch.send(msg).await {
+                                eprintln!("[channels] send to {target:?} failed: {err}");
+                            }
+                        }
+                        None => {
+                            eprintln!("[channels] outbound for unregistered channel {target:?} dropped");
+                        }
                     }
                 }
-                None => {
-                    eprintln!("[channels] outbound for unregistered channel {target:?} dropped");
+                join_res = listeners.join_next(), if !listeners.is_empty() => {
+                    record_listener_result(join_res, &mut first_err);
+                    break;
                 }
             }
         }
 
-        // Outbound closed — wait for every listener to finish.
-        let mut first_err: Option<Error> = None;
+        // Once shutdown starts, stop any passive listeners that are
+        // still parked on their source. Dropping their inbound sender
+        // clones lets the gateway and agent wind down.
+        listeners.abort_all();
         while let Some(join_res) = listeners.join_next().await {
-            match join_res {
-                Ok(Ok(())) => {}
-                Ok(Err(err)) => {
-                    if first_err.is_none() {
-                        first_err = Some(err);
-                    } else {
-                        eprintln!("[channels] channel listener error: {err}");
-                    }
-                }
-                Err(join_err) => {
-                    eprintln!("[channels] channel task join failed: {join_err}");
-                }
-            }
+            record_listener_result(Some(join_res), &mut first_err);
         }
 
         match first_err {
             Some(err) => Err(err),
             None => Ok(()),
         }
+    }
+}
+
+fn record_listener_result(
+    join_res: Option<std::result::Result<Result<()>, tokio::task::JoinError>>,
+    first_err: &mut Option<Error>,
+) {
+    match join_res {
+        Some(Ok(Ok(()))) | None => {}
+        Some(Ok(Err(err))) => {
+            if first_err.is_none() {
+                *first_err = Some(err);
+            } else {
+                eprintln!("[channels] channel listener error: {err}");
+            }
+        }
+        Some(Err(join_err)) if join_err.is_cancelled() => {}
+        Some(Err(join_err)) => {
+            eprintln!("[channels] channel task join failed: {join_err}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use async_trait::async_trait;
+
+    use super::{Channel, Manager};
+    use crate::bus::{Bus, ChannelID, InboundSender, OutboundMessage};
+    use crate::channels::Result;
+
+    #[derive(Clone, Copy)]
+    enum StartMode {
+        Immediate,
+        Pending,
+    }
+
+    struct TestChannel {
+        id: ChannelID,
+        mode: StartMode,
+    }
+
+    impl TestChannel {
+        fn new(id: &str, mode: StartMode) -> Self {
+            Self {
+                id: ChannelID::new(id),
+                mode,
+            }
+        }
+    }
+
+    #[async_trait]
+    impl Channel for TestChannel {
+        fn id(&self) -> &ChannelID {
+            &self.id
+        }
+
+        async fn start(&self, _inbound: InboundSender) -> Result<()> {
+            match self.mode {
+                StartMode::Immediate => Ok(()),
+                StartMode::Pending => std::future::pending().await,
+            }
+        }
+
+        async fn send(&self, _msg: OutboundMessage) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn run_exits_when_any_listener_returns() {
+        let (bus, _inbound_rx, outbound_rx) = Bus::new();
+        let inbound = bus.inbound_sender();
+        let _outbound_tx = bus.outbound_sender();
+        let mut manager = Manager::new(outbound_rx);
+        manager.register(Arc::new(TestChannel::new("done", StartMode::Immediate)));
+        manager.register(Arc::new(TestChannel::new("parked", StartMode::Pending)));
+
+        tokio::time::timeout(Duration::from_secs(1), manager.run(inbound))
+            .await
+            .expect("manager should not wait for parked listener")
+            .expect("manager should exit cleanly");
     }
 }

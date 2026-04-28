@@ -39,12 +39,66 @@ pub struct AppConfig {
     #[serde(default)]
     pub sandbox: SandboxConfig,
 
+    /// External channel adapters. Optional in TOML; missing section
+    /// leaves every adapter disabled and only the local TUI channel
+    /// is registered.
+    #[serde(default)]
+    pub channels: ChannelsConfig,
+
     /// Filesystem path this config was loaded from. Populated by
     /// [`AppConfig::from_file`] / [`AppConfig::load`], empty for
     /// in-memory construction. Diagnostic only — runtime data
     /// directories resolve through [`paths::home_dir`] regardless.
     #[serde(skip)]
     pub(crate) source_path: PathBuf,
+}
+
+/// External / network channel adapters.
+///
+/// Every field is optional so users can enable channels one at a time
+/// without listing the rest. A missing or `enabled = false` block
+/// keeps the adapter from being registered at boot.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct ChannelsConfig {
+    /// Discord adapter. See [`DiscordConfig`].
+    pub discord: Option<DiscordConfig>,
+}
+
+/// Discord adapter configuration.
+///
+/// MS0 scope: DM-only with a runtime-mutable allowlist + runtime
+/// enable/disable. Server / guild channels are not supported.
+///
+/// Section semantics:
+/// - **Section absent** ⇒ Discord adapter is not registered at all
+///   and `/discord ...` returns a "not configured" notice.
+/// - **Section present** ⇒ adapter is always registered; `enabled`
+///   only chooses whether the gateway connection is opened at boot.
+///   `/discord enable|disable` toggles the connection at runtime
+///   without a restart.
+///
+/// The allowed-user list and the resolved bot token never live here;
+/// see [`crate::channels::discord`] for where they are persisted.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct DiscordConfig {
+    /// Auto-start the gateway connection at boot. Defaults to
+    /// `false` so `[channels.discord]` (empty body) registers the
+    /// adapter without auto-connecting — the user runs `/discord
+    /// enable` when ready. Setting `true` connects on launch.
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Name of the environment variable that holds the bot token.
+    /// Defaults to `DISCORD_BOT_TOKEN`. The token itself never lives
+    /// in `mandeven.toml` so the file stays safe to commit. Re-read
+    /// on every `/discord enable` so token rotation works without
+    /// a restart.
+    #[serde(default = "default_discord_token_env")]
+    pub token_env: String,
+}
+
+fn default_discord_token_env() -> String {
+    "DISCORD_BOT_TOKEN".to_string()
 }
 
 /// Terminal UI preferences.

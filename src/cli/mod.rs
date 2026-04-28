@@ -154,6 +154,13 @@ pub struct CliState {
     /// `/<name>` fallback hits the live `Arc<SkillIndex>` on
     /// [`CliChannel`] directly.
     pub skills: Vec<(String, String)>,
+    /// Watch receiver for the Discord adapter's `active` flag, when
+    /// the channel is configured. The TUI top bar reads `*rx.borrow()`
+    /// each render to decide whether to show the green "discord"
+    /// badge; a background task in [`CliChannel::start`] notifies
+    /// the redraw signal whenever the value flips so the badge
+    /// updates without a user keystroke.
+    pub discord_active: Option<tokio::sync::watch::Receiver<bool>>,
 }
 
 impl Default for CliState {
@@ -179,6 +186,7 @@ impl Default for CliState {
             scroll_offset: 0,
             follow_bottom: true,
             skills: Vec::new(),
+            discord_active: None,
         }
     }
 }
@@ -301,6 +309,7 @@ impl CliChannel {
         sessions: Arc<session::Manager>,
         skills: Arc<crate::skill::SkillIndex>,
         show_thinking: bool,
+        discord_active: Option<tokio::sync::watch::Receiver<bool>>,
     ) -> Self {
         let skill_snapshot: Vec<(String, String)> = skills
             .entries()
@@ -309,6 +318,7 @@ impl CliChannel {
         let state = CliState {
             skills: skill_snapshot,
             show_thinking,
+            discord_active,
             ..CliState::default()
         };
         Self {
@@ -347,6 +357,19 @@ impl Channel for CliChannel {
             }
             Ok::<_, io::Error>(())
         });
+
+        // Discord-state watcher: whenever `/discord` (or an
+        // unsolicited gateway disconnect inside the supervisor loop)
+        // flips the active flag, prod the redraw signal so the top
+        // bar's green badge stays in sync without a user keystroke.
+        if let Some(mut rx) = self.state.lock().unwrap().discord_active.clone() {
+            let redraw = self.redraw.clone();
+            tokio::spawn(async move {
+                while rx.changed().await.is_ok() {
+                    redraw.notify_one();
+                }
+            });
+        }
 
         // Paint the first frame before any input arrives.
         self.redraw.notify_one();
@@ -728,7 +751,8 @@ impl CliChannel {
             | SlashCommand::Switch(_)
             | SlashCommand::Compact { .. }
             | SlashCommand::Heartbeat(_)
-            | SlashCommand::Cron(_) => self.forward_command(body, inbound).await,
+            | SlashCommand::Cron(_)
+            | SlashCommand::Discord(_) => self.forward_command(body, inbound).await,
         }
     }
 
@@ -997,6 +1021,7 @@ mod tests {
             sessions,
             Arc::new(SkillIndex::new()),
             true,
+            None,
         );
         channel.state.lock().unwrap().open_overlay(Overlay::Help);
 

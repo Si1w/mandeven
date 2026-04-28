@@ -3,14 +3,17 @@
 //! Parsing lives in [`crate::command::slash`]. This module receives typed
 //! command enums and applies them to agent-owned state.
 
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use super::compact::CompactReport;
 use crate::bus::{ChannelID, SessionID};
+use crate::channels::discord::DiscordControl;
 use crate::command::CommandOutcome;
 use crate::command::slash::{
-    CronCommand as ParsedCronCommand, HeartbeatCommand as ParsedHeartbeatCommand,
+    CronCommand as ParsedCronCommand, DiscordCommand as ParsedDiscordCommand,
+    HeartbeatCommand as ParsedHeartbeatCommand,
 };
+use crate::config::AppConfig;
 use crate::cron::{CronEngine, CronJob, CronStatus, RunStatus};
 use crate::heartbeat::{HeartbeatEngine, HeartbeatStatus};
 
@@ -27,6 +30,15 @@ pub struct AgentCommandCtx {
     /// Cron engine handle, present iff the agent has cron enabled.
     /// `/cron` subcommands list, trigger, and pause jobs through it.
     pub cron: Option<Arc<CronEngine>>,
+    /// Discord allowlist control, present iff the Discord channel is
+    /// registered. `/discord` subcommands mutate the runtime allow
+    /// list and persist to the JSON sidecar through it.
+    pub discord: Option<DiscordControl>,
+    /// Live `mandeven.toml` view. `/discord autostart on|off`
+    /// mutates `channels.discord.enabled` through this handle and
+    /// flushes the file via [`AppConfig::save`] — same lock + same
+    /// rollback pattern as `/switch default`.
+    pub app_config: Arc<RwLock<AppConfig>>,
 }
 
 pub async fn run_heartbeat_command(
@@ -61,6 +73,107 @@ pub async fn run_heartbeat_command(
             CommandOutcome::Feedback(format!("heartbeat interval set to {seconds}s"))
         }
     }
+}
+
+pub async fn run_discord_command(
+    command: ParsedDiscordCommand,
+    ctx: &AgentCommandCtx,
+) -> CommandOutcome {
+    let Some(control) = ctx.discord.as_ref() else {
+        return CommandOutcome::Feedback(
+            "discord channel not configured (add [channels.discord] to mandeven.toml)".into(),
+        );
+    };
+
+    match command {
+        ParsedDiscordCommand::Toggle => toggle_discord(control).await,
+        ParsedDiscordCommand::Status => CommandOutcome::Feedback(format_discord_status(control)),
+        ParsedDiscordCommand::List => CommandOutcome::Feedback(format_discord_list(control)),
+        ParsedDiscordCommand::Allow { user_id } => match control.allow(user_id).await {
+            Ok(true) => CommandOutcome::Feedback(format!("discord: user {user_id} allowed")),
+            Ok(false) => {
+                CommandOutcome::Feedback(format!("discord: user {user_id} already allowed"))
+            }
+            Err(err) => CommandOutcome::Feedback(format!("allow failed: {err}")),
+        },
+        ParsedDiscordCommand::Deny { user_id } => match control.deny(user_id).await {
+            Ok(true) => CommandOutcome::Feedback(format!("discord: user {user_id} denied")),
+            Ok(false) => {
+                CommandOutcome::Feedback(format!("discord: user {user_id} was not in allow list"))
+            }
+            Err(err) => CommandOutcome::Feedback(format!("deny failed: {err}")),
+        },
+        ParsedDiscordCommand::Autostart { on } => persist_discord_autostart(&ctx.app_config, on),
+    }
+}
+
+/// Flip the Discord gateway connection. Reads the current desired
+/// state and inverts it; the response reports the new state so the
+/// user sees the result without a separate `/discord status` call.
+async fn toggle_discord(control: &DiscordControl) -> CommandOutcome {
+    if control.status().active {
+        let _ = control.disable();
+        CommandOutcome::Feedback("[INFO] discord channel stopped".into())
+    } else {
+        match control.enable().await {
+            Ok(_) => CommandOutcome::Feedback("[INFO] discord channel started".into()),
+            Err(err) => CommandOutcome::Feedback(format!("enable failed: {err}")),
+        }
+    }
+}
+
+/// Mutate `[channels.discord].enabled` and atomically rewrite
+/// `mandeven.toml`. Mirrors the rollback discipline of
+/// [`super::Agent::switch_default_model`]: revert the in-memory edit
+/// when [`AppConfig::save`] fails so config-on-disk and the cached
+/// view stay in sync.
+fn persist_discord_autostart(app_config: &Arc<RwLock<AppConfig>>, on: bool) -> CommandOutcome {
+    let mut cfg = app_config.write().expect("config lock poisoned");
+    let Some(discord) = cfg.channels.discord.as_mut() else {
+        return CommandOutcome::Feedback(
+            "discord channel not configured (add [channels.discord] to mandeven.toml)".into(),
+        );
+    };
+    if discord.enabled == on {
+        let state = if on { "on" } else { "off" };
+        return CommandOutcome::Feedback(format!("discord: autostart already {state}"));
+    }
+    let previous = discord.enabled;
+    discord.enabled = on;
+    if let Err(err) = cfg.save() {
+        if let Some(d) = cfg.channels.discord.as_mut() {
+            d.enabled = previous;
+        }
+        return CommandOutcome::Feedback(format!("autostart persist failed: {err}"));
+    }
+    let state = if on { "on" } else { "off" };
+    CommandOutcome::Feedback(format!(
+        "discord: autostart {state} (mandeven.toml updated)"
+    ))
+}
+
+/// One-line snapshot rendered by `/discord` (no args). Mirrors the
+/// `/heartbeat` style.
+fn format_discord_status(control: &DiscordControl) -> String {
+    let s = control.status();
+    let state = if s.active { "enabled" } else { "disabled" };
+    format!("discord: {state} · allow list: {} user(s)", s.allowed_count)
+}
+
+/// Render the current Discord allow list as a multi-line block, one
+/// id per line. Header summarizes count.
+fn format_discord_list(control: &DiscordControl) -> String {
+    use std::fmt::Write as _;
+
+    let ids = control.list();
+    if ids.is_empty() {
+        return "discord: allow list is empty (no one can DM the bot)".to_string();
+    }
+    let mut out = format!("discord: {} allowed user(s)", ids.len());
+    for id in ids {
+        let _ = write!(out, "\n  {id}");
+    }
+    out
 }
 
 pub async fn run_cron_command(command: ParsedCronCommand, ctx: &AgentCommandCtx) -> CommandOutcome {

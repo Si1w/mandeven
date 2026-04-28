@@ -70,11 +70,47 @@ Registered automatically and advertised to the model on every turn.
 ## 📡 Channels
 
 The agent talks to the user through a pluggable channel layer.
-One channel ships today; the registry is designed to grow.
 
-| Channel | Status |
-| ------- | ------ |
-| `tui`   | built-in ratatui terminal UI |
+| Channel   | Status                                          |
+| --------- | ----------------------------------------------- |
+| `tui`     | built-in ratatui terminal UI                    |
+| `discord` | DM-only adapter, opt-in via `[channels.discord]`|
+
+### Discord
+
+DM-only with a runtime-mutable allowlist. The bot only responds to
+direct messages from user ids you explicitly allow; guild channels
+are ignored. Set up:
+
+1. Create an application + bot at <https://discord.com/developers/applications>,
+   enable the **MESSAGE CONTENT** privileged intent, copy the token.
+2. Invite the bot to a server you share with it (Discord requires a
+   shared guild before users can DM a bot).
+3. Add the section to `~/.mandeven/mandeven.toml`:
+
+   ```toml
+   [channels.discord]
+   enabled   = false   # boot-time auto-connect
+   token_env = "DISCORD_BOT_TOKEN"
+   ```
+
+4. `export DISCORD_BOT_TOKEN=<your token>`, then run `mandeven`.
+
+In the TUI:
+
+| Command                       | Effect                                                     |
+| ----------------------------- | ---------------------------------------------------------- |
+| `/discord`                    | Toggle the gateway connection (off → on, on → off)         |
+| `/discord status`             | Show enabled/disabled + allow-list count                   |
+| `/discord allow <user_id>`    | Add a Discord user id to the allow list (persists)         |
+| `/discord deny <user_id>`     | Remove a user id (persists)                                |
+| `/discord list`               | Show current allow list                                    |
+| `/discord autostart on\|off`  | Persist `enabled` in `mandeven.toml` for next launch       |
+
+The allow list lives in `~/.mandeven/discord/allowlist.json`
+(separate from `mandeven.toml` so runtime mutations don't churn the
+config file). When the connection is open, the TUI top bar shows a
+green `discord` badge.
 
 ## 🧩 Extra features
 

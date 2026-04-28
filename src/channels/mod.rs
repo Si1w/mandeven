@@ -31,6 +31,8 @@
 // worth noting here: add when a concrete driver appears (think-tag
 // stripping, tool-call auditing, per-delta metrics).
 
+pub mod common;
+pub mod discord;
 pub mod error;
 pub mod manager;
 

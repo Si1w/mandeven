@@ -233,6 +233,7 @@ mod tests {
             },
             agent: AgentConfig::default(),
             sandbox: crate::security::SandboxConfig::default(),
+            channels: crate::config::ChannelsConfig::default(),
             source_path: std::path::PathBuf::new(),
         };
 

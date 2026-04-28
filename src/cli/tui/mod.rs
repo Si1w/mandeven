@@ -24,7 +24,7 @@ const LIVE_PREFIX_COLS: u16 = 2;
 const PROMPT_MARKER: &str = "›";
 const PROMPT_PREFIX: &str = "› ";
 const CONTINUATION_PREFIX: &str = "  ";
-const HELP_BODY_LINES: u16 = 21;
+const HELP_BODY_LINES: u16 = 27;
 const HELP_LABEL_WIDTH: usize = 28;
 const QUEUED_PREVIEW_LIMIT: usize = 3;
 
@@ -73,13 +73,30 @@ fn render_header(f: &mut Frame<'_>, area: Rect, state: &CliState) {
         "history"
     };
 
-    let mut lines = vec![Line::from(vec![
+    let mut top_spans = vec![
         Span::raw(" "),
         Span::styled("Mandeven", brand_style()),
         Span::styled("  local agent", dim_style()),
         Span::styled("  ·  ", dim_style()),
         Span::styled(view, dim_style()),
-    ])];
+    ];
+    // Discord badge — visible only when the adapter is configured
+    // AND its `active` flag is currently true. The watch receiver
+    // is read lock-free; the background task in `CliChannel::start`
+    // triggers a redraw on every transition so this stays fresh.
+    let discord_active = state.discord_active.as_ref().is_some_and(|rx| *rx.borrow());
+    if discord_active {
+        top_spans.extend([
+            Span::styled("  ·  ", dim_style()),
+            Span::styled(
+                "discord",
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]);
+    }
+    let mut lines = vec![Line::from(top_spans)];
 
     if area.height > 1 {
         lines.push(Line::from(vec![
@@ -664,6 +681,15 @@ fn build_help_text() -> Text<'static> {
         help_entry("/compact [focus]", "compact conversation history"),
         help_entry("/heartbeat", "show or control heartbeat"),
         help_entry("/cron", "list or control cron jobs"),
+        help_entry("/discord", "toggle Discord gateway connection"),
+        help_entry("/discord status", "show enabled/disabled + allow count"),
+        help_entry("/discord list", "show Discord allow list"),
+        help_entry("/discord allow <id>", "add user id to allow list"),
+        help_entry("/discord deny <id>", "remove user id from allow list"),
+        help_entry(
+            "/discord autostart on|off",
+            "persist boot-time enabled flag",
+        ),
         help_entry("/exit", "quit"),
         Line::raw(""),
         section_header("Keys"),

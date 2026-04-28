@@ -20,7 +20,9 @@ use std::path::PathBuf;
 use std::str::FromStr;
 
 use super::error::{ConfigError, Result};
-use super::types::{AgentConfig, AppConfig, LLMConfig, LLMProfile, TuiConfig};
+use super::types::{
+    AgentConfig, AppConfig, ChannelsConfig, DiscordConfig, LLMConfig, LLMProfile, TuiConfig,
+};
 use crate::llm::providers;
 
 /// Drive the interactive bootstrap flow and return the user-constructed
@@ -88,6 +90,16 @@ pub(super) fn interactive() -> Result<AppConfig> {
         tui: TuiConfig::default(),
         agent: AgentConfig::default(),
         sandbox: crate::security::SandboxConfig::default(),
+        // Seed `[channels.discord]` even though the bot is off by
+        // default. The section's mere presence opts the user into the
+        // adapter, so `/discord enable` works on day one without the
+        // user having to hand-edit `mandeven.toml`.
+        channels: ChannelsConfig {
+            discord: Some(DiscordConfig {
+                enabled: false,
+                token_env: "DISCORD_BOT_TOKEN".to_string(),
+            }),
+        },
         source_path: PathBuf::new(),
     })
 }

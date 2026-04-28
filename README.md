@@ -66,6 +66,8 @@ Registered automatically and advertised to the model on every turn.
 | File       | Read regular UTF-8 files up to 5 MiB; write/edit inside the workspace; content search |
 | Shell      | Run commands with read-only allow-listing or workspace-write deny-listing; not an OS sandbox |
 | Web        | DuckDuckGo search and URL fetch with HTML→Markdown + SSRF guard |
+| Task       | In-session progress ledger (create / update / list / get) for multi-step plans |
+| Cron       | Manage scheduled prompts (create / update / list / get / delete / trigger); paired with the user-facing `/cron` command |
 
 ## 📡 Channels
 

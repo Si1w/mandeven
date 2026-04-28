@@ -29,6 +29,7 @@ use mandeven::prompt::PromptEngine;
 use mandeven::security::SandboxPolicy;
 use mandeven::session;
 use mandeven::skill::{self, SkillIndex};
+use mandeven::task;
 use mandeven::tools;
 use mandeven::utils::workspace;
 
@@ -92,12 +93,6 @@ async fn main() -> Result<(), DynError> {
     drop(bus);
     let (dispatch_tx, dispatch_rx) = dispatch_channel();
 
-    let mut tool_registry = tools::Registry::new();
-    tools::register_builtins(&mut tool_registry);
-    if !skill_index.is_empty() {
-        tool_registry.register(Arc::new(tools::skill::SkillTool::new(skill_index.clone())));
-    }
-
     // Shared per-channel session map: gateway is the writer, the
     // agent reads it (heartbeat tick path) so heartbeat ticks land in
     // the user's main session rather than spinning up an isolated one.
@@ -122,6 +117,17 @@ async fn main() -> Result<(), DynError> {
     } else {
         None
     };
+
+    let mut tool_registry = tools::Registry::new();
+    tools::register_builtins(&mut tool_registry);
+    let task_manager = Arc::new(task::Manager::new(&config::project_bucket(&cwd)));
+    tools::task::register(&mut tool_registry, task_manager);
+    if let Some(wiring) = cron_wiring.as_ref() {
+        tools::cron::register(&mut tool_registry, wiring.engine.clone());
+    }
+    if !skill_index.is_empty() {
+        tool_registry.register(Arc::new(tools::skill::SkillTool::new(skill_index.clone())));
+    }
 
     let (discord_channel, discord_wiring) = build_discord(&cfg).await?;
     let discord_active_rx = discord_wiring

@@ -9,9 +9,13 @@
 //! than a source rebuild.
 //!
 //! Tool names referenced in [`USING_TOOLS`] (`file_read`, `file_write`,
-//! `file_edit`, `grep`, `shell`, `web_search`, `web_fetch`) must stay
-//! in sync with `crate::tools::register_builtins`. Rename a tool there
-//! and you have to rename it here too.
+//! `file_edit`, `grep`, `shell`, `web_search`, `web_fetch`,
+//! `task_create`, `task_update`, `task_list`, `task_get`,
+//! `cron_create`, `cron_update`, `cron_list`, `cron_get`,
+//! `cron_delete`, `cron_trigger`) must stay in sync with
+//! `crate::tools::register_builtins` plus the task/cron tool
+//! registration in `main.rs`. Rename a tool there and you have to
+//! rename it here too.
 
 /// Section name for the agent identity / first-principles framing.
 pub const INTRO_NAME: &str = "intro";
@@ -153,6 +157,18 @@ echo redirection.
 through `shell`.
   - To search the web use `web_search`; to fetch a specific URL use \
 `web_fetch`.
+  - For complex multi-step work, use `task_create`, `task_update`, \
+`task_list`, and `task_get` as your internal progress ledger. These \
+are model-facing tools, not user slash commands. Create tasks for \
+multiple requirements or 3+ meaningful steps; mark a task \
+`in_progress` before starting it; mark it `completed` only when fully \
+done; use dependencies when work is blocked by another task.
+  - Use `cron_create`, `cron_update`, `cron_list`, `cron_get`, \
+`cron_delete`, and `cron_trigger` only for explicit user intent to \
+schedule future or recurring autonomous work. Check existing cron jobs \
+before creating duplicates. Cron tools are model-facing; `/cron` is \
+the user-facing governance surface for inspecting, disabling, \
+triggering, and removing schedules.
   - Reserve `shell` for system commands and terminal operations that \
 genuinely require shell execution.
 - You can call multiple tools in a single response. If the calls are \
@@ -224,6 +240,16 @@ mod tests {
             "shell",
             "web_search",
             "web_fetch",
+            "task_create",
+            "task_update",
+            "task_list",
+            "task_get",
+            "cron_create",
+            "cron_update",
+            "cron_list",
+            "cron_get",
+            "cron_delete",
+            "cron_trigger",
         ] {
             assert!(
                 USING_TOOLS.contains(name),

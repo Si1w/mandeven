@@ -135,6 +135,32 @@ impl CronJob {
     }
 }
 
+/// Definition-level edits for an existing cron job.
+///
+/// Runtime fields (`last_run_at`, `last_status`, consecutive errors)
+/// are intentionally absent: callers can change what should run and
+/// whether it is active, but execution history remains engine-owned.
+#[derive(Clone, Debug, Default)]
+pub struct CronJobUpdate {
+    /// Replacement human-readable label.
+    pub name: Option<String>,
+    /// Replacement schedule rule.
+    pub schedule: Option<Schedule>,
+    /// Replacement prompt fed into the agent when the job fires.
+    pub prompt: Option<String>,
+    /// Replacement enabled flag.
+    pub enabled: Option<bool>,
+}
+
+/// Result of applying [`CronJobUpdate`].
+#[derive(Clone, Debug)]
+pub struct CronJobUpdateOutcome {
+    /// Updated job snapshot.
+    pub job: CronJob,
+    /// Definition fields that changed.
+    pub updated_fields: Vec<&'static str>,
+}
+
 fn default_enabled() -> bool {
     true
 }

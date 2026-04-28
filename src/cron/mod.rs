@@ -28,7 +28,9 @@ pub use engine::{AUTO_DISABLE_AFTER, CronEngine};
 pub use error::{Error, Result};
 pub use schedule::{Schedule, ScheduleError};
 pub use store::{Store, StoreFile};
-pub use types::{CronJob, CronJobState, CronStatus, CronTick, RunStatus};
+pub use types::{
+    CronJob, CronJobState, CronJobUpdate, CronJobUpdateOutcome, CronStatus, CronTick, RunStatus,
+};
 
 use serde::{Deserialize, Serialize};
 

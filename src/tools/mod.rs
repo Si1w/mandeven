@@ -12,12 +12,14 @@
 //! Built-in tools live in sibling files ([`mod@file`], [`shell`]) and are
 //! registered in bulk via [`register_builtins`].
 
+pub mod cron;
 pub mod error;
 pub mod file;
 pub mod grep;
 pub mod heartbeat;
 pub mod shell;
 pub mod skill;
+pub mod task;
 pub mod web;
 
 pub use error::{Error, Result};

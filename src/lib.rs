@@ -18,5 +18,6 @@ pub mod prompt;
 pub mod security;
 pub mod session;
 pub mod skill;
+pub mod task;
 pub mod tools;
 pub mod utils;

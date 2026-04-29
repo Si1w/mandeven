@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use schemars::{JsonSchema, schema_for};
+use schemars::schema_for_value;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -30,7 +30,7 @@ pub struct MemoryTool {
     memory: Arc<memory::Manager>,
 }
 
-#[derive(Deserialize, JsonSchema)]
+#[derive(Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
 enum MemoryParams {
     /// Create or update durable memory.
@@ -89,14 +89,14 @@ enum MemoryParams {
     Profile,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, JsonSchema)]
+#[derive(Clone, Copy, Debug, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum ScopeParam {
     Global,
     Project,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, JsonSchema)]
+#[derive(Clone, Copy, Debug, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum KindParam {
     User,
@@ -105,7 +105,7 @@ enum KindParam {
     Reference,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, JsonSchema)]
+#[derive(Clone, Copy, Debug, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum SourceKindParam {
     UserStated,
@@ -179,8 +179,7 @@ impl BaseTool for MemoryTool {
                 when you need full body/details not visible in that snapshot. Use action=profile \
                 to inspect the simple derived user profile."
                 .into(),
-            parameters: serde_json::to_value(schema_for!(MemoryParams))
-                .expect("JsonSchema derive always serializes"),
+            parameters: memory_parameters_schema(),
         }
     }
 
@@ -233,6 +232,44 @@ impl BaseTool for MemoryTool {
             MemoryParams::Profile => self.call_profile().await,
         }
     }
+}
+
+fn memory_parameters_schema() -> Value {
+    let mut schema = serde_json::to_value(schema_for_value!(json!({
+            "action": "remember",
+            "memory_id": "mem_0123456789abcdef",
+            "scope": "global",
+            "kind": "user",
+            "title": "User response preference",
+            "summary": "User prefers concise replies",
+            "body": "Keep responses direct unless the user asks for detail.",
+            "tags": ["style"],
+            "source_kind": "user_stated",
+            "source_quote": "concise please",
+            "review_after": "2026-01-01T00:00:00Z",
+            "query": "concise",
+            "include_archived": false,
+            "limit": 8,
+    })))
+    .expect("schema_for_value output always serializes");
+
+    if let Some(obj) = schema.as_object_mut() {
+        obj.insert("required".to_string(), json!(["action"]));
+        obj.insert("additionalProperties".to_string(), json!(false));
+        if let Some(action) = obj
+            .get_mut("properties")
+            .and_then(Value::as_object_mut)
+            .and_then(|properties| properties.get_mut("action"))
+            .and_then(Value::as_object_mut)
+        {
+            action.insert(
+                "enum".to_string(),
+                json!(["remember", "search", "forget", "profile"]),
+            );
+        }
+    }
+
+    schema
 }
 
 impl MemoryTool {
@@ -463,5 +500,58 @@ mod tests {
         assert_eq!(value["count"], 0);
 
         let _ = tokio::fs::remove_dir_all(dir).await;
+    }
+
+    #[test]
+    fn memory_tool_schema_is_top_level_object() {
+        let dir = tempdir();
+        let tool = MemoryTool {
+            memory: Arc::new(memory::Manager::new(&dir, &dir.join("project"))),
+        };
+        let schema = tool.schema().parameters;
+
+        assert_eq!(schema["type"], "object");
+        assert_eq!(schema["required"], json!(["action"]));
+        assert_eq!(schema["properties"]["action"]["type"], "string");
+        assert_eq!(
+            schema["properties"]["action"]["enum"],
+            json!(["remember", "search", "forget", "profile"])
+        );
+        assert_eq!(schema["properties"]["memory_id"]["type"], "string");
+        assert!(!schema_keyword_exists(&schema, "oneOf"));
+        assert!(!schema_keyword_exists(&schema, "anyOf"));
+        assert!(!schema_keyword_exists(&schema, "allOf"));
+        assert!(!schema_type_contains_null(&schema));
+
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    fn schema_keyword_exists(value: &Value, keyword: &str) -> bool {
+        match value {
+            Value::Object(map) => map
+                .iter()
+                .any(|(key, value)| key == keyword || schema_keyword_exists(value, keyword)),
+            Value::Array(values) => values
+                .iter()
+                .any(|value| schema_keyword_exists(value, keyword)),
+            _ => false,
+        }
+    }
+
+    fn schema_type_contains_null(value: &Value) -> bool {
+        match value {
+            Value::Object(map) => {
+                if let Some(ty) = map.get("type") {
+                    match ty {
+                        Value::String(s) if s == "null" => return true,
+                        Value::Array(values) if values.iter().any(|v| v == "null") => return true,
+                        _ => {}
+                    }
+                }
+                map.values().any(schema_type_contains_null)
+            }
+            Value::Array(values) => values.iter().any(schema_type_contains_null),
+            _ => false,
+        }
     }
 }

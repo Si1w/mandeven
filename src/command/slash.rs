@@ -35,6 +35,8 @@ pub enum SlashCommand {
     Memory(MemoryCommand),
     /// `/discord ...`
     Discord(DiscordCommand),
+    /// `/wechat ...`
+    Wechat(WechatCommand),
     /// Unknown slash command. CLI uses this for skill lookup; the
     /// agent turns surviving externals into "unknown command".
     External { name: String, args: Vec<String> },
@@ -117,6 +119,27 @@ pub enum DiscordCommand {
     Autostart { on: bool },
 }
 
+/// Parsed `/wechat` command.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WechatCommand {
+    /// `/wechat` (no args) — flip the iLink connection.
+    Toggle,
+    /// `/wechat status` — runtime snapshot.
+    Status,
+    /// `/wechat login` — scan QR code and save account credentials.
+    Login,
+    /// `/wechat logout` — stop and delete the saved active/latest account.
+    Logout,
+    /// `/wechat list` — show the allow list.
+    List,
+    /// `/wechat allow <user_id>`
+    Allow { user_id: String },
+    /// `/wechat deny <user_id>`
+    Deny { user_id: String },
+    /// `/wechat autostart on|off` — persist `[channels.wechat].enabled`.
+    Autostart { on: bool },
+}
+
 /// Parse a slash-command body, excluding the leading `/`.
 ///
 /// # Errors
@@ -164,6 +187,7 @@ enum RawCommand {
     Cron(CronArgs),
     Memory(MemoryArgs),
     Discord(DiscordArgs),
+    Wechat(WechatArgs),
     #[command(external_subcommand)]
     External(Vec<String>),
 }
@@ -295,6 +319,32 @@ enum DiscordSubcommand {
     },
 }
 
+#[derive(Debug, Args)]
+struct WechatArgs {
+    #[command(subcommand)]
+    command: Option<WechatSubcommand>,
+}
+
+#[derive(Debug, Subcommand)]
+enum WechatSubcommand {
+    Status,
+    Login,
+    Logout,
+    List,
+    Allow {
+        #[arg(value_name = "user_id")]
+        user_id: String,
+    },
+    Deny {
+        #[arg(value_name = "user_id")]
+        user_id: String,
+    },
+    Autostart {
+        #[arg(value_name = "on|off", action = ArgAction::Set, value_parser = parse_on_off)]
+        value: bool,
+    },
+}
+
 /// Accept the operator-friendly `on` / `off` literals (plus the more
 /// explicit `true` / `false`) for `/discord autostart`. Anything else
 /// errors so a typo doesn't silently flip the boot flag.
@@ -326,6 +376,7 @@ impl TryFrom<RawCommand> for SlashCommand {
             RawCommand::Cron(args) => Ok(Self::Cron(args.into())),
             RawCommand::Memory(args) => args.try_into().map(Self::Memory),
             RawCommand::Discord(args) => Ok(Self::Discord(args.into())),
+            RawCommand::Wechat(args) => Ok(Self::Wechat(args.into())),
             RawCommand::External(raw) => external_command(&raw),
         }
     }
@@ -408,6 +459,21 @@ impl From<DiscordArgs> for DiscordCommand {
             Some(DiscordSubcommand::Allow { user_id }) => Self::Allow { user_id },
             Some(DiscordSubcommand::Deny { user_id }) => Self::Deny { user_id },
             Some(DiscordSubcommand::Autostart { value }) => Self::Autostart { on: value },
+        }
+    }
+}
+
+impl From<WechatArgs> for WechatCommand {
+    fn from(value: WechatArgs) -> Self {
+        match value.command {
+            None => Self::Toggle,
+            Some(WechatSubcommand::Status) => Self::Status,
+            Some(WechatSubcommand::Login) => Self::Login,
+            Some(WechatSubcommand::Logout) => Self::Logout,
+            Some(WechatSubcommand::List) => Self::List,
+            Some(WechatSubcommand::Allow { user_id }) => Self::Allow { user_id },
+            Some(WechatSubcommand::Deny { user_id }) => Self::Deny { user_id },
+            Some(WechatSubcommand::Autostart { value }) => Self::Autostart { on: value },
         }
     }
 }
@@ -582,6 +648,39 @@ mod tests {
         );
         assert!(parse("discord allow not-a-number").is_err());
         assert!(parse("discord allow").is_err());
+        assert_eq!(
+            parse("wechat").unwrap(),
+            SlashCommand::Wechat(WechatCommand::Toggle)
+        );
+        assert_eq!(
+            parse("wechat login").unwrap(),
+            SlashCommand::Wechat(WechatCommand::Login)
+        );
+        assert_eq!(
+            parse("wechat logout").unwrap(),
+            SlashCommand::Wechat(WechatCommand::Logout)
+        );
+        assert_eq!(
+            parse("wechat status").unwrap(),
+            SlashCommand::Wechat(WechatCommand::Status)
+        );
+        assert_eq!(
+            parse("wechat allow wxid_test").unwrap(),
+            SlashCommand::Wechat(WechatCommand::Allow {
+                user_id: "wxid_test".to_string()
+            })
+        );
+        assert_eq!(
+            parse("wechat deny wxid_test").unwrap(),
+            SlashCommand::Wechat(WechatCommand::Deny {
+                user_id: "wxid_test".to_string()
+            })
+        );
+        assert_eq!(
+            parse("wechat autostart on").unwrap(),
+            SlashCommand::Wechat(WechatCommand::Autostart { on: true })
+        );
+        assert!(parse("wechat autostart maybe").is_err());
     }
 
     #[test]

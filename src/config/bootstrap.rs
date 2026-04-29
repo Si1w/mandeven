@@ -22,6 +22,7 @@ use std::str::FromStr;
 use super::error::{ConfigError, Result};
 use super::types::{
     AgentConfig, AppConfig, ChannelsConfig, DiscordConfig, LLMConfig, LLMProfile, TuiConfig,
+    WechatConfig,
 };
 use crate::llm::providers;
 
@@ -98,6 +99,13 @@ pub(super) fn interactive() -> Result<AppConfig> {
             discord: Some(DiscordConfig {
                 enabled: false,
                 token_env: "DISCORD_BOT_TOKEN".to_string(),
+            }),
+            wechat: Some(WechatConfig {
+                enabled: false,
+                token_env: "WECHAT_TOKEN".to_string(),
+                account_id_env: "WECHAT_ACCOUNT_ID".to_string(),
+                base_url: "https://ilinkai.weixin.qq.com".to_string(),
+                login_timeout_secs: 480,
             }),
         },
         source_path: PathBuf::new(),

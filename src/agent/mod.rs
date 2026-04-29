@@ -57,7 +57,7 @@ use crate::tools::heartbeat::{
 
 use self::command::{
     AgentCommandCtx, format_compact_report, run_cron_command, run_discord_command,
-    run_heartbeat_command, run_memory_command,
+    run_heartbeat_command, run_memory_command, run_wechat_command,
 };
 
 /// Upper bound on completion tokens for title generation.
@@ -118,6 +118,9 @@ pub struct Agent {
     /// registered. Cloned into [`AgentCommandCtx`] so `/discord
     /// allow|deny|list` can mutate the runtime allow list.
     discord: Option<crate::channels::discord::DiscordControl>,
+    /// WeChat adapter control handle, present iff the channel was
+    /// registered.
+    wechat: Option<crate::channels::wechat::WechatControl>,
     /// Live view of the gateway's per-channel session bindings.
     /// Heartbeat ticks read this to land in the user's main session
     /// rather than running isolated; written only by the gateway.
@@ -241,6 +244,12 @@ pub struct DiscordWiring {
     pub control: crate::channels::discord::DiscordControl,
 }
 
+/// Options for optional WeChat wiring.
+pub struct WechatWiring {
+    /// Runtime control handle cloned into [`AgentCommandCtx`].
+    pub control: crate::channels::wechat::WechatControl,
+}
+
 /// Single iteration of the agent's `select!` loop. Names what was
 /// chosen so [`Agent::run`]'s `match` reads as a state machine.
 enum Event {
@@ -285,6 +294,7 @@ impl Agent {
         cron: Option<CronWiring>,
         memory: Arc<memory::Manager>,
         discord: Option<DiscordWiring>,
+        wechat: Option<WechatWiring>,
         prompt: Arc<PromptEngine>,
         hook: Arc<HookEngine>,
         cwd: PathBuf,
@@ -301,6 +311,7 @@ impl Agent {
             None => (None, None),
         };
         let discord_handle = discord.map(|w| w.control);
+        let wechat_handle = wechat.map(|w| w.control);
 
         Ok(Self {
             model,
@@ -318,6 +329,7 @@ impl Agent {
             cron_rx,
             memory,
             discord: discord_handle,
+            wechat: wechat_handle,
             active_sessions,
             compact_config: cfg.agent.compact.clone(),
             compact_state: Arc::new(AsyncMutex::new(CompactState::new())),
@@ -666,6 +678,8 @@ impl Agent {
             cron: self.cron.clone(),
             memory: self.memory.clone(),
             discord: self.discord.clone(),
+            wechat: self.wechat.clone(),
+            out: self.out.clone(),
             app_config: self.app_config.clone(),
         };
 
@@ -696,6 +710,14 @@ impl Agent {
                 }
             },
             SlashCommand::Discord(command) => match run_discord_command(command, &ctx).await {
+                CommandOutcome::Completed => return Ok(()),
+                CommandOutcome::Feedback(msg) => OutboundPayload::Notice(msg),
+                CommandOutcome::Exit => {
+                    eprintln!("[agent] command {body:?} returned Exit at agent layer; ignoring");
+                    return Ok(());
+                }
+            },
+            SlashCommand::Wechat(command) => match run_wechat_command(command, &ctx).await {
                 CommandOutcome::Completed => return Ok(()),
                 CommandOutcome::Feedback(msg) => OutboundPayload::Notice(msg),
                 CommandOutcome::Exit => {

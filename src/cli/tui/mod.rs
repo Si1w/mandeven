@@ -96,6 +96,18 @@ fn render_header(f: &mut Frame<'_>, area: Rect, state: &CliState) {
             ),
         ]);
     }
+    let wechat_active = state.wechat_active.as_ref().is_some_and(|rx| *rx.borrow());
+    if wechat_active {
+        top_spans.extend([
+            Span::styled("  ·  ", dim_style()),
+            Span::styled(
+                "wechat",
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]);
+    }
     let mut lines = vec![Line::from(top_spans)];
 
     if area.height > 1 {
@@ -692,6 +704,13 @@ fn build_help_text() -> Text<'static> {
             "/discord autostart on|off",
             "persist boot-time enabled flag",
         ),
+        help_entry("/wechat", "toggle WeChat gateway connection"),
+        help_entry("/wechat login", "scan QR and save WeChat credentials"),
+        help_entry("/wechat status", "show enabled/disabled + allow count"),
+        help_entry("/wechat list", "show WeChat allow list"),
+        help_entry("/wechat allow <id>", "add user id to allow list"),
+        help_entry("/wechat deny <id>", "remove user id from allow list"),
+        help_entry("/wechat autostart on|off", "persist boot-time enabled flag"),
         help_entry("/exit", "quit"),
         Line::raw(""),
         section_header("Keys"),

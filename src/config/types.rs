@@ -63,6 +63,8 @@ pub struct AppConfig {
 pub struct ChannelsConfig {
     /// Discord adapter. See [`DiscordConfig`].
     pub discord: Option<DiscordConfig>,
+    /// WeChat personal-account adapter. See [`WechatConfig`].
+    pub wechat: Option<WechatConfig>,
 }
 
 /// Discord adapter configuration.
@@ -100,6 +102,58 @@ pub struct DiscordConfig {
 
 fn default_discord_token_env() -> String {
     "DISCORD_BOT_TOKEN".to_string()
+}
+
+/// Personal WeChat adapter configuration.
+///
+/// MS0 scope: text-only DMs via Tencent's iLink Bot API. The token
+/// produced by QR login is stored under
+/// `~/.mandeven/channels/wechat/accounts/`; `mandeven.toml` only keeps
+/// non-sensitive runtime preferences and environment-variable names.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct WechatConfig {
+    /// Auto-start the iLink long-poll connection at boot. Defaults to
+    /// `false`; users can run `/wechat` after logging in.
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Environment variable holding the iLink bot token. Defaults to
+    /// `WECHAT_TOKEN`; `WEIXIN_TOKEN` is also read as a compatibility
+    /// fallback by the runtime resolver.
+    #[serde(default = "default_wechat_token_env")]
+    pub token_env: String,
+
+    /// Environment variable holding the iLink account id. Defaults to
+    /// `WECHAT_ACCOUNT_ID`; `WEIXIN_ACCOUNT_ID` is also read as a
+    /// compatibility fallback by the runtime resolver.
+    #[serde(default = "default_wechat_account_id_env")]
+    pub account_id_env: String,
+
+    /// Base URL for the iLink Bot API. Defaults to Tencent's public
+    /// endpoint; QR login may return a redirected base URL, which is
+    /// stored with the account credentials.
+    #[serde(default = "default_wechat_base_url")]
+    pub base_url: String,
+
+    /// QR login timeout in seconds.
+    #[serde(default = "default_wechat_login_timeout_secs")]
+    pub login_timeout_secs: u64,
+}
+
+fn default_wechat_token_env() -> String {
+    "WECHAT_TOKEN".to_string()
+}
+
+fn default_wechat_account_id_env() -> String {
+    "WECHAT_ACCOUNT_ID".to_string()
+}
+
+fn default_wechat_base_url() -> String {
+    "https://ilinkai.weixin.qq.com".to_string()
+}
+
+fn default_wechat_login_timeout_secs() -> u64 {
+    480
 }
 
 /// Terminal UI preferences.

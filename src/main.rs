@@ -15,10 +15,11 @@ use std::sync::Arc;
 
 use tokio::sync::Mutex;
 
-use mandeven::agent::{Agent, CronWiring, DiscordWiring, HeartbeatWiring};
+use mandeven::agent::{Agent, CronWiring, DiscordWiring, HeartbeatWiring, WechatWiring};
 use mandeven::bus::{Bus, ChannelID};
 use mandeven::channels::Manager;
 use mandeven::channels::discord::{self, DiscordChannel};
+use mandeven::channels::wechat::{self, WechatChannel};
 use mandeven::cli::CliChannel;
 use mandeven::config::{self, AppConfig};
 use mandeven::cron::CronEngine;
@@ -39,6 +40,9 @@ const TUI_CHANNEL: &str = "tui";
 
 /// Identifier for the Discord channel adapter.
 const DISCORD_CHANNEL: &str = "discord";
+
+/// Identifier for the WeChat channel adapter.
+const WECHAT_CHANNEL: &str = "wechat";
 
 /// Boxed error alias used at the `main` boundary.
 type DynError = Box<dyn std::error::Error + Send + Sync>;
@@ -141,6 +145,8 @@ async fn main() -> Result<(), DynError> {
     let discord_active_rx = discord_wiring
         .as_ref()
         .map(|w| w.control.subscribe_active());
+    let (wechat_channel, wechat_wiring) = build_wechat(&cfg).await?;
+    let wechat_active_rx = wechat_wiring.as_ref().map(|w| w.control.subscribe_active());
 
     let agent = Agent::new(
         &cfg,
@@ -153,6 +159,7 @@ async fn main() -> Result<(), DynError> {
         cron_wiring,
         memory_manager,
         discord_wiring,
+        wechat_wiring,
         prompts,
         hooks,
         cwd,
@@ -173,9 +180,13 @@ async fn main() -> Result<(), DynError> {
         skill_index,
         cfg.tui.show_thinking,
         discord_active_rx,
+        wechat_active_rx,
     )));
 
     if let Some(channel) = discord_channel {
+        manager.register(Arc::new(channel));
+    }
+    if let Some(channel) = wechat_channel {
         manager.register(Arc::new(channel));
     }
 
@@ -226,4 +237,38 @@ async fn build_discord(
         .into());
     }
     Ok((Some(channel), Some(DiscordWiring { control })))
+}
+
+/// Resolve the WeChat channel + control pair from config.
+async fn build_wechat(
+    cfg: &AppConfig,
+) -> Result<(Option<WechatChannel>, Option<WechatWiring>), DynError> {
+    let Some(wechat_cfg) = cfg.channels.wechat.as_ref() else {
+        return Ok((None, None));
+    };
+    let store_path = wechat::allowlist_path(&cfg.data_dir());
+    let initial_allowed = wechat::store::load_allowlist(&store_path)
+        .await
+        .map_err(|err| {
+            format!(
+                "failed to load wechat allowlist from {}: {err}",
+                store_path.display()
+            )
+        })?;
+    let (channel, control) = WechatChannel::build(
+        ChannelID::new(WECHAT_CHANNEL),
+        wechat_cfg,
+        initial_allowed,
+        store_path,
+        cfg.data_dir(),
+    );
+    if wechat_cfg.enabled
+        && let Err(err) = control.enable().await
+    {
+        return Err(format!(
+            "wechat auto-enable failed (set channels.wechat.enabled = false to skip): {err}"
+        )
+        .into());
+    }
+    Ok((Some(channel), Some(WechatWiring { control })))
 }

@@ -84,6 +84,7 @@ The agent talks to the user through a pluggable channel layer.
 | --------- | ----------------------------------------------- |
 | `tui`     | built-in ratatui terminal UI                    |
 | `discord` | DM-only adapter, opt-in via `[channels.discord]`|
+| `wechat`  | text-only personal WeChat iLink adapter with QR login, opt-in via `[channels.wechat]` |
 
 ## 🧩 Extra features
 

@@ -161,6 +161,8 @@ pub struct CliState {
     /// the redraw signal whenever the value flips so the badge
     /// updates without a user keystroke.
     pub discord_active: Option<tokio::sync::watch::Receiver<bool>>,
+    /// Watch receiver for the WeChat adapter's active flag.
+    pub wechat_active: Option<tokio::sync::watch::Receiver<bool>>,
 }
 
 impl Default for CliState {
@@ -187,6 +189,7 @@ impl Default for CliState {
             follow_bottom: true,
             skills: Vec::new(),
             discord_active: None,
+            wechat_active: None,
         }
     }
 }
@@ -310,6 +313,7 @@ impl CliChannel {
         skills: Arc<crate::skill::SkillIndex>,
         show_thinking: bool,
         discord_active: Option<tokio::sync::watch::Receiver<bool>>,
+        wechat_active: Option<tokio::sync::watch::Receiver<bool>>,
     ) -> Self {
         let skill_snapshot: Vec<(String, String)> = skills
             .entries()
@@ -319,6 +323,7 @@ impl CliChannel {
             skills: skill_snapshot,
             show_thinking,
             discord_active,
+            wechat_active,
             ..CliState::default()
         };
         Self {
@@ -363,6 +368,14 @@ impl Channel for CliChannel {
         // flips the active flag, prod the redraw signal so the top
         // bar's green badge stays in sync without a user keystroke.
         if let Some(mut rx) = self.state.lock().unwrap().discord_active.clone() {
+            let redraw = self.redraw.clone();
+            tokio::spawn(async move {
+                while rx.changed().await.is_ok() {
+                    redraw.notify_one();
+                }
+            });
+        }
+        if let Some(mut rx) = self.state.lock().unwrap().wechat_active.clone() {
             let redraw = self.redraw.clone();
             tokio::spawn(async move {
                 while rx.changed().await.is_ok() {
@@ -753,7 +766,8 @@ impl CliChannel {
             | SlashCommand::Heartbeat(_)
             | SlashCommand::Cron(_)
             | SlashCommand::Memory(_)
-            | SlashCommand::Discord(_) => self.forward_command(body, inbound).await,
+            | SlashCommand::Discord(_)
+            | SlashCommand::Wechat(_) => self.forward_command(body, inbound).await,
         }
     }
 
@@ -1022,6 +1036,7 @@ mod tests {
             sessions,
             Arc::new(SkillIndex::new()),
             true,
+            None,
             None,
         );
         channel.state.lock().unwrap().open_overlay(Overlay::Help);

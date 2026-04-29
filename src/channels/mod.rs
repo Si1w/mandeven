@@ -35,6 +35,7 @@ pub mod common;
 pub mod discord;
 pub mod error;
 pub mod manager;
+pub mod wechat;
 
 pub use error::{Error, Result};
 pub use manager::Manager;

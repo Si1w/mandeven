@@ -22,4 +22,5 @@ pub use paths::{
 };
 pub use types::{
     AgentConfig, AppConfig, ChannelsConfig, DiscordConfig, LLMConfig, LLMProfile, TuiConfig,
+    WechatConfig,
 };

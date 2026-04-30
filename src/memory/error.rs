@@ -36,4 +36,8 @@ pub enum Error {
     /// JSON serialization or deserialization failed.
     #[error("memory store JSON error: {0}")]
     Json(#[from] serde_json::Error),
+
+    /// YAML front matter serialization or deserialization failed.
+    #[error("memory store YAML error: {0}")]
+    Yaml(#[from] serde_yaml::Error),
 }

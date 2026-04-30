@@ -31,10 +31,10 @@ pub const GLOBAL_MEMORY_SUBDIR: &str = "memory";
 /// Subdirectory under a project bucket holding project-local memory state.
 pub const PROJECT_MEMORY_SUBDIR: &str = "memory";
 
-/// Filename holding typed memory records.
+/// Legacy filename holding typed memory records.
 pub const MEMORY_STORE_FILENAME: &str = "memories.json";
 
-/// Filename holding the derived profile projection.
+/// Legacy filename holding the derived profile projection.
 pub const PROFILE_STORE_FILENAME: &str = "profile.json";
 
 /// Current memory store schema version.
@@ -253,7 +253,7 @@ pub struct MemoryMatch {
     pub score: usize,
 }
 
-/// Derived user profile stored in `profile.json`.
+/// Derived user profile stored in `memory/profile.md`.
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct UserProfile {
     /// Short synthesized summary.
@@ -275,7 +275,7 @@ pub struct UserProfile {
     pub updated_at: Option<DateTime<Utc>>,
 }
 
-/// On-disk shape of `profile.json`.
+/// On-disk compatibility shape for the derived profile.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ProfileFile {
     /// Schema version. Values above [`STORE_VERSION`] are rejected by future readers.
@@ -454,7 +454,7 @@ impl Manager {
     /// The snapshot is intentionally query-independent: it is captured once and
     /// stored with session metadata so normal turns do not pay a memory-search
     /// tool roundtrip or mutate the prompt prefix. Full bodies remain available
-    /// through the model-facing `memory` tool when the summary is insufficient.
+    /// as Markdown memory files and through the user-facing `/memory` surface.
     ///
     /// # Errors
     ///
@@ -983,6 +983,12 @@ mod tests {
             .await
             .unwrap();
         assert!(!saved.updated_existing);
+        assert!(manager.project_path().join("test-policy.md").exists());
+        let raw = tokio::fs::read_to_string(manager.project_path().join("test-policy.md"))
+            .await
+            .unwrap();
+        assert!(raw.starts_with("---\n"));
+        assert!(raw.contains("kind: memory"));
 
         let matches = manager
             .search(MemoryQuery {
@@ -1100,6 +1106,13 @@ mod tests {
         assert!(profile.summary.contains("concise"));
         assert_eq!(profile.avoid.len(), 1);
         assert!(manager.profile_path().exists());
+        assert_eq!(
+            manager
+                .profile_path()
+                .file_name()
+                .and_then(|name| name.to_str()),
+            Some("profile.md")
+        );
 
         let _ = tokio::fs::remove_dir_all(dir).await;
     }

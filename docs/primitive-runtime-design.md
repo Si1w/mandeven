@@ -399,14 +399,16 @@ Exec:
 
 Current implementation status:
 
-- task and timer state are Markdown-backed;
+- task, timer, and memory state are Markdown-backed;
 - `TimerEngine` scans `timers/*.md`, advances due timers, and routes the
   referenced task through the normal agent iteration loop;
 - timer-triggered task execution appends `execution/<exec_id>.jsonl` with
   `execution_started`, `tool_call`, `tool_result`, `final_output`, and
   `execution_finished`;
-- explicit `task.run` is the next layer to split out of the agent iteration
-  path.
+- explicit `task_run` is exposed as a model-facing execution primitive and
+  returns an execution observation;
+- cron and memory tools are compatibility/internal modules, not part of the
+  default model-facing ISA.
 
 Watchdog:
 

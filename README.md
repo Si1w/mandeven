@@ -113,7 +113,7 @@ state lives in sidecar files; durable enable/budget knobs live in
 | `exec`      | project bucket `execution/*.jsonl`    | Machine-readable history for scheduled task executions  |
 | `cron`      | `~/.mandeven/cron/jobs.json`          | Compatibility scheduler for existing `/cron` jobs       |
 | `heartbeat` | `[agent.heartbeat]` in `mandeven.toml`| Periodic self-check that can queue follow-up prompts    |
-| `memory`    | `[agent.memory]` in `mandeven.toml`   | Durable memories + frozen per-session prompt snapshot   |
+| `memory`    | `memory/*.md` + `[agent.memory]`      | Durable memories + frozen per-session prompt snapshot   |
 | `dream`     | `[agent.dream]` in `mandeven.toml`    | Cron-driven background review that distills session evidence into global memory |
 
 ## Architecture notes

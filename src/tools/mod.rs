@@ -13,13 +13,16 @@
 //! registered in bulk via [`register_builtins`]. Stateful primitives
 //! such as [`task`] and [`timer`] register through their own modules.
 
-pub mod cron;
+#[allow(dead_code)]
+pub(crate) mod cron;
 pub(crate) mod dream;
 pub mod error;
 pub mod file;
 pub mod grep;
-pub mod heartbeat;
-pub mod memory;
+pub(crate) mod heartbeat;
+#[allow(dead_code)]
+pub(crate) mod memory;
+#[allow(dead_code)]
 pub(crate) mod schema;
 pub mod shell;
 pub mod skill;
@@ -107,6 +110,7 @@ pub trait BaseTool: Send + Sync {
     async fn call(&self, args: serde_json::Value) -> Result<ToolOutcome>;
 }
 
+#[allow(dead_code)]
 pub(crate) fn parse_params<T: for<'de> Deserialize<'de>>(
     tool: &'static str,
     args: serde_json::Value,
@@ -117,6 +121,7 @@ pub(crate) fn parse_params<T: for<'de> Deserialize<'de>>(
     })
 }
 
+#[allow(dead_code)]
 pub(crate) fn exec_error(tool: &'static str, message: impl std::fmt::Display) -> Error {
     Error::Execution {
         tool: tool.to_string(),

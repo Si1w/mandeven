@@ -110,7 +110,7 @@ state lives in sidecar files; durable enable/budget knobs live in
 | `skills`    | `~/.mandeven/skills/<name>/SKILL.md`  | Surfaced as `/<name>` slash commands + the `skill` tool |
 | `hooks`     | `~/.mandeven/hooks.json`              | Shell commands fired on lifecycle events                |
 | `timers`    | project bucket `timers/*.md`          | Scheduled tasks that re-enter the agent loop            |
-| `runs`      | project bucket `runs/*.jsonl`         | Machine-readable history for scheduled task executions  |
+| `exec`      | project bucket `execution/*.jsonl`    | Machine-readable history for scheduled task executions  |
 | `cron`      | `~/.mandeven/cron/jobs.json`          | Compatibility scheduler for existing `/cron` jobs       |
 | `heartbeat` | `[agent.heartbeat]` in `mandeven.toml`| Periodic self-check that can queue follow-up prompts    |
 | `memory`    | `[agent.memory]` in `mandeven.toml`   | Durable memories + frozen per-session prompt snapshot   |

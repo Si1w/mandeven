@@ -1,9 +1,9 @@
-//! Machine-readable run history.
+//! Machine-readable execution history.
 //!
-//! Runs are execution streams, so their canonical store is JSONL under
-//! `<project_bucket>/runs/<run_id>.jsonl`. This module only records the
-//! durable event stream; user-visible deliverables should remain
-//! Markdown files elsewhere.
+//! Executions are runtime event streams, so their canonical store is
+//! JSONL under `<project_bucket>/execution/<exec_id>.jsonl`. This
+//! module only records the durable event stream; user-visible
+//! deliverables should remain Markdown files elsewhere.
 
 pub mod error;
 
@@ -18,80 +18,80 @@ use uuid::Uuid;
 
 use crate::bus::{ChannelID, SessionID};
 
-/// Subdirectory under a project bucket holding run JSONL logs.
-pub const RUN_SUBDIR: &str = "runs";
+/// Subdirectory under a project bucket holding execution JSONL logs.
+pub const EXEC_SUBDIR: &str = "execution";
 
-/// Run history manager.
+/// Execution history manager.
 #[derive(Debug, Clone)]
 pub struct Manager {
     dir: PathBuf,
 }
 
-/// Stable id for one run.
+/// Stable id for one execution.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct RunId(pub Uuid);
+pub struct ExecId(pub Uuid);
 
-impl std::fmt::Display for RunId {
+impl std::fmt::Display for ExecId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         self.0.fmt(f)
     }
 }
 
-/// Input for starting a run log.
+/// Input for starting an execution log.
 #[derive(Clone, Debug)]
-pub struct RunStart {
+pub struct ExecStart {
     /// Task being executed.
     pub task_id: String,
     /// Human-readable task subject.
     pub task_subject: String,
-    /// Timer that triggered the run, when scheduled.
+    /// Timer that triggered the execution, when scheduled.
     pub timer_id: Option<String>,
     /// Human-readable timer title.
     pub timer_title: Option<String>,
-    /// Session receiving the run output.
+    /// Session receiving the execution output.
     pub session: SessionID,
-    /// Channel receiving the run output.
+    /// Channel receiving the execution output.
     pub channel: ChannelID,
 }
 
-/// Terminal run status.
+/// Terminal execution status.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum RunStatus {
-    /// Run completed without an agent-loop error.
+pub enum ExecStatus {
+    /// Execution completed without an agent-loop error.
     Succeeded,
-    /// Run failed with an agent-loop error.
+    /// Execution failed with an agent-loop error.
     Failed,
-    /// Run was skipped before execution.
+    /// Execution was skipped before it began.
     Skipped,
 }
 
-/// One line in a run JSONL file.
+/// One line in an execution JSONL file.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-pub enum RunEvent {
-    /// Run was accepted by the runtime.
-    RunStarted {
-        /// Run id.
-        run_id: String,
+pub enum ExecEvent {
+    /// Execution was accepted by the runtime.
+    ExecutionStarted {
+        /// Execution id.
+        exec_id: String,
         /// Task being executed.
         task_id: String,
         /// Human-readable task subject.
         task_subject: String,
-        /// Timer that triggered the run, when scheduled.
+        /// Timer that triggered the execution, when scheduled.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         timer_id: Option<String>,
         /// Human-readable timer title.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         timer_title: Option<String>,
-        /// Session receiving the run output.
+        /// Session receiving the execution output.
         session_id: String,
-        /// Channel receiving the run output.
+        /// Channel receiving the execution output.
         channel_id: String,
         /// Wall-clock timestamp.
         at: DateTime<Utc>,
     },
-    /// Final assistant-facing output from the run.
+    /// Final assistant-facing output from the execution.
     FinalOutput {
         /// Final answer text. Empty means the model ended without
         /// assistant text.
@@ -122,11 +122,11 @@ pub enum RunEvent {
         /// Wall-clock timestamp.
         at: DateTime<Utc>,
     },
-    /// Run reached a terminal status.
-    RunFinished {
+    /// Execution reached a terminal status.
+    ExecutionFinished {
         /// Terminal status.
-        status: RunStatus,
-        /// Error text for failed runs.
+        status: ExecStatus,
+        /// Error text for failed executions.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         error: Option<String>,
         /// Wall-clock timestamp.
@@ -139,27 +139,27 @@ impl Manager {
     #[must_use]
     pub fn new(project_bucket: &Path) -> Self {
         Self {
-            dir: project_bucket.join(RUN_SUBDIR),
+            dir: project_bucket.join(EXEC_SUBDIR),
         }
     }
 
-    /// Path to the run directory.
+    /// Path to the execution directory.
     #[must_use]
     pub fn path(&self) -> &Path {
         &self.dir
     }
 
-    /// Start a new run log and append `run_started`.
+    /// Start a new execution log and append `execution_started`.
     ///
     /// # Errors
     ///
     /// Returns I/O or JSON serialization errors.
-    pub async fn start(&self, start: RunStart) -> Result<RunId> {
-        let id = RunId(Uuid::now_v7());
+    pub async fn start(&self, start: ExecStart) -> Result<ExecId> {
+        let id = ExecId(Uuid::now_v7());
         self.append(
             &id,
-            &RunEvent::RunStarted {
-                run_id: id.to_string(),
+            &ExecEvent::ExecutionStarted {
+                exec_id: id.to_string(),
                 task_id: start.task_id,
                 task_subject: start.task_subject,
                 timer_id: start.timer_id,
@@ -173,15 +173,15 @@ impl Manager {
         Ok(id)
     }
 
-    /// Append the run's final output.
+    /// Append the execution's final output.
     ///
     /// # Errors
     ///
     /// Returns I/O or JSON serialization errors.
-    pub async fn final_output(&self, id: &RunId, content: String) -> Result<()> {
+    pub async fn final_output(&self, id: &ExecId, content: String) -> Result<()> {
         self.append(
             id,
-            &RunEvent::FinalOutput {
+            &ExecEvent::FinalOutput {
                 content,
                 at: Utc::now(),
             },
@@ -196,14 +196,14 @@ impl Manager {
     /// Returns I/O or JSON serialization errors.
     pub async fn tool_call(
         &self,
-        id: &RunId,
+        id: &ExecId,
         tool_call_id: String,
         name: String,
         args: serde_json::Value,
     ) -> Result<()> {
         self.append(
             id,
-            &RunEvent::ToolCall {
+            &ExecEvent::ToolCall {
                 tool_call_id,
                 name,
                 args,
@@ -220,14 +220,14 @@ impl Manager {
     /// Returns I/O or JSON serialization errors.
     pub async fn tool_result(
         &self,
-        id: &RunId,
+        id: &ExecId,
         tool_call_id: String,
         name: String,
         output: String,
     ) -> Result<()> {
         self.append(
             id,
-            &RunEvent::ToolResult {
+            &ExecEvent::ToolResult {
                 tool_call_id,
                 name,
                 output,
@@ -237,15 +237,20 @@ impl Manager {
         .await
     }
 
-    /// Append a terminal run status.
+    /// Append a terminal execution status.
     ///
     /// # Errors
     ///
     /// Returns I/O or JSON serialization errors.
-    pub async fn finish(&self, id: &RunId, status: RunStatus, error: Option<String>) -> Result<()> {
+    pub async fn finish(
+        &self,
+        id: &ExecId,
+        status: ExecStatus,
+        error: Option<String>,
+    ) -> Result<()> {
         self.append(
             id,
-            &RunEvent::RunFinished {
+            &ExecEvent::ExecutionFinished {
                 status,
                 error,
                 at: Utc::now(),
@@ -254,12 +259,12 @@ impl Manager {
         .await
     }
 
-    /// Load one run log.
+    /// Load one execution log.
     ///
     /// # Errors
     ///
     /// Returns I/O or JSON deserialization errors.
-    pub async fn load(&self, id: &RunId) -> Result<Vec<RunEvent>> {
+    pub async fn load(&self, id: &ExecId) -> Result<Vec<ExecEvent>> {
         let content = tokio::fs::read_to_string(self.path_for(id)).await?;
         content
             .lines()
@@ -268,7 +273,7 @@ impl Manager {
             .collect()
     }
 
-    async fn append(&self, id: &RunId, event: &RunEvent) -> Result<()> {
+    async fn append(&self, id: &ExecId, event: &ExecEvent) -> Result<()> {
         tokio::fs::create_dir_all(&self.dir).await?;
         let mut line = serde_json::to_string(event)?;
         line.push('\n');
@@ -282,7 +287,7 @@ impl Manager {
         Ok(())
     }
 
-    fn path_for(&self, id: &RunId) -> PathBuf {
+    fn path_for(&self, id: &ExecId) -> PathBuf {
         self.dir.join(format!("{}.jsonl", id.0))
     }
 }
@@ -292,17 +297,18 @@ mod tests {
     use super::*;
 
     fn tempdir() -> PathBuf {
-        let base = std::env::temp_dir().join(format!("mandeven-run-test-{}", uuid::Uuid::now_v7()));
+        let base =
+            std::env::temp_dir().join(format!("mandeven-exec-test-{}", uuid::Uuid::now_v7()));
         std::fs::create_dir_all(&base).unwrap();
         base
     }
 
     #[tokio::test]
-    async fn run_history_appends_jsonl_events() {
+    async fn exec_history_appends_jsonl_events() {
         let dir = tempdir();
         let manager = Manager::new(&dir);
-        let run_id = manager
-            .start(RunStart {
+        let exec_id = manager
+            .start(ExecStart {
                 task_id: "task-1".to_string(),
                 task_subject: "Check build".to_string(),
                 timer_id: Some("timer-1".to_string()),
@@ -313,22 +319,29 @@ mod tests {
             .await
             .unwrap();
         manager
-            .final_output(&run_id, "Build is green".to_string())
+            .final_output(&exec_id, "Build is green".to_string())
             .await
             .unwrap();
         manager
-            .finish(&run_id, RunStatus::Succeeded, None)
+            .finish(&exec_id, ExecStatus::Succeeded, None)
             .await
             .unwrap();
 
-        let events = manager.load(&run_id).await.unwrap();
+        assert!(manager.path().ends_with(EXEC_SUBDIR));
+        let raw = tokio::fs::read_to_string(manager.path().join(format!("{exec_id}.jsonl")))
+            .await
+            .unwrap();
+        assert!(raw.contains(r#""type":"execution_started""#));
+        assert!(raw.contains(r#""type":"execution_finished""#));
+
+        let events = manager.load(&exec_id).await.unwrap();
         assert_eq!(events.len(), 3);
-        assert!(matches!(events[0], RunEvent::RunStarted { .. }));
-        assert!(matches!(events[1], RunEvent::FinalOutput { .. }));
+        assert!(matches!(events[0], ExecEvent::ExecutionStarted { .. }));
+        assert!(matches!(events[1], ExecEvent::FinalOutput { .. }));
         assert!(matches!(
             events[2],
-            RunEvent::RunFinished {
-                status: RunStatus::Succeeded,
+            ExecEvent::ExecutionFinished {
+                status: ExecStatus::Succeeded,
                 ..
             }
         ));
@@ -337,11 +350,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_history_records_tool_events() {
+    async fn exec_history_records_tool_events() {
         let dir = tempdir();
         let manager = Manager::new(&dir);
-        let run_id = manager
-            .start(RunStart {
+        let exec_id = manager
+            .start(ExecStart {
                 task_id: "task-1".to_string(),
                 task_subject: "Check build".to_string(),
                 timer_id: None,
@@ -353,7 +366,7 @@ mod tests {
             .unwrap();
         manager
             .tool_call(
-                &run_id,
+                &exec_id,
                 "call-1".to_string(),
                 "file_read".to_string(),
                 serde_json::json!({ "path": "README.md" }),
@@ -362,7 +375,7 @@ mod tests {
             .unwrap();
         manager
             .tool_result(
-                &run_id,
+                &exec_id,
                 "call-1".to_string(),
                 "file_read".to_string(),
                 "content".to_string(),
@@ -370,10 +383,10 @@ mod tests {
             .await
             .unwrap();
 
-        let events = manager.load(&run_id).await.unwrap();
+        let events = manager.load(&exec_id).await.unwrap();
         assert_eq!(events.len(), 3);
-        assert!(matches!(events[1], RunEvent::ToolCall { .. }));
-        assert!(matches!(events[2], RunEvent::ToolResult { .. }));
+        assert!(matches!(events[1], ExecEvent::ToolCall { .. }));
+        assert!(matches!(events[2], ExecEvent::ToolResult { .. }));
 
         let _ = tokio::fs::remove_dir_all(dir).await;
     }

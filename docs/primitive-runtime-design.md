@@ -56,8 +56,8 @@ Target layout:
   routines/
     heartbeat.md
 
-  runs/
-    <run_uuid>.jsonl
+  execution/
+    <exec_uuid>.jsonl
 
   logs/
     scheduler.jsonl
@@ -288,36 +288,36 @@ Execution observations report direct results. `task.run` returns task output.
   "ok": true,
   "observation_type": "execution",
   "object": "task_run",
-  "run_id": "0190b8e4-2c77-71e0-b51f-d7e4a7a102a9",
+  "exec_id": "0190b8e4-2c77-71e0-b51f-d7e4a7a102a9",
   "task_id": "0190b8e2-7a2c-7c40-a8d0-8a6a6f6f5c01",
   "status": "succeeded",
   "output": "Today's paper progress: ..."
 }
 ```
 
-Do not return run log paths as user-facing artifacts by default. A run log is
-machine history. It belongs in JSONL and is read through explicit run/log tools
-when needed.
+Do not return execution log paths as user-facing artifacts by default. An
+execution log is machine history. It belongs in JSONL and is read through
+explicit execution/log tools when needed.
 
-Only return Markdown document paths when the run intentionally creates a
+Only return Markdown document paths when the execution intentionally creates a
 user-visible deliverable, such as:
 
 ```text
 reports/weekly-paper-summary-2026-05-01.md
 ```
 
-## Run History
+## Execution History
 
-Runs are execution streams, so their canonical record is JSONL:
+Executions are runtime event streams, so their canonical record is JSONL:
 
 ```jsonl
-{"type":"run_started","run_id":"0190...","task_id":"0190...","at":"2026-05-01T09:00:01Z"}
+{"type":"execution_started","exec_id":"0190...","task_id":"0190...","at":"2026-05-01T09:00:01Z"}
 {"type":"tool_call","name":"web.search","args":{"query":"..."}}
 {"type":"tool_result","name":"web.search","ok":true,"output":[...]}
 {"type":"tool_call","name":"file.edit","args":{"path":"..."}}
 {"type":"tool_result","name":"file.edit","ok":true,"observation":{"validated":true}}
 {"type":"final_output","content":"Today's paper progress: ..."}
-{"type":"run_finished","status":"succeeded","at":"2026-05-01T09:02:14Z"}
+{"type":"execution_finished","status":"succeeded","at":"2026-05-01T09:02:14Z"}
 ```
 
 `task.run` returns the final execution output as its observation. The JSONL log
@@ -358,7 +358,7 @@ Activity heartbeat:
 
 ```text
 watchdog touch events
-runs/<run_uuid>.jsonl
+execution/<exec_uuid>.jsonl
 logs/watchdog.jsonl
 ```
 
@@ -384,16 +384,17 @@ Scheduler:
 - parses front matter;
 - validates timer specs;
 - finds due timers;
-- advances `next_fire_at` atomically before enqueueing or starting a run;
+- advances `next_fire_at` atomically before enqueueing or starting an
+  execution;
 - invokes `task.run(task_id)`;
 - appends scheduler events to `logs/scheduler.jsonl`.
 
-Runner:
+Exec:
 
 - reads a validated task spec;
 - constructs the agent input;
 - executes the task through the normal tool loop;
-- writes run JSONL;
+- writes execution JSONL;
 - returns output as the execution observation.
 
 Current implementation status:
@@ -401,9 +402,9 @@ Current implementation status:
 - task and timer state are Markdown-backed;
 - `TimerEngine` scans `timers/*.md`, advances due timers, and routes the
   referenced task through the normal agent iteration loop;
-- timer-triggered task execution appends `runs/<run_id>.jsonl` with
-  `run_started`, `tool_call`, `tool_result`, `final_output`, and
-  `run_finished`;
+- timer-triggered task execution appends `execution/<exec_id>.jsonl` with
+  `execution_started`, `tool_call`, `tool_result`, `final_output`, and
+  `execution_finished`;
 - explicit `task.run` is the next layer to split out of the agent iteration
   path.
 
@@ -411,7 +412,7 @@ Watchdog:
 
 - observes execution liveness;
 - records activity touches in JSONL;
-- can time out or interrupt a run;
+- can time out or interrupt an execution;
 - never creates user-facing task state.
 
 Validators:

@@ -1,8 +1,8 @@
-//! WeChat channel — text-only personal WeChat adapter via iLink.
+//! `WeChat` channel — text-only personal `WeChat` adapter via iLink.
 //!
 //! Scope (MS0):
 //!
-//! - Personal WeChat/iLink route, not WeCom.
+//! - Personal `WeChat`/iLink route, not `WeCom`.
 //! - Direct messages only. Group chats are dropped because the current
 //!   gateway binds one active session per channel.
 //! - Runtime-mutable single-user allowlist, persisted under
@@ -12,7 +12,7 @@
 //! - Text-only inbound/outbound. Media support in Hermes requires an
 //!   encrypted CDN flow and a richer bus payload, so it is intentionally
 //!   out of scope for this first channel.
-//! - WeChat cannot edit sent messages; `ReplyDelta` fragments are
+//! - `WeChat` cannot edit sent messages; `ReplyDelta` fragments are
 //!   buffered and sent once on `ReplyEnd`.
 
 pub mod api;
@@ -50,7 +50,7 @@ const BACKOFF_DELAY: Duration = Duration::from_secs(30);
 const SEND_CHUNK_DELAY: Duration = Duration::from_millis(350);
 const SESSION_EXPIRED_ERRCODE: i64 = -14;
 
-/// WeChat channel implementing [`Channel`].
+/// `WeChat` channel implementing [`Channel`].
 pub struct WechatChannel {
     id: ChannelID,
     data_dir: PathBuf,

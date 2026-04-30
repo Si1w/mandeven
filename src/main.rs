@@ -11,11 +11,14 @@
 //! path under `$MANDEVEN_HOME`) and created interactively on first run.
 
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::Arc;
 
 use tokio::sync::Mutex;
 
-use mandeven::agent::{Agent, CronWiring, DiscordWiring, HeartbeatWiring, WechatWiring};
+use mandeven::agent::{
+    Agent, CronWiring, DiscordWiring, DreamWiring, HeartbeatWiring, WechatWiring,
+};
 use mandeven::bus::{Bus, ChannelID};
 use mandeven::channels::Manager;
 use mandeven::channels::discord::{self, DiscordChannel};
@@ -23,6 +26,7 @@ use mandeven::channels::wechat::{self, WechatChannel};
 use mandeven::cli::CliChannel;
 use mandeven::config::{self, AppConfig};
 use mandeven::cron::CronEngine;
+use mandeven::dream::DreamEngine;
 use mandeven::gateway::{Gateway, dispatch_channel};
 use mandeven::heartbeat::HeartbeatEngine;
 use mandeven::hook::HookEngine;
@@ -41,7 +45,7 @@ const TUI_CHANNEL: &str = "tui";
 /// Identifier for the Discord channel adapter.
 const DISCORD_CHANNEL: &str = "discord";
 
-/// Identifier for the WeChat channel adapter.
+/// Identifier for the `WeChat` channel adapter.
 const WECHAT_CHANNEL: &str = "wechat";
 
 /// Boxed error alias used at the `main` boundary.
@@ -53,7 +57,7 @@ async fn main() -> Result<(), DynError> {
 
     // Capture the launch CWD once. The canonical form anchors the
     // workspace boundary every tool reads via `workspace::root()`; the
-    // raw form drives the per-project session bucket.
+    // raw form drives the per-project bucket.
     let cwd = std::env::current_dir()?;
     let canonical_cwd = std::fs::canonicalize(&cwd)?;
     workspace::init(canonical_cwd);
@@ -63,10 +67,9 @@ async fn main() -> Result<(), DynError> {
     // `[sandbox]` block in the TOML keeps the default `WorkspaceWrite`.
     SandboxPolicy::init(cfg.sandbox.policy);
 
-    // Sessions are scoped per-project: same `~/.mandeven/projects/`
-    // bucket shape as Claude Code's `~/.claude/projects/<sanitized-cwd>/`
-    // — see agent-examples/claude-code-analysis/src/utils/sessionStoragePortable.ts.
-    let sessions = Arc::new(session::Manager::new(config::project_bucket(&cwd)).await?);
+    let project_bucket = config::project_bucket(&cwd);
+
+    let sessions = Arc::new(session::Manager::new(project_bucket.clone()).await?);
 
     // Skill index reads ~/.mandeven/skills/<name>/SKILL.md once at
     // boot. Disabled => empty index, no SkillTool registration, no
@@ -123,23 +126,18 @@ async fn main() -> Result<(), DynError> {
         None
     };
 
-    let mut tool_registry = tools::Registry::new();
-    tools::register_builtins(&mut tool_registry);
-    let task_manager = Arc::new(task::Manager::new(&config::project_bucket(&cwd)));
-    tools::task::register(&mut tool_registry, task_manager);
-    let memory_manager = Arc::new(memory::Manager::new(
-        &cfg.data_dir(),
-        &config::project_bucket(&cwd),
-    ));
-    if cfg.agent.memory.enabled {
-        tools::memory::register(&mut tool_registry, memory_manager.clone());
-    }
-    if let Some(wiring) = cron_wiring.as_ref() {
-        tools::cron::register(&mut tool_registry, wiring.engine.clone());
-    }
-    if !skill_index.is_empty() {
-        tool_registry.register(Arc::new(tools::skill::SkillTool::new(skill_index.clone())));
-    }
+    let memory_manager = Arc::new(memory::Manager::new(&cfg.data_dir(), &project_bucket));
+
+    let dream_wiring = if cfg.agent.dream.enabled && cfg.agent.memory.enabled {
+        let (engine, rx) = DreamEngine::new(&cfg.agent.dream, &project_bucket)?;
+        let engine = Arc::new(engine);
+        engine.start().await;
+        Some(DreamWiring { engine, rx })
+    } else {
+        None
+    };
+
+    let tool_registry = build_tool_registry(&project_bucket, cron_wiring.as_ref(), &skill_index);
 
     let (discord_channel, discord_wiring) = build_discord(&cfg).await?;
     let discord_active_rx = discord_wiring
@@ -157,6 +155,7 @@ async fn main() -> Result<(), DynError> {
         active_sessions.clone(),
         heartbeat_wiring,
         cron_wiring,
+        dream_wiring,
         memory_manager,
         discord_wiring,
         wechat_wiring,
@@ -196,6 +195,23 @@ async fn main() -> Result<(), DynError> {
     agent_handle.await??;
     gateway_handle.await??;
     Ok(())
+}
+
+fn build_tool_registry(
+    project_bucket: &Path,
+    cron_wiring: Option<&CronWiring>,
+    skill_index: &Arc<SkillIndex>,
+) -> tools::Registry {
+    let mut registry = tools::Registry::new();
+    tools::register_builtins(&mut registry);
+    tools::task::register(&mut registry, Arc::new(task::Manager::new(project_bucket)));
+    if let Some(wiring) = cron_wiring {
+        tools::cron::register(&mut registry, wiring.engine.clone());
+    }
+    if !skill_index.is_empty() {
+        registry.register(Arc::new(tools::skill::SkillTool::new(skill_index.clone())));
+    }
+    registry
 }
 
 /// Resolve the Discord channel + control pair from config.
@@ -239,7 +255,7 @@ async fn build_discord(
     Ok((Some(channel), Some(DiscordWiring { control })))
 }
 
-/// Resolve the WeChat channel + control pair from config.
+/// Resolve the `WeChat` channel + control pair from config.
 async fn build_wechat(
     cfg: &AppConfig,
 ) -> Result<(Option<WechatChannel>, Option<WechatWiring>), DynError> {

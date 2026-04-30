@@ -1,4 +1,4 @@
-//! Runtime control handle for the WeChat adapter.
+//! Runtime control handle for the `WeChat` adapter.
 
 use std::collections::HashSet;
 use std::io;
@@ -23,7 +23,7 @@ const SINGLE_USER_MS0_ERROR: &str =
 pub struct WechatStatus {
     /// Whether a connection is desired.
     pub active: bool,
-    /// Number of allowed WeChat peer ids.
+    /// Number of allowed `WeChat` peer ids.
     pub allowed_count: usize,
     /// Currently staged/connected account id.
     pub account_id: Option<String>,
@@ -71,7 +71,12 @@ impl WechatControl {
         }
     }
 
-    /// Add one WeChat peer id to the allow list.
+    /// Add one `WeChat` peer id to the allow list.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the id is empty, the single-user MS0 limit would
+    /// be exceeded, or the updated allowlist cannot be persisted.
     pub async fn allow(&self, user_id: String) -> io::Result<bool> {
         let user_id = user_id.trim().to_string();
         if user_id.is_empty() {
@@ -97,7 +102,11 @@ impl WechatControl {
         Ok(added)
     }
 
-    /// Remove one WeChat peer id from the allow list.
+    /// Remove one `WeChat` peer id from the allow list.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the updated allowlist cannot be persisted.
     pub async fn deny(&self, user_id: &str) -> io::Result<bool> {
         let removed = self.allowed.remove(&user_id.to_string());
         if removed {
@@ -115,6 +124,10 @@ impl WechatControl {
     }
 
     /// Open the long-poll connection. Re-resolves credentials each time.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when credentials cannot be resolved.
     pub async fn enable(&self) -> io::Result<bool> {
         if *self.active.borrow() {
             return Ok(false);
@@ -142,6 +155,10 @@ impl WechatControl {
     }
 
     /// Begin QR login and return the QR payload for display.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when iLink fails to issue a QR login payload.
     pub async fn begin_login(&self) -> io::Result<WechatLogin> {
         let client = Client::new();
         let start = api::request_qr(&client, &self.cfg.base_url).await?;
@@ -156,6 +173,11 @@ impl WechatControl {
     }
 
     /// Finish QR login, persist the account, and stage credentials.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when QR confirmation fails or credentials cannot be
+    /// persisted.
     pub async fn finish_login(&self, login: WechatLogin) -> io::Result<WechatCredentials> {
         let creds = api::wait_for_qr_confirmation(
             &login.client,
@@ -169,6 +191,10 @@ impl WechatControl {
     }
 
     /// Delete the currently staged or latest saved account.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when saved account state cannot be read or deleted.
     pub async fn logout(&self) -> io::Result<Option<String>> {
         let _ = self.disable();
         let account_id = {

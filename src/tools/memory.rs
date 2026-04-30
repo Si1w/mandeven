@@ -1,8 +1,9 @@
-//! Model-facing memory tools.
+//! Optional model-facing memory tools.
 //!
 //! Mirrors Claude Code's tool-shape preference: each durable-memory
 //! operation is a dedicated tool with its own strict object schema.
-//! User-facing inspection/removal still lives in `/memory`.
+//! The default runtime does not register this module: Dream owns inferred
+//! memory writes, and user-facing inspection/removal still lives in `/memory`.
 
 use std::sync::Arc;
 
@@ -20,7 +21,7 @@ use crate::memory::{
     UserProfile,
 };
 
-/// Register the model-facing memory tools.
+/// Register the optional model-facing memory tools.
 pub fn register(registry: &mut Registry, memory: Arc<memory::Manager>) {
     registry.register(Arc::new(MemoryRemember {
         memory: memory.clone(),
@@ -243,7 +244,7 @@ impl BaseTool for MemoryProfile {
 
 fn remember_parameters_schema() -> Value {
     let mut schema = schema::object_from_example(
-        json!({
+        &json!({
             "memory_id": "mem_0123456789abcdef",
             "scope": "global",
             "kind": "user",
@@ -310,7 +311,7 @@ fn remember_parameters_schema() -> Value {
 
 fn search_parameters_schema() -> Value {
     let mut schema = schema::object_from_example(
-        json!({
+        &json!({
             "query": "concise",
             "scope": "global",
             "kind": "user",
@@ -342,7 +343,7 @@ fn search_parameters_schema() -> Value {
 
 fn forget_parameters_schema() -> Value {
     let mut schema = schema::object_from_example(
-        json!({
+        &json!({
             "memory_id": "mem_0123456789abcdef",
         }),
         &["memory_id"],

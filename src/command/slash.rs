@@ -560,6 +560,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn parses_agent_commands() {
         assert_eq!(
             parse("compact recent file edits").unwrap(),

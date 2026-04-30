@@ -161,7 +161,7 @@ pub struct CliState {
     /// the redraw signal whenever the value flips so the badge
     /// updates without a user keystroke.
     pub discord_active: Option<tokio::sync::watch::Receiver<bool>>,
-    /// Watch receiver for the WeChat adapter's active flag.
+    /// Watch receiver for the `WeChat` adapter's active flag.
     pub wechat_active: Option<tokio::sync::watch::Receiver<bool>>,
 }
 

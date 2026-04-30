@@ -140,6 +140,7 @@ impl AppConfig {
     /// 3. The referenced provider and model both exist in `providers`.
     /// 4. `agent.heartbeat.interval_secs` is greater than zero.
     /// 5. `agent.memory.snapshot_limit` is greater than zero.
+    /// 6. `agent.dream.schedule` parses and Dream budgets are non-zero.
     fn validate(&self) -> Result<()> {
         if self.llm.providers.is_empty() {
             return Err(ConfigError::Invalid {
@@ -176,6 +177,37 @@ impl AppConfig {
         if self.agent.memory.snapshot_limit == 0 {
             return Err(ConfigError::Invalid {
                 field: "agent.memory.snapshot_limit",
+                reason: "must be greater than zero".into(),
+            });
+        }
+
+        crate::cron::Schedule::cron(&self.agent.dream.schedule).map_err(|err| {
+            ConfigError::Invalid {
+                field: "agent.dream.schedule",
+                reason: err.to_string(),
+            }
+        })?;
+        if self.agent.dream.min_interval_secs == 0 {
+            return Err(ConfigError::Invalid {
+                field: "agent.dream.min_interval_secs",
+                reason: "must be greater than zero".into(),
+            });
+        }
+        if self.agent.dream.max_events_per_run == 0 {
+            return Err(ConfigError::Invalid {
+                field: "agent.dream.max_events_per_run",
+                reason: "must be greater than zero".into(),
+            });
+        }
+        if self.agent.dream.max_prompt_chars == 0 {
+            return Err(ConfigError::Invalid {
+                field: "agent.dream.max_prompt_chars",
+                reason: "must be greater than zero".into(),
+            });
+        }
+        if self.agent.dream.max_output_tokens == 0 {
+            return Err(ConfigError::Invalid {
+                field: "agent.dream.max_output_tokens",
                 reason: "must be greater than zero".into(),
             });
         }
@@ -320,6 +352,28 @@ mod tests {
         let err = AppConfig::from_file(&path).unwrap_err().to_string();
 
         assert!(err.contains("agent.memory.snapshot_limit"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn from_file_rejects_invalid_dream_schedule() {
+        let path = std::env::temp_dir().join(format!("mandeven-config-{}.toml", Uuid::now_v7()));
+        let text = r#"
+            [llm]
+            default = "acme/my-profile"
+
+            [llm.acme.my-profile]
+            model_name = "upstream-model"
+            max_context_window = 128000
+
+            [agent.dream]
+            schedule = "not a cron"
+        "#;
+        std::fs::write(&path, text).unwrap();
+
+        let err = AppConfig::from_file(&path).unwrap_err().to_string();
+
+        assert!(err.contains("agent.dream.schedule"));
         let _ = std::fs::remove_file(path);
     }
 }

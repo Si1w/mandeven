@@ -1,4 +1,4 @@
-//! Shared mutable state for the WeChat channel and its control handle.
+//! Shared mutable state for the `WeChat` channel and its control handle.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -29,7 +29,7 @@ pub(super) struct WechatState {
     pub context_tokens: Mutex<HashMap<String, String>>,
     /// Message ids already observed in this process.
     pub seen_messages: Mutex<HashSet<String>>,
-    /// Final-only streaming buffers. WeChat does not support editing
+    /// Final-only streaming buffers. `WeChat` does not support editing
     /// sent messages, so deltas accumulate until `ReplyEnd`.
     pub streams: Mutex<HashMap<Uuid, String>>,
 }

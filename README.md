@@ -57,6 +57,10 @@ enabled = true
 session_snapshot = true
 profile_enabled = true
 snapshot_limit = 8
+
+[agent.dream]
+enabled = true
+schedule = "0 3 * * *"
 ```
 
 **3. Chat**
@@ -74,7 +78,6 @@ Registered automatically and advertised to the model on every turn.
 | Web        | DuckDuckGo search and URL fetch with HTML→Markdown + SSRF guard |
 | Task       | In-session progress ledger (create / update / list / get) for multi-step plans |
 | Cron       | Manage scheduled prompts (create / list / delete); paired with the user-facing `/cron` command |
-| Memory     | Durable cross-session memories with a derived user profile; paired with the user-facing `/memory` command |
 
 ## 📡 Channels
 
@@ -99,6 +102,7 @@ state lives in sidecar files; durable enable/budget knobs live in
 | `cron`      | `~/.mandeven/cron/jobs.json`          | Cron-scheduled prompts that re-enter the agent loop     |
 | `heartbeat` | `[agent.heartbeat]` in `mandeven.toml`| Periodic self-check that can queue follow-up prompts    |
 | `memory`    | `[agent.memory]` in `mandeven.toml`   | Durable memories + frozen per-session prompt snapshot   |
+| `dream`     | `[agent.dream]` in `mandeven.toml`    | Cron-driven background review that distills session evidence into memory |
 
 ## 📜 License
 

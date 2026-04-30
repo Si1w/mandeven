@@ -13,7 +13,7 @@ use serde_json::{Value, json};
 /// Optional fields are represented by being present in `properties` but
 /// absent from `required`; this avoids nullable unions in provider-facing
 /// schemas.
-pub(crate) fn object_from_example(example: Value, required: &[&str]) -> Value {
+pub(crate) fn object_from_example(example: &Value, required: &[&str]) -> Value {
     let mut schema = serde_json::to_value(schema_for_value!(example))
         .expect("schema_for_value output always serializes");
     if let Some(obj) = schema.as_object_mut() {

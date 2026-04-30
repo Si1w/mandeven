@@ -40,6 +40,7 @@ use crate::command::CommandOutcome;
 use crate::command::slash::{self, SlashCommand, SwitchCommand};
 use crate::config::{AgentConfig, AppConfig, LLMConfig, LLMProfile};
 use crate::cron;
+use crate::dream;
 use crate::gateway::{ActiveSessions, DispatchReceiver, InboundDispatch};
 use crate::heartbeat::{HeartbeatEngine, HeartbeatTick};
 use crate::hook::{HookEngine, HookEvent};
@@ -111,14 +112,19 @@ pub struct Agent {
     /// Receiver paired with the cron engine. Raced against `inbox`
     /// (and the heartbeat receiver, when present) in [`Agent::run`].
     cron_rx: Option<mpsc::Receiver<cron::CronTick>>,
-    /// Durable memory/profile manager. The model writes through the
-    /// `memory` tool; `/memory` is the user-facing governance surface.
+    /// Dream scheduler handle, present iff the engine was wired in.
+    dream: Option<Arc<dream::DreamEngine>>,
+    /// Receiver paired with the Dream engine. Dream ticks are quiet
+    /// background review passes and never enter the user transcript.
+    dream_rx: Option<mpsc::Receiver<dream::DreamTick>>,
+    /// Durable memory/profile manager. Dream writes inferred memories;
+    /// `/memory` is the user-facing governance surface.
     memory: Arc<memory::Manager>,
     /// Discord adapter control handle, present iff the channel was
     /// registered. Cloned into [`AgentCommandCtx`] so `/discord
     /// allow|deny|list` can mutate the runtime allow list.
     discord: Option<crate::channels::discord::DiscordControl>,
-    /// WeChat adapter control handle, present iff the channel was
+    /// `WeChat` adapter control handle, present iff the channel was
     /// registered.
     wechat: Option<crate::channels::wechat::WechatControl>,
     /// Live view of the gateway's per-channel session bindings.
@@ -234,6 +240,16 @@ pub struct CronWiring {
     pub rx: mpsc::Receiver<cron::CronTick>,
 }
 
+/// Options for optional Dream wiring. Same scheduler-handle + receiver shape
+/// as heartbeat and cron, but Dream ticks are handled quietly and never route to
+/// a user channel.
+pub struct DreamWiring {
+    /// Scheduler/store handle.
+    pub engine: Arc<dream::DreamEngine>,
+    /// Tick stream from the scheduler.
+    pub rx: mpsc::Receiver<dream::DreamTick>,
+}
+
 /// Options for the optional Discord wiring. Carries only the runtime
 /// control handle — Discord has no tick stream, just the
 /// allowlist mutator. Threaded into [`Agent::new`] alongside
@@ -244,7 +260,7 @@ pub struct DiscordWiring {
     pub control: crate::channels::discord::DiscordControl,
 }
 
-/// Options for optional WeChat wiring.
+/// Options for optional `WeChat` wiring.
 pub struct WechatWiring {
     /// Runtime control handle cloned into [`AgentCommandCtx`].
     pub control: crate::channels::wechat::WechatControl,
@@ -261,6 +277,15 @@ enum Event {
     HeartbeatTick(Option<HeartbeatTick>),
     /// Cron tick fired. `None` semantics match the heartbeat arm.
     CronTick(Option<cron::CronTick>),
+    /// Dream tick fired. `None` semantics match the heartbeat arm.
+    DreamTick(Option<dream::DreamTick>),
+}
+
+async fn recv_enabled<T>(rx: &mut Option<mpsc::Receiver<T>>) -> Option<T> {
+    rx.as_mut()
+        .expect("select branch only enabled when receiver is present")
+        .recv()
+        .await
 }
 
 impl Agent {
@@ -292,6 +317,7 @@ impl Agent {
         active_sessions: ActiveSessions,
         heartbeat: Option<HeartbeatWiring>,
         cron: Option<CronWiring>,
+        dream: Option<DreamWiring>,
         memory: Arc<memory::Manager>,
         discord: Option<DiscordWiring>,
         wechat: Option<WechatWiring>,
@@ -308,6 +334,10 @@ impl Agent {
         };
         let (cron_handle, cron_rx) = match cron {
             Some(CronWiring { engine, rx }) => (Some(engine), Some(rx)),
+            None => (None, None),
+        };
+        let (dream_handle, dream_rx) = match dream {
+            Some(DreamWiring { engine, rx }) => (Some(engine), Some(rx)),
             None => (None, None),
         };
         let discord_handle = discord.map(|w| w.control);
@@ -327,6 +357,8 @@ impl Agent {
             heartbeat_rx,
             cron: cron_handle,
             cron_rx,
+            dream: dream_handle,
+            dream_rx,
             memory,
             discord: discord_handle,
             wechat: wechat_handle,
@@ -353,30 +385,24 @@ impl Agent {
     /// future shutdown-time failures.
     pub async fn run(mut self) -> Result<()> {
         loop {
-            // Split mut borrows so `tokio::select!` can race three
-            // queues without a whole-self conflict. The selected
-            // branch's `await` ends before any `&self` method call
-            // below (NLL releases the field borrows), so subsequent
-            // calls into `self.handle_*` are clean.
+            // Split mut borrows so `tokio::select!` can race queues
+            // without a whole-self conflict. The selected branch's
+            // `await` ends before any `&self` method call below (NLL
+            // releases the field borrows), so subsequent calls into
+            // `self.handle_*` are clean.
+            let heartbeat_enabled = self.heartbeat_rx.is_some();
+            let cron_enabled = self.cron_rx.is_some();
+            let dream_enabled = self.dream_rx.is_some();
             let inbox = &mut self.inbox;
-            let event = match (self.heartbeat_rx.as_mut(), self.cron_rx.as_mut()) {
-                (Some(hb), Some(cr)) => tokio::select! {
-                    biased;
-                    msg = inbox.recv() => Event::Dispatch(msg),
-                    tick = hb.recv() => Event::HeartbeatTick(tick),
-                    tick = cr.recv() => Event::CronTick(tick),
-                },
-                (Some(hb), None) => tokio::select! {
-                    biased;
-                    msg = inbox.recv() => Event::Dispatch(msg),
-                    tick = hb.recv() => Event::HeartbeatTick(tick),
-                },
-                (None, Some(cr)) => tokio::select! {
-                    biased;
-                    msg = inbox.recv() => Event::Dispatch(msg),
-                    tick = cr.recv() => Event::CronTick(tick),
-                },
-                (None, None) => Event::Dispatch(inbox.recv().await),
+            let heartbeat_rx = &mut self.heartbeat_rx;
+            let cron_rx = &mut self.cron_rx;
+            let dream_rx = &mut self.dream_rx;
+            let event = tokio::select! {
+                biased;
+                msg = inbox.recv() => Event::Dispatch(msg),
+                tick = recv_enabled(heartbeat_rx), if heartbeat_enabled => Event::HeartbeatTick(tick),
+                tick = recv_enabled(cron_rx), if cron_enabled => Event::CronTick(tick),
+                tick = recv_enabled(dream_rx), if dream_enabled => Event::DreamTick(tick),
             };
 
             match event {
@@ -395,6 +421,10 @@ impl Agent {
                     self.cron_rx = None;
                 }
                 Event::CronTick(Some(tick)) => self.handle_cron_tick(tick).await?,
+                Event::DreamTick(None) => {
+                    self.dream_rx = None;
+                }
+                Event::DreamTick(Some(tick)) => self.handle_dream_tick(tick).await?,
             }
         }
     }
@@ -594,6 +624,42 @@ impl Agent {
             }
         }
         let _ = self.send_turn_end(&iter).await;
+        Ok(())
+    }
+
+    /// Handle a quiet Dream tick. Errors are logged and swallowed so a failed
+    /// background review never interrupts foreground conversation handling.
+    async fn handle_dream_tick(&self, tick: dream::DreamTick) -> Result<()> {
+        let Some(engine) = self.dream.as_ref() else {
+            return Ok(());
+        };
+        let model = self.model_snapshot();
+        let outcome = dream::run_once(dream::RunInput {
+            config: &self.config.dream,
+            store: engine.store(),
+            sessions: self.sessions.clone(),
+            memory: self.memory.clone(),
+            client: model.client.clone(),
+            model_name: model.profile.model_name.clone(),
+            timeout_secs: self.timeout_secs,
+            now: tick.at,
+        })
+        .await;
+
+        match outcome {
+            Ok(outcome) if outcome.status == dream::RunStatus::Succeeded => {
+                eprintln!(
+                    "[dream] {}: reviewed {} session(s), {} event(s), created {}, updated {}",
+                    outcome.message,
+                    outcome.reviewed_sessions,
+                    outcome.reviewed_events,
+                    outcome.memories_created,
+                    outcome.memories_updated
+                );
+            }
+            Ok(_) => {}
+            Err(err) => eprintln!("[dream] review failed: {err}"),
+        }
         Ok(())
     }
 
@@ -891,7 +957,7 @@ impl Agent {
         {
             Ok((compacted, _report)) => {
                 self.sessions
-                    .replace_messages(&iter.session, compacted.clone())
+                    .append_compaction(&iter.session, compacted.clone())
                     .await?;
                 // Compaction rewrites the conversation prefix, so any
                 // cached `iteration_system` sections are about to be
@@ -964,7 +1030,7 @@ impl Agent {
 
         let payload = match result {
             Ok((compacted, report)) => {
-                self.sessions.replace_messages(&session, compacted).await?;
+                self.sessions.append_compaction(&session, compacted).await?;
                 // Same reasoning as the auto path in
                 // `maybe_auto_compact`: the prefix changed, so the
                 // section cache should rebuild.
@@ -1062,7 +1128,7 @@ impl Agent {
             // toolUseContext.renderedSystemPrompt per call, never
             // appended to the transcript.
             let messages = self.prepend_iteration_system(messages);
-            let messages = self.prepend_memory_snapshot(messages, &memory_snapshot);
+            let messages = append_memory_snapshot(messages, &memory_snapshot);
             let outcome = self.call(iter, messages).await?;
             let CallOutcome {
                 content,
@@ -1216,14 +1282,6 @@ impl Agent {
         out.push(system);
         out.append(&mut messages);
         out
-    }
-
-    fn prepend_memory_snapshot(
-        &self,
-        messages: Vec<Message>,
-        memory_snapshot: &str,
-    ) -> Vec<Message> {
-        append_memory_snapshot(messages, memory_snapshot)
     }
 
     async fn capture_memory_snapshot(&self, iter: &Iteration) -> Option<String> {

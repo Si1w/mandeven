@@ -41,7 +41,7 @@ pub struct AgentCommandCtx {
     /// registered. `/discord` subcommands mutate the runtime allow
     /// list and persist to the JSON sidecar through it.
     pub discord: Option<DiscordControl>,
-    /// WeChat allowlist/login/control handle, present iff the WeChat
+    /// `WeChat` allowlist/login/control handle, present iff the `WeChat`
     /// channel is registered.
     pub wechat: Option<WechatControl>,
     /// Outbound sender used by long-running commands that need to

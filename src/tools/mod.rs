@@ -257,8 +257,8 @@ fn error_content(message: &str) -> String {
 /// [`web::WebSearch`], [`web::WebFetch`]) into `registry`.
 ///
 /// Stateful or config-gated tools register through their own modules because
-/// they need runtime handles: [`task::register`], [`memory::register`],
-/// [`cron::register`], and [`skill::SkillTool`].
+/// they need runtime handles: [`task::register`], [`cron::register`], and
+/// [`skill::SkillTool`].
 /// Callers who want a different subset can register tools directly instead.
 pub fn register_builtins(registry: &mut Registry) {
     registry.register(Arc::new(file::FileRead));

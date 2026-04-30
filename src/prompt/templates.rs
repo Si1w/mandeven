@@ -14,8 +14,8 @@
 //! Tool names referenced in [`USING_TOOLS`] (`file_read`, `file_write`,
 //! `file_edit`, `grep`, `shell`, `web_search`, `web_fetch`,
 //! `task_create`, `task_update`, `task_list`, `task_get`,
-//! `cron_create`, `cron_list`, `cron_delete`, `memory_*`) must stay in sync with
-//! `crate::tools::register_builtins` plus the task/cron/memory tool registration
+//! `cron_create`, `cron_list`, `cron_delete`) must stay in sync with
+//! `crate::tools::register_builtins` plus the task/cron/skill tool registration
 //! in `main.rs`. Rename a tool there and you have to rename it here too.
 
 /// Section name for the agent identity / first-principles framing.
@@ -182,19 +182,11 @@ user intent to schedule future or recurring autonomous work. Check \
 existing cron jobs before creating duplicates. Cron tools are \
 model-facing; `/cron` is the user-facing governance surface for \
 inspecting, disabling, triggering, and removing schedules.
-  - Use `memory_remember`, `memory_search`, `memory_forget`, and \
-`memory_profile` for durable facts, preferences, feedback, or reference \
-pointers that should survive across sessions and cannot be reliably \
-derived from code, git, task state, cron state, or AGENTS.md. Do not \
-save secrets, raw logs, task progress, completed-work diaries, or \
-current conversation state. A compact memory snapshot may already be \
-visible in the session context; call `memory_search` only when you need \
-full body/details not shown there. Save only facts that reduce future \
-user steering. Write memories as declarative facts, not instructions: \
-\"User prefers concise responses\" is good; \"Always respond concisely\" \
-is not. Procedures and workflows belong in skills or AGENTS.md, not \
-memory. Memory tools are model-facing; `/memory` is the user-facing \
-governance surface.
+  - Durable memory is managed outside the foreground tool loop by the \
+Dream background reviewer and the user-facing `/memory` governance \
+surface. Do not emulate memory writes in files, tasks, cron jobs, or \
+AGENTS.md. Procedures and workflows belong in skills or AGENTS.md, \
+not memory.
   - Reserve `shell` for system commands and terminal operations that \
 genuinely require shell execution.
 - Use tools for live or environment-specific facts instead of answering \
@@ -276,10 +268,6 @@ mod tests {
             "cron_create",
             "cron_list",
             "cron_delete",
-            "memory_remember",
-            "memory_search",
-            "memory_forget",
-            "memory_profile",
         ] {
             assert!(
                 USING_TOOLS.contains(name),
@@ -295,6 +283,6 @@ mod tests {
     fn templates_include_execution_and_memory_discipline() {
         assert!(DOING_TASKS.contains("same turn"));
         assert!(SYSTEM_RULES.contains("background context"));
-        assert!(USING_TOOLS.contains("declarative facts"));
+        assert!(USING_TOOLS.contains("Dream background reviewer"));
     }
 }

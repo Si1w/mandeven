@@ -1,4 +1,4 @@
-//! Persistence for the WeChat channel.
+//! Persistence for the `WeChat` channel.
 //!
 //! All runtime-mutable channel state lives under
 //! `<data_dir>/channels/wechat/` so future adapters can use the same
@@ -19,10 +19,10 @@ use super::api::WechatCredentials;
 /// Common subdirectory for all external channel runtime state.
 pub const CHANNELS_SUBDIR: &str = "channels";
 
-/// WeChat channel subdirectory.
+/// `WeChat` channel subdirectory.
 pub const WECHAT_SUBDIR: &str = "wechat";
 
-/// Filename holding the allowed WeChat peer ids.
+/// Filename holding the allowed `WeChat` peer ids.
 pub const ALLOWLIST_FILENAME: &str = "allowlist.json";
 
 #[derive(Debug, Default, Deserialize, Serialize)]
@@ -76,6 +76,10 @@ fn context_tokens_path(data_dir: &Path, account_id: &str) -> PathBuf {
 }
 
 /// Load the allow list from disk. Missing file means deny-all.
+///
+/// # Errors
+///
+/// Returns an error when the file cannot be read or parsed.
 pub async fn load_allowlist(path: &Path) -> io::Result<HashSet<String>> {
     match fs::read_to_string(path).await {
         Ok(text) => {
@@ -89,6 +93,10 @@ pub async fn load_allowlist(path: &Path) -> io::Result<HashSet<String>> {
 }
 
 /// Atomically save the allow list.
+///
+/// # Errors
+///
+/// Returns an error when the parent directory or JSON file cannot be written.
 pub async fn save_allowlist<S: BuildHasher>(
     path: &Path,
     ids: &HashSet<String, S>,
@@ -99,6 +107,11 @@ pub async fn save_allowlist<S: BuildHasher>(
 }
 
 /// Persist one QR-login account.
+///
+/// # Errors
+///
+/// Returns an error when credentials are incomplete or the account file cannot
+/// be written.
 pub async fn save_account(data_dir: &Path, creds: &WechatCredentials) -> io::Result<PathBuf> {
     if !creds.is_complete() {
         return Err(io::Error::new(
@@ -118,6 +131,10 @@ pub async fn save_account(data_dir: &Path, creds: &WechatCredentials) -> io::Res
 }
 
 /// Load a specific account by id.
+///
+/// # Errors
+///
+/// Returns an error when the account file cannot be read or parsed.
 pub async fn load_account(
     data_dir: &Path,
     account_id: &str,
@@ -140,6 +157,10 @@ pub async fn load_account(
 }
 
 /// Load the newest saved account, if any.
+///
+/// # Errors
+///
+/// Returns an error when the accounts directory cannot be read.
 pub async fn load_latest_account(data_dir: &Path) -> io::Result<Option<WechatCredentials>> {
     let dir = accounts_dir(data_dir);
     let mut entries = match fs::read_dir(&dir).await {
@@ -174,6 +195,10 @@ pub async fn load_latest_account(data_dir: &Path) -> io::Result<Option<WechatCre
 }
 
 /// Delete a saved account.
+///
+/// # Errors
+///
+/// Returns an error when the account file cannot be removed.
 pub async fn delete_account(data_dir: &Path, account_id: &str) -> io::Result<bool> {
     let path = account_path(data_dir, account_id);
     match fs::remove_file(path).await {
@@ -184,6 +209,10 @@ pub async fn delete_account(data_dir: &Path, account_id: &str) -> io::Result<boo
 }
 
 /// Load the iLink long-poll cursor for an account.
+///
+/// # Errors
+///
+/// Returns an error when the cursor file cannot be read.
 pub async fn load_sync_buf(data_dir: &Path, account_id: &str) -> io::Result<String> {
     let path = sync_path(data_dir, account_id);
     match fs::read_to_string(path).await {
@@ -201,6 +230,10 @@ pub async fn load_sync_buf(data_dir: &Path, account_id: &str) -> io::Result<Stri
 }
 
 /// Save the iLink long-poll cursor for an account.
+///
+/// # Errors
+///
+/// Returns an error when the cursor file cannot be written.
 pub async fn save_sync_buf(data_dir: &Path, account_id: &str, sync_buf: &str) -> io::Result<()> {
     write_json(
         &sync_path(data_dir, account_id),
@@ -211,6 +244,10 @@ pub async fn save_sync_buf(data_dir: &Path, account_id: &str, sync_buf: &str) ->
 }
 
 /// Load context tokens keyed by peer id.
+///
+/// # Errors
+///
+/// Returns an error when the context-token file cannot be read or parsed.
 pub async fn load_context_tokens(
     data_dir: &Path,
     account_id: &str,
@@ -225,10 +262,14 @@ pub async fn load_context_tokens(
 }
 
 /// Save context tokens keyed by peer id.
-pub async fn save_context_tokens(
+///
+/// # Errors
+///
+/// Returns an error when the context-token file cannot be written.
+pub async fn save_context_tokens<S: BuildHasher>(
     data_dir: &Path,
     account_id: &str,
-    tokens: &HashMap<String, String>,
+    tokens: &HashMap<String, String, S>,
 ) -> io::Result<()> {
     write_json(&context_tokens_path(data_dir, account_id), tokens, true).await
 }

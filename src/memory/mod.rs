@@ -51,13 +51,13 @@ const PROFILE_ITEM_LIMIT: usize = 8;
 /// User-tunable knobs for durable memory.
 ///
 /// Runtime memory records live in JSON stores under `~/.mandeven/` and the
-/// current project bucket. `mandeven.toml` only controls whether the model can
-/// use memory and how much compact context is frozen into a new session.
+/// current project bucket. `mandeven.toml` controls whether memory is active
+/// and how much compact context is frozen into a new session.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct MemoryConfig {
-    /// When `false`, the model-facing `memory` tool is not registered and new
-    /// sessions do not receive memory snapshots. `/memory` remains available as
-    /// a governance surface for inspecting or archiving existing records.
+    /// When `false`, new sessions do not receive memory snapshots and Dream
+    /// does not write inferred memories. `/memory` remains available as a
+    /// governance surface for inspecting or archiving existing records.
     #[serde(default = "default_enabled")]
     pub enabled: bool,
 

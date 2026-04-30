@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use super::paths;
 use crate::agent::compact::CompactConfig;
 use crate::cron::CronConfig;
+use crate::dream::DreamConfig;
 use crate::heartbeat::HeartbeatConfig;
 use crate::hook::HookConfig;
 use crate::memory::MemoryConfig;
@@ -63,7 +64,7 @@ pub struct AppConfig {
 pub struct ChannelsConfig {
     /// Discord adapter. See [`DiscordConfig`].
     pub discord: Option<DiscordConfig>,
-    /// WeChat personal-account adapter. See [`WechatConfig`].
+    /// `WeChat` personal-account adapter. See [`WechatConfig`].
     pub wechat: Option<WechatConfig>,
 }
 
@@ -104,7 +105,7 @@ fn default_discord_token_env() -> String {
     "DISCORD_BOT_TOKEN".to_string()
 }
 
-/// Personal WeChat adapter configuration.
+/// Personal `WeChat` adapter configuration.
 ///
 /// MS0 scope: text-only DMs via Tencent's iLink Bot API. The token
 /// produced by QR login is stored under
@@ -212,10 +213,15 @@ pub struct AgentConfig {
     pub hook: HookConfig,
 
     /// Per-agent memory configuration. Records remain in JSON stores under
-    /// `~/.mandeven/`; this block only controls model access and the frozen
+    /// `~/.mandeven/`; this block controls the memory subsystem and the frozen
     /// session snapshot budget.
     #[serde(default)]
     pub memory: MemoryConfig,
+
+    /// Per-agent Dream configuration. Dream is a quiet background review pass
+    /// that distills append-only session evidence into memory.
+    #[serde(default)]
+    pub dream: DreamConfig,
 }
 
 impl AppConfig {
@@ -224,8 +230,8 @@ impl AppConfig {
     /// Always resolves through [`paths::home_dir`] (i.e.
     /// `$MANDEVEN_HOME` if set, else `~/.mandeven/`). All
     /// agent-managed state — `AGENTS.md`, `HEARTBEAT.md`,
-    /// `cron/jobs.json`, and the per-project `projects/<bucket>/`
-    /// session directories — lives under this root.
+    /// `cron/jobs.json`, and per-project `projects/<bucket>/`
+    /// session/task/memory directories — lives under this root.
     ///
     /// Independent of `source_path`: the config file location is for
     /// diagnostics only. This guarantees `data_dir()` is consistent

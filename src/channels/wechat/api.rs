@@ -1,4 +1,4 @@
-//! Thin Tencent iLink Bot API client for the personal WeChat channel.
+//! Thin Tencent iLink Bot API client for the personal `WeChat` channel.
 
 use std::io;
 use std::time::Duration;
@@ -33,7 +33,7 @@ pub struct WechatCredentials {
     pub token: String,
     /// API base URL returned by iLink. Usually [`ILINK_BASE_URL`].
     pub base_url: String,
-    /// WeChat user id reported by QR login, when available.
+    /// `WeChat` user id reported by QR login, when available.
     #[serde(default)]
     pub user_id: String,
 }
@@ -113,6 +113,11 @@ pub async fn request_qr(client: &Client, base_url: &str) -> io::Result<QrLoginSt
 }
 
 /// Poll one QR login status step.
+///
+/// # Errors
+///
+/// Returns an I/O-shaped error for HTTP, JSON, or malformed confirmed-login
+/// payloads.
 pub async fn poll_qr_once(client: &Client, base_url: &str, qrcode: &str) -> io::Result<QrPoll> {
     let raw = api_get(
         client,
@@ -127,7 +132,6 @@ pub async fn poll_qr_once(client: &Client, base_url: &str, qrcode: &str) -> io::
         .unwrap_or("wait")
         .trim();
     match status {
-        "wait" => Ok(QrPoll::Waiting),
         "scaned" => Ok(QrPoll::Scanned),
         "scaned_but_redirect" => {
             let host = raw
@@ -188,6 +192,11 @@ pub async fn poll_qr_once(client: &Client, base_url: &str, qrcode: &str) -> io::
 }
 
 /// Poll until QR login finishes or times out.
+///
+/// # Errors
+///
+/// Returns an error when the QR code expires, the timeout elapses, or an
+/// intermediate poll fails.
 pub async fn wait_for_qr_confirmation(
     client: &Client,
     start: &QrLoginStart,
@@ -235,6 +244,10 @@ pub fn render_qr_ascii(data: &str) -> String {
 }
 
 /// Long-poll iLink for inbound messages.
+///
+/// # Errors
+///
+/// Returns an I/O-shaped error for HTTP, JSON, or malformed-response failures.
 pub async fn get_updates(
     client: &Client,
     credentials: &WechatCredentials,
@@ -253,6 +266,10 @@ pub async fn get_updates(
 }
 
 /// Send one text message through iLink.
+///
+/// # Errors
+///
+/// Returns an error when the message is empty or the iLink send request fails.
 pub async fn send_text(
     client: &Client,
     credentials: &WechatCredentials,
@@ -377,7 +394,8 @@ async fn api_post(
 }
 
 fn random_wechat_uin() -> String {
-    let value = (Uuid::now_v7().as_u128() & u128::from(u32::MAX)) as u32;
+    let masked = Uuid::now_v7().as_u128() & u128::from(u32::MAX);
+    let value = u32::try_from(masked).expect("masked UUID fragment always fits in u32");
     base64_encode(value.to_string().as_bytes())
 }
 

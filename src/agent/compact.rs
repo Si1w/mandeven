@@ -297,8 +297,8 @@ pub fn should_compact(messages: &[Message], profile: &LLMProfile, cfg: &CompactC
 ///
 /// Manual `/compact` and the auto-trigger path both call this. The
 /// function is pure with respect to disk: callers persist the
-/// returned message list themselves (typically via
-/// `crate::session::Manager::replace_messages`).
+/// returned message list themselves, typically by appending a compact
+/// event through `crate::session::Manager::append_compaction`.
 ///
 /// State re-injection (Claude Code's
 /// `createPostCompactFileAttachments` and friends) isn't wired here

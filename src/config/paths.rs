@@ -13,11 +13,11 @@
 //!   AGENTS.md                             ← global agent instructions
 //!   HEARTBEAT.md                          ← global heartbeat checklist
 //!   cron/jobs.json                        ← global cron jobs
-//!   projects/                             ← per-project session bucket
+//!   projects/                             ← per-project session/task/memory bucket
 //!     -Users-foo-projectA/
 //!       <session-uuid>.jsonl
-//!     -Users-foo-projectB/
-//!       <session-uuid>.jsonl
+//!       tasks/
+//!       memory/
 //! ```
 //!
 //! Project-local overrides (e.g. a `<project>/.agents/AGENTS.md`
@@ -40,7 +40,7 @@ pub const HOME_ENV_VAR: &str = "MANDEVEN_HOME";
 /// Filename of the canonical config file inside [`HOME_SUBDIR`].
 pub const CONFIG_FILENAME: &str = "mandeven.toml";
 
-/// Subdirectory of [`HOME_SUBDIR`] holding per-project session buckets.
+/// Subdirectory of [`HOME_SUBDIR`] holding per-project session/task/memory buckets.
 pub const PROJECTS_SUBDIR: &str = "projects";
 
 /// Reserved name for future project-local overrides. Not consumed yet
@@ -81,7 +81,7 @@ pub fn config_path() -> PathBuf {
     home_dir().join(CONFIG_FILENAME)
 }
 
-/// Path to the per-project session bucket parent directory.
+/// Path to the per-project bucket parent directory.
 #[must_use]
 pub fn projects_dir() -> PathBuf {
     home_dir().join(PROJECTS_SUBDIR)

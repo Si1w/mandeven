@@ -6,7 +6,6 @@ use std::time::Duration;
 use mandeven::config::{self, AppConfig, LLMProfile};
 use mandeven::cron::CronEngine;
 use mandeven::llm::{Message, Request, Thinking};
-use mandeven::memory;
 use mandeven::prompt::{PromptContext, PromptEngine};
 use mandeven::security::SandboxPolicy;
 use mandeven::skill::{self, SkillIndex};
@@ -39,15 +38,6 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         &mut registry,
         Arc::new(task::Manager::new(&config::project_bucket(&cwd))),
     );
-    if cfg.agent.memory.enabled {
-        tools::memory::register(
-            &mut registry,
-            Arc::new(memory::Manager::new(
-                &cfg.data_dir(),
-                &config::project_bucket(&cwd),
-            )),
-        );
-    }
     if cfg.agent.cron.enabled {
         let (engine, _rx) = CronEngine::new(&cfg.agent.cron, &cfg.data_dir()).await?;
         tools::cron::register(&mut registry, Arc::new(engine));
@@ -100,9 +90,7 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
             usage.completion_tokens,
             display_opt(usage.cache_hit_tokens),
             display_opt(usage.cache_miss_tokens),
-            ratio
-                .map(|r| format!("{:.2}%", r * 100.0))
-                .unwrap_or_else(|| "n/a".to_string())
+            ratio.map_or_else(|| "n/a".to_string(), |r| format!("{:.2}%", r * 100.0))
         );
         if round > 1
             && let Some(ratio) = ratio
@@ -115,7 +103,9 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     if measured.is_empty() {
         println!("verdict=unknown reason=DeepSeek did not return cache hit/miss tokens");
     } else {
-        let avg = measured.iter().sum::<f64>() / measured.len() as f64;
+        let measured_len =
+            u32::try_from(measured.len()).expect("ROUNDS is small enough to fit in u32");
+        let avg = measured.iter().sum::<f64>() / f64::from(measured_len);
         let min = measured.iter().copied().fold(f64::INFINITY, f64::min);
         let verdict = if avg >= TARGET_RATIO { "ok" } else { "low" };
         println!(
@@ -159,10 +149,9 @@ fn cache_ratio(hit: Option<u32>, miss: Option<u32>) -> Option<f64> {
     let hit = hit?;
     let miss = miss?;
     let total = hit + miss;
-    (total > 0).then_some(hit as f64 / total as f64)
+    (total > 0).then_some(f64::from(hit) / f64::from(total))
 }
 
 fn display_opt(v: Option<u32>) -> String {
-    v.map(|n| n.to_string())
-        .unwrap_or_else(|| "n/a".to_string())
+    v.map_or_else(|| "n/a".to_string(), |n| n.to_string())
 }

@@ -1,4 +1,4 @@
-//! `shell` tool — execute a shell command.
+//! `shell_exec` tool — execute a shell command.
 //!
 //! Design notes:
 //!
@@ -43,7 +43,7 @@ use async_trait::async_trait;
 use regex::Regex;
 use schemars::{JsonSchema, schema_for};
 use serde::Deserialize;
-use serde_json::Value;
+use serde_json::{Value, json};
 use tokio::process::Command;
 use tokio::time::timeout;
 
@@ -113,16 +113,19 @@ struct ShellParams {
 /// `DENY_RE`, so no per-instance state is needed.
 pub struct Shell;
 
+/// Tool name used in the registry and on the wire.
+pub const SHELL_TOOL_NAME: &str = "shell_exec";
+
 #[async_trait]
 impl BaseTool for Shell {
     fn schema(&self) -> Tool {
         Tool {
-            name: "shell".into(),
+            name: SHELL_TOOL_NAME.into(),
             description: "Execute a shell command via `sh -c` (or `$SHELL -lc` \
                 when `login: true`) with a curated environment (HOME, PATH, \
                 LANG, TERM, USER, SHELL). Prefer file_read / file_write / \
-                file_edit over cat / echo / sed, and the grep tool over shell \
-                find/grep. Output is middle-truncated at the shared tool \
+                file_edit over cat / echo / sed. Use rg through shell_exec only \
+                for repository-wide searches. Output is middle-truncated at the shared tool \
                 result cap; timeout defaults to 60s, max 600s. A minimal \
                 deny-list always blocks obviously destructive commands \
                 (rm -rf, dd if=, shutdown, fork bomb). Under read_only \
@@ -138,7 +141,7 @@ impl BaseTool for Shell {
     async fn call(&self, args: Value) -> Result<ToolOutcome> {
         let p: ShellParams =
             serde_json::from_value(args).map_err(|source| Error::InvalidArguments {
-                tool: "shell".into(),
+                tool: SHELL_TOOL_NAME.into(),
                 source,
             })?;
 
@@ -215,13 +218,22 @@ impl BaseTool for Shell {
         }
         write!(result, "Exit code: {exit}").expect("writing to String is infallible");
 
-        Ok(Value::String(middle_truncate(&result, MAX_TOOL_RESULT_BYTES)).into())
+        Ok(json!({
+            "ok": exit == 0,
+            "observation_type": "execution",
+            "object": "shell_exec",
+            "exit_code": exit,
+            "stdout": middle_truncate(&stdout, MAX_TOOL_RESULT_BYTES / 2),
+            "stderr": middle_truncate(&stderr, MAX_TOOL_RESULT_BYTES / 2),
+            "output": middle_truncate(&result, MAX_TOOL_RESULT_BYTES),
+        })
+        .into())
     }
 }
 
 fn exec(message: impl Into<String>) -> Error {
     Error::Execution {
-        tool: "shell".into(),
+        tool: SHELL_TOOL_NAME.into(),
         message: message.into(),
     }
 }

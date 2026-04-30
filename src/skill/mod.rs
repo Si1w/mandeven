@@ -5,7 +5,7 @@
 //! drop a directory into `~/.mandeven/skills/<name>/SKILL.md`, fill
 //! in YAML frontmatter (`name`, `description`), and the body becomes
 //! a reusable workflow the user can invoke as `/<name>` or the model
-//! can invoke via the `skill_tool`.
+//! can invoke via `skill_use`.
 //!
 //! ## On-disk layout
 //!
@@ -25,7 +25,7 @@
 //!    through to [`SkillIndex::get`], retrieves the body, and emits
 //!    it as if the user had typed the body verbatim. This is the
 //!    fastest path — one prompt round-trip.
-//! 2. **Model called `skill_tool(skill="<name>")`**: the `SkillTool`
+//! 2. **Model called `skill_use(skill="<name>")`**: the `SkillTool`
 //!    looks up the body and injects it as a new user message via the
 //!    [`crate::tools::ToolOutcome::Inject`] effect. Same downstream
 //!    behavior as path 1 from the model's perspective.

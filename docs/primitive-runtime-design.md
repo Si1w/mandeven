@@ -5,8 +5,8 @@ heartbeat, memory, and task-like features into a smaller agent runtime.
 
 The core rule is:
 
-> RISC primitive tools are the small validated instruction set. `shell.exec`
-> and `skill.use` are CISC escape hatches: shell executes a command language
+> RISC primitive tools are the small validated instruction set. `shell_exec`
+> and `skill_use` are CISC escape hatches: shell executes a command language
 > and returns output, while skills import workflow text. The runtime validates
 > RISC instruction contracts and the execution envelope for CISC escapes, not
 > shell command semantics or skill workflows.
@@ -21,7 +21,7 @@ The core rule is:
   instead of separate model-facing tool families.
 - Treat shell as an explicit CISC execution escape hatch whose output is an
   observation.
-- Keep skill workflows explicit: `skill.use` imports workflow text; it does not
+- Keep skill workflows explicit: `skill_use` imports workflow text; it does not
   validate, plan, or execute the workflow.
 
 ## Storage Contract
@@ -133,31 +133,31 @@ The model-facing tool set has two layers.
 RISC primitives:
 
 ```text
-file.read
-file.write
-file.edit
+file_read
+file_write
+file_edit
 
-web.search
-web.fetch
+web_search
+web_fetch
 
-task.create
-task.update
-task.list
-task.get
-task.run
+task_create
+task_update
+task_list
+task_get
+task_run
 
-timer.create
-timer.update
-timer.delete
-timer.list
-timer.fire_now
+timer_create
+timer_update
+timer_delete
+timer_list
+timer_fire_now
 ```
 
 CISC escape hatches:
 
 ```text
-shell.exec
-skill.use
+shell_exec
+skill_use
 ```
 
 Only the RISC primitives are semantically validated instruction boundaries.
@@ -171,11 +171,11 @@ Examples:
 - `timer.*` validates timer Markdown, schedule syntax, referenced `task_id`,
   and computed `next_fire_at`.
 
-`shell.exec` is different. It validates the execution envelope: command policy,
+`shell_exec` is different. It validates the execution envelope: command policy,
 working directory, timeout, and sandbox policy. It does not normalize or
 validate the command's internal semantics.
 
-`skill.use` is also different. It is a CISC workflow include, not a primitive
+`skill_use` is also different. It is a CISC workflow include, not a primitive
 execution boundary.
 
 ## Shell Boundary
@@ -186,7 +186,7 @@ available because many operating-system capabilities are only exposed as
 commands, but it should be treated as an execution escape hatch rather than a
 RISC primitive.
 
-`shell.exec(command)` should:
+`shell_exec(command)` should:
 
 1. Validate the execution envelope: cwd, timeout, sandbox, command policy, and
    approval requirements.
@@ -207,7 +207,7 @@ The output itself is the observation:
 {
   "ok": true,
   "observation_type": "execution",
-  "object": "shell",
+  "object": "shell_exec",
   "exit_code": 0,
   "stdout": "tests passed\n",
   "stderr": ""
@@ -218,7 +218,7 @@ The output itself is the observation:
 
 Skills are the CISC layer.
 
-`skill.use(name)` should:
+`skill_use(name)` should:
 
 1. Resolve the named skill.
 2. Return or inject the raw `SKILL.md` workflow text for the agent to read.
@@ -234,7 +234,7 @@ It should not:
 Any workflow rules belong inside the skill text. The agent is responsible for
 reading those rules and deciding which primitive tool calls to make next.
 
-The only errors `skill.use` should surface are resource-resolution errors:
+The only errors `skill_use` should surface are resource-resolution errors:
 
 ```text
 skill not found
@@ -245,7 +245,7 @@ skill file unreadable
 The execution trace remains transparent:
 
 ```text
-skill.use("paper-writing")
+skill_use("paper-writing")
 file.read(...)
 file.edit(...)
 ```
@@ -281,7 +281,7 @@ parsed, or validated.
 ```
 
 Execution observations report direct results. `task.run` returns task output.
-`shell.exec` returns process output.
+`shell_exec` returns process output.
 
 ```json
 {

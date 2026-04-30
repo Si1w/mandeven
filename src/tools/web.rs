@@ -60,7 +60,7 @@ use reqwest::Url;
 use reqwest::redirect::Policy;
 use schemars::{JsonSchema, schema_for};
 use serde::Deserialize;
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use super::error::{Error, Result};
 use super::{BaseTool, MAX_TOOL_RESULT_BYTES, ToolOutcome};
@@ -189,7 +189,16 @@ impl BaseTool for WebSearch {
             .map_err(|e| exec("web_search", format!("read DuckDuckGo response: {e}")))?;
 
         let results = parse_results(&html, n);
-        Ok(Value::String(format_results(query, &results)).into())
+        Ok(json!({
+            "ok": true,
+            "observation_type": "execution",
+            "object": "web_search",
+            "query": query,
+            "count": results.len(),
+            "results": results.iter().map(search_result_value).collect::<Vec<_>>(),
+            "output": format_results(query, &results),
+        })
+        .into())
     }
 }
 
@@ -282,6 +291,14 @@ fn format_results(query: &str, results: &[SearchResult]) -> String {
         }
     }
     out
+}
+
+fn search_result_value(result: &SearchResult) -> Value {
+    json!({
+        "title": &result.title,
+        "url": &result.url,
+        "snippet": &result.snippet,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -404,7 +421,16 @@ impl BaseTool for WebFetch {
             );
         }
 
-        Ok(Value::String(out).into())
+        Ok(json!({
+            "ok": true,
+            "observation_type": "execution",
+            "object": "web_fetch",
+            "url": final_url,
+            "content_type": content_type,
+            "truncated": truncated,
+            "output": out,
+        })
+        .into())
     }
 }
 

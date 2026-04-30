@@ -1,4 +1,4 @@
-//! `skill_tool` — model-facing entry point for invoking a SKILL.md
+//! `skill_use` — model-facing entry point for invoking a SKILL.md
 //! workflow.
 //!
 //! The tool's call shape is intentionally narrow: a single `skill`
@@ -28,7 +28,7 @@ use super::error::{Error, Result};
 use super::{BaseTool, ToolOutcome};
 
 /// Tool name used in the registry and on the wire.
-pub const SKILL_TOOL_NAME: &str = "skill_tool";
+pub const SKILL_TOOL_NAME: &str = "skill_use";
 
 #[derive(Deserialize, JsonSchema)]
 struct SkillParams {

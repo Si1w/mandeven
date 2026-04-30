@@ -89,11 +89,7 @@ impl BaseTool for TaskCreate {
             })
             .await
             .map_err(|err| exec("task_create", &err))?;
-        Ok(json!({
-            "task": task_summary(&task, &[]),
-            "message": format!("Task #{} created: {}", task.id, task.subject),
-        })
-        .into())
+        Ok(task_state_observation(&task, &[], "Task created").into())
     }
 }
 
@@ -129,14 +125,23 @@ impl BaseTool for TaskGet {
             .await
             .map_err(|err| exec("task_get", &err))?;
         let Some(task) = task else {
-            return Ok(json!({ "task": null, "message": "Task not found" }).into());
+            return Ok(json!({
+                "ok": false,
+                "observation_type": "state",
+                "object": "task",
+                "id": params.task_id,
+                "validated": false,
+                "diagnostics": ["Task not found"],
+                "task": null,
+            })
+            .into());
         };
         let tasks = self
             .tasks
             .list()
             .await
             .map_err(|err| exec("task_get", &err))?;
-        Ok(json!({ "task": task_detail(&task, &tasks) }).into())
+        Ok(task_state_observation(&task, &tasks, "Task retrieved").into())
     }
 }
 
@@ -186,6 +191,11 @@ impl BaseTool for TaskList {
             .map(|task| task_summary(task, &tasks))
             .collect();
         Ok(json!({
+            "ok": true,
+            "observation_type": "state",
+            "object": "task",
+            "validated": true,
+            "diagnostics": [],
             "tasks": filtered,
             "count": filtered.len(),
         })
@@ -277,9 +287,12 @@ impl BaseTool for TaskUpdateTool {
             .map_err(|err| exec("task_update", &err))?;
         let Some(outcome) = outcome else {
             return Ok(json!({
-                "success": false,
+                "ok": false,
+                "observation_type": "state",
+                "object": "task",
                 "task_id": params.task_id,
-                "message": "Task not found",
+                "validated": false,
+                "diagnostics": ["Task not found"],
             })
             .into());
         };
@@ -289,9 +302,15 @@ impl BaseTool for TaskUpdateTool {
             .await
             .map_err(|err| exec("task_update", &err))?;
         Ok(json!({
-            "success": true,
-            "task_id": outcome.task.id,
+            "ok": true,
+            "observation_type": "state",
+            "object": "task",
+            "id": outcome.task.id,
+            "path": outcome.task.path,
+            "validated": true,
+            "diagnostics": [],
             "updated_fields": outcome.updated_fields,
+            "spec": task_detail(&outcome.task, &tasks),
             "task": task_summary(&outcome.task, &tasks),
         })
         .into())
@@ -340,8 +359,12 @@ impl TaskUpdateTool {
             .await
             .map_err(|err| exec("task_update", &err))?;
         Ok(json!({
-            "success": deleted,
-            "task_id": task_id,
+            "ok": deleted,
+            "observation_type": "state",
+            "object": "task",
+            "id": task_id,
+            "validated": deleted,
+            "diagnostics": if deleted { Vec::<&str>::new() } else { vec!["Task not found"] },
             "updated_fields": if deleted { vec!["deleted"] } else { Vec::<&str>::new() },
             "message": if deleted { "Task deleted" } else { "Task not found" },
         })
@@ -398,6 +421,21 @@ fn should_include_task(
         Some(TaskStatusParam::Blocked) => !task::unresolved_blockers(task, all_tasks).is_empty(),
         None => true,
     }
+}
+
+fn task_state_observation(task: &task::Task, all_tasks: &[task::Task], message: &str) -> Value {
+    json!({
+        "ok": true,
+        "observation_type": "state",
+        "object": "task",
+        "id": &task.id,
+        "path": &task.path,
+        "validated": true,
+        "diagnostics": [],
+        "spec": task_detail(task, all_tasks),
+        "task": task_summary(task, all_tasks),
+        "message": message,
+    })
 }
 
 fn task_summary(task: &task::Task, all_tasks: &[task::Task]) -> Value {

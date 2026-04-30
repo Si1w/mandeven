@@ -26,7 +26,7 @@ use std::path::Path;
 use async_trait::async_trait;
 use schemars::{JsonSchema, schema_for};
 use serde::Deserialize;
-use serde_json::Value;
+use serde_json::{Value, json};
 use uuid::Uuid;
 
 use super::error::{Error, Result};
@@ -125,7 +125,18 @@ impl BaseTool for FileRead {
             lines.len()
         };
         if total == 0 {
-            return Ok(Value::String(format!("(Empty file: {})", p.path)).into());
+            return Ok(json!({
+                "ok": true,
+                "observation_type": "state",
+                "object": "file",
+                "operation": "read",
+                "path": &p.path,
+                "validated": true,
+                "diagnostics": [],
+                "output": format!("(Empty file: {})", p.path),
+                "total_lines": 0,
+            })
+            .into());
         }
 
         let offset = p.offset.unwrap_or(1).max(1);
@@ -172,7 +183,20 @@ impl BaseTool for FileRead {
                 .expect("writing to String is infallible");
         }
 
-        Ok(Value::String(out).into())
+        Ok(json!({
+            "ok": true,
+            "observation_type": "state",
+            "object": "file",
+            "operation": "read",
+            "path": &p.path,
+            "validated": true,
+            "diagnostics": [],
+            "output": out,
+            "offset": offset,
+            "end": end,
+            "total_lines": total,
+        })
+        .into())
     }
 }
 
@@ -214,7 +238,18 @@ impl BaseTool for FileWrite {
             .await
             .map_err(|e| exec("file_write", e.to_string()))?;
         write_file_atomic("file_write", &path, &p.content).await?;
-        Ok(Value::String(format!("Wrote {} bytes to {}", p.content.len(), p.path)).into())
+        Ok(json!({
+            "ok": true,
+            "observation_type": "state",
+            "object": "file",
+            "operation": "write",
+            "path": &p.path,
+            "validated": true,
+            "diagnostics": [],
+            "bytes": p.content.len(),
+            "message": format!("Wrote {} bytes", p.content.len()),
+        })
+        .into())
     }
 }
 
@@ -280,7 +315,18 @@ impl BaseTool for FileEdit {
                 .map_err(|e| exec("file_edit", format!("{}: {e}", path.display())))?
         {
             write_file_atomic("file_edit", &path, &p.new_string).await?;
-            return Ok(Value::String(format!("Created {}", p.path)).into());
+            return Ok(json!({
+                "ok": true,
+                "observation_type": "state",
+                "object": "file",
+                "operation": "create",
+                "path": &p.path,
+                "validated": true,
+                "diagnostics": [],
+                "bytes": p.new_string.len(),
+                "message": "File created",
+            })
+            .into());
         }
 
         let raw = tokio::fs::read(&path)
@@ -339,11 +385,17 @@ impl BaseTool for FileEdit {
             result
         };
         write_file_atomic("file_edit", &path, &final_content).await?;
-        Ok(Value::String(format!(
-            "Replaced {} occurrence(s) in {}",
-            selected.len(),
-            p.path
-        ))
+        Ok(json!({
+            "ok": true,
+            "observation_type": "state",
+            "object": "file",
+            "operation": "edit",
+            "path": &p.path,
+            "validated": true,
+            "diagnostics": [],
+            "replacements": selected.len(),
+            "message": format!("Replaced {} occurrence(s)", selected.len()),
+        })
         .into())
     }
 }

@@ -12,7 +12,7 @@
 //! swaps that file rather than a source rebuild.
 //!
 //! Tool names referenced in [`USING_TOOLS`] (`file_read`, `file_write`,
-//! `file_edit`, `grep`, `shell`, `web_search`, `web_fetch`,
+//! `file_edit`, `shell_exec`, `web_search`, `web_fetch`,
 //! `task_create`, `task_update`, `task_list`, `task_get`,
 //! `timer_create`, `timer_update`, `timer_list`, `timer_delete`,
 //! `timer_fire_now`) must stay in sync with
@@ -161,19 +161,19 @@ process holds it rather than deleting it.";
 /// ([`crate::tools::register_builtins`]).
 pub const USING_TOOLS: &str = "\
 # Using your tools
-- Do NOT use the `shell` tool to run commands when a relevant \
+- Do NOT use the `shell_exec` tool to run commands when a relevant \
 dedicated tool is provided. Dedicated tools let the user understand \
 and review your work better:
   - To read files use `file_read` instead of cat, head, tail, or sed.
   - To edit files use `file_edit` instead of sed or awk.
   - To create files use `file_write` instead of cat with heredoc or \
 echo redirection.
-  - To search file contents use `grep` instead of running grep or rg \
-through `shell`.
+  - To search file contents, prefer `file_read` on focused files; use \
+`shell_exec` with rg only when a repository-wide search is needed.
   - To search the web use `web_search`; to fetch a specific URL use \
 `web_fetch`.
   - For complex multi-step work, use `task_create`, `task_update`, \
-`task_list`, and `task_get` as your internal progress ledger. These \
+`task_list`, `task_get`, and `task_run` as your internal progress ledger. These \
 are model-facing tools, not user slash commands. Create tasks for \
 multiple requirements or 3+ meaningful steps; mark a task \
 `in_progress` before starting it; mark it `completed` only when fully \
@@ -189,7 +189,7 @@ Dream background reviewer and the user-facing `/memory` governance \
 surface. Do not emulate memory writes in files, tasks, cron jobs, or \
 AGENTS.md. Procedures and workflows belong in skills or AGENTS.md, \
 not memory.
-  - Reserve `shell` for system commands and terminal operations that \
+  - Reserve `shell_exec` for system commands and terminal operations that \
 genuinely require shell execution.
 - Use tools for live or environment-specific facts instead of answering \
 from memory: file contents, git state, command output, system/date/time \
@@ -259,14 +259,14 @@ mod tests {
             "file_read",
             "file_write",
             "file_edit",
-            "grep",
-            "shell",
+            "shell_exec",
             "web_search",
             "web_fetch",
             "task_create",
             "task_update",
             "task_list",
             "task_get",
+            "task_run",
             "timer_create",
             "timer_update",
             "timer_list",

@@ -90,7 +90,7 @@ pub fn agents_md_section(content: &str) -> Section {
 /// header.
 ///
 /// The instruction sentence at the top tells the model both
-/// invocation paths (`/<name>` for the user, `skill_tool(name)` for
+/// invocation paths (`/<name>` for the user, `skill_use(name)` for
 /// the model itself) plus the soft guard "suggest, do not invoke
 /// unsolicited" — Claude Code achieves the same with a longer
 /// session-guidance bullet, but a one-paragraph framing in front of
@@ -104,7 +104,7 @@ pub fn skills_index_section(entries: &[(String, String)]) -> Option<Section> {
         "# Available Skills\n\
          The user can invoke any of these by typing /<name>. Suggest one \
          proactively when its description matches the current task. You may \
-         also call the `skill_tool` to invoke a skill directly when the user \
+         also call `skill_use` to invoke a skill directly when the user \
          has clearly delegated execution.\n",
     );
     for (name, description) in entries {
@@ -187,7 +187,7 @@ mod tests {
         assert!(s.content.starts_with("# Available Skills"));
         assert!(s.content.contains("- /git-clean: Clean up branch"));
         assert!(s.content.contains("- /rp-generate: Brainstorm research"));
-        assert!(s.content.contains("skill_tool"));
+        assert!(s.content.contains("skill_use"));
         assert!(!s.content.ends_with('\n'));
     }
 

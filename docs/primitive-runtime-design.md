@@ -401,8 +401,11 @@ Current implementation status:
 - task and timer state are Markdown-backed;
 - `TimerEngine` scans `timers/*.md`, advances due timers, and routes the
   referenced task through the normal agent iteration loop;
-- explicit `task.run` and run JSONL are the next layer to split out of the
-  agent iteration path.
+- timer-triggered task execution appends `runs/<run_id>.jsonl` with
+  `run_started`, `tool_call`, `tool_result`, `final_output`, and
+  `run_finished`;
+- explicit `task.run` is the next layer to split out of the agent iteration
+  path.
 
 Watchdog:
 

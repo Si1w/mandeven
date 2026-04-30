@@ -32,6 +32,7 @@ use mandeven::heartbeat::HeartbeatEngine;
 use mandeven::hook::HookEngine;
 use mandeven::memory;
 use mandeven::prompt::PromptEngine;
+use mandeven::run;
 use mandeven::security::SandboxPolicy;
 use mandeven::session;
 use mandeven::skill::{self, SkillIndex};
@@ -133,6 +134,7 @@ async fn main() -> Result<(), DynError> {
     let timer_wiring = Some(TimerWiring { engine, rx });
 
     let memory_manager = Arc::new(memory::Manager::new(&cfg.data_dir(), &project_bucket));
+    let run_manager = Arc::new(run::Manager::new(&project_bucket));
 
     let dream_wiring = if cfg.agent.dream.enabled && cfg.agent.memory.enabled {
         let (engine, rx) = DreamEngine::new(&cfg.agent.dream, &project_bucket)?;
@@ -164,6 +166,7 @@ async fn main() -> Result<(), DynError> {
         timer_wiring,
         dream_wiring,
         memory_manager,
+        run_manager,
         discord_wiring,
         wechat_wiring,
         prompts,

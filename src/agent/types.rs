@@ -2,6 +2,7 @@
 
 use crate::bus::{ChannelID, SessionID};
 use crate::llm::{FinishReason, ToolCall, Usage};
+use crate::run::RunId;
 
 /// Identifier for a single iteration — session plus source channel.
 ///
@@ -16,6 +17,9 @@ pub struct Iteration {
     pub session: SessionID,
     /// Channel that produced the user input and will receive the reply.
     pub channel: ChannelID,
+    /// Machine-readable run log to append execution events to, when
+    /// this iteration was started by a task runner.
+    pub run_id: Option<RunId>,
 }
 
 /// Outcome of a single LLM call within an iteration.

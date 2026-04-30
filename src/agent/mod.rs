@@ -50,6 +50,7 @@ use crate::llm::{
 };
 use crate::memory;
 use crate::prompt::{PromptContext, PromptEngine};
+use crate::run;
 use crate::session;
 use crate::timer;
 use crate::tools;
@@ -127,6 +128,9 @@ pub struct Agent {
     /// Durable memory/profile manager. Dream writes inferred memories;
     /// `/memory` is the user-facing governance surface.
     memory: Arc<memory::Manager>,
+    /// Machine-readable run history writer. Scheduled task runs append
+    /// JSONL events here.
+    runs: Arc<run::Manager>,
     /// Discord adapter control handle, present iff the channel was
     /// registered. Cloned into [`AgentCommandCtx`] so `/discord
     /// allow|deny|list` can mutate the runtime allow list.
@@ -337,6 +341,7 @@ impl Agent {
         timer: Option<TimerWiring>,
         dream: Option<DreamWiring>,
         memory: Arc<memory::Manager>,
+        runs: Arc<run::Manager>,
         discord: Option<DiscordWiring>,
         wechat: Option<WechatWiring>,
         prompt: Arc<PromptEngine>,
@@ -384,6 +389,7 @@ impl Agent {
             dream: dream_handle,
             dream_rx,
             memory,
+            runs,
             discord: discord_handle,
             wechat: wechat_handle,
             active_sessions,
@@ -475,6 +481,7 @@ impl Agent {
                 let iter = Iteration {
                     session: session.clone(),
                     channel: channel.clone(),
+                    run_id: None,
                 };
                 if let Err(err) = self.iteration(&iter, text).await {
                     let reply = OutboundMessage::new(
@@ -552,6 +559,7 @@ impl Agent {
         let iter = Iteration {
             session: session.clone(),
             channel: target.clone(),
+            run_id: None,
         };
         if let Err(err) = self.iteration(&iter, prompt).await {
             let reply = OutboundMessage::new(
@@ -626,9 +634,10 @@ impl Agent {
         let iter = Iteration {
             session: session.clone(),
             channel: target.clone(),
+            run_id: None,
         };
         match self.iteration(&iter, tick.prompt.clone()).await {
-            Ok(()) => {
+            Ok(_) => {
                 if let Some(engine) = self.cron.as_ref() {
                     engine
                         .report_outcome(&tick.job_id, cron::RunStatus::Succeeded, None)
@@ -677,13 +686,54 @@ impl Agent {
             return Ok(());
         };
 
+        let run_id = match self
+            .runs
+            .start(run::RunStart {
+                task_id: tick.task_id.clone(),
+                task_subject: tick.task_subject.clone(),
+                timer_id: Some(tick.timer_id.clone()),
+                timer_title: Some(tick.timer_title.clone()),
+                session: session.clone(),
+                channel: target.clone(),
+            })
+            .await
+        {
+            Ok(run_id) => Some(run_id),
+            Err(err) => {
+                eprintln!("[run] failed to start timer run log: {err}");
+                None
+            }
+        };
         let iter = Iteration {
             session: session.clone(),
             channel: target.clone(),
+            run_id: run_id.clone(),
         };
+
         match self.iteration(&iter, tick.prompt.clone()).await {
-            Ok(()) => {}
+            Ok(output) => {
+                if let Some(run_id) = run_id.as_ref() {
+                    if let Err(err) = self.runs.final_output(run_id, output).await {
+                        eprintln!("[run] failed to write final output: {err}");
+                    }
+                    if let Err(err) = self
+                        .runs
+                        .finish(run_id, run::RunStatus::Succeeded, None)
+                        .await
+                    {
+                        eprintln!("[run] failed to finish run log: {err}");
+                    }
+                }
+            }
             Err(err) => {
+                if let Some(run_id) = run_id.as_ref()
+                    && let Err(log_err) = self
+                        .runs
+                        .finish(run_id, run::RunStatus::Failed, Some(err.to_string()))
+                        .await
+                {
+                    eprintln!("[run] failed to mark run failed: {log_err}");
+                }
                 let reply = OutboundMessage::new(
                     target.clone(),
                     session.clone(),
@@ -1153,7 +1203,7 @@ impl Agent {
     /// Execute one conversation iteration — from a user message to the
     /// persisted assistant reply, covering any number of LLM↔tool
     /// calls.
-    async fn iteration(&self, iter: &Iteration, user_text: String) -> Result<()> {
+    async fn iteration(&self, iter: &Iteration, user_text: String) -> Result<String> {
         // UserPromptSubmit hook fires BEFORE we touch the session —
         // a blocking hook drops the message entirely, the user sees
         // an Error notice, no LLM call is made.
@@ -1174,7 +1224,7 @@ impl Agent {
                 .to_string();
             self.send_notice(iter, &format!("hook denied user message: {reason}"))
                 .await;
-            return Ok(());
+            return Ok(String::new());
         }
 
         let memory_snapshot = self.ensure_session(iter, &user_text).await?;
@@ -1228,7 +1278,7 @@ impl Agent {
             let no_more_calls = tool_calls.as_ref().is_none_or(Vec::is_empty);
             if no_more_calls {
                 self.fire_stop_hook(iter, &last_assistant_text).await;
-                return Ok(());
+                return Ok(last_assistant_text);
             }
             // Safe to unwrap: `no_more_calls` short-circuited.
             let calls = tool_calls.unwrap_or_default();
@@ -1246,10 +1296,24 @@ impl Agent {
     /// entirely and persists a synthetic tool-error message so the
     /// model sees its `tool_call_id` resolved on the next turn.
     async fn dispatch_one_with_hooks(&self, iter: &Iteration, call: ToolCall) -> Result<()> {
+        let tool_input =
+            serde_json::from_str::<serde_json::Value>(&call.arguments).unwrap_or_default();
+        if let Some(run_id) = iter.run_id.as_ref()
+            && let Err(err) = self
+                .runs
+                .tool_call(
+                    run_id,
+                    call.id.clone(),
+                    call.name.clone(),
+                    tool_input.clone(),
+                )
+                .await
+        {
+            eprintln!("[run] failed to record tool call: {err}");
+        }
         let pre_payload = serde_json::json!({
             "tool_name": call.name,
-            "tool_input": serde_json::from_str::<serde_json::Value>(&call.arguments)
-                .unwrap_or(serde_json::Value::Null),
+            "tool_input": tool_input,
             "tool_use_id": call.id,
         });
         let pre = self
@@ -1268,6 +1332,23 @@ impl Agent {
                 content: format!("{{\"error\":\"hook denied tool call: {reason}\"}}"),
                 tool_call_id: call.id,
             };
+            if let Some(run_id) = iter.run_id.as_ref()
+                && let Message::Tool {
+                    content,
+                    tool_call_id,
+                } = &blocked_msg
+                && let Err(err) = self
+                    .runs
+                    .tool_result(
+                        run_id,
+                        tool_call_id.clone(),
+                        call.name.clone(),
+                        content.clone(),
+                    )
+                    .await
+            {
+                eprintln!("[run] failed to record blocked tool result: {err}");
+            }
             self.sessions.append(&iter.session, blocked_msg).await?;
             return Ok(());
         }
@@ -1286,6 +1367,19 @@ impl Agent {
                 _ => None,
             })
             .unwrap_or_default();
+        if let Some(run_id) = iter.run_id.as_ref()
+            && let Err(err) = self
+                .runs
+                .tool_result(
+                    run_id,
+                    tool_use_id.clone(),
+                    tool_name.clone(),
+                    tool_response_text.clone(),
+                )
+                .await
+        {
+            eprintln!("[run] failed to record tool result: {err}");
+        }
         for msg in messages {
             self.sessions.append(&iter.session, msg).await?;
         }

@@ -424,6 +424,38 @@ impl Manager {
         Ok(ids)
     }
 
+    /// Enumerate session ids whose session file mtime is newer than `since`.
+    ///
+    /// Passing `None` returns every session file. Files whose stem does not
+    /// parse as a UUID are ignored silently.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Io`] on filesystem failure.
+    pub async fn list_touched_since(&self, since: Option<DateTime<Utc>>) -> Result<Vec<SessionID>> {
+        let mut dir = tokio::fs::read_dir(&self.base_dir).await?;
+        let mut ids = Vec::new();
+        while let Some(entry) = dir.next_entry().await? {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+                continue;
+            }
+            let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            let Ok(uuid) = Uuid::parse_str(stem) else {
+                continue;
+            };
+            let modified = entry.metadata().await?.modified()?;
+            let modified_at = DateTime::<Utc>::from(modified);
+            if since.is_none_or(|since| modified_at > since) {
+                ids.push(SessionID(uuid));
+            }
+        }
+        ids.sort_by_key(|id| id.0);
+        Ok(ids)
+    }
+
     fn session_path(&self, id: &SessionID) -> PathBuf {
         self.base_dir.join(format!("{}.jsonl", id.0))
     }

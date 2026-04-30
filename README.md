@@ -61,6 +61,16 @@ snapshot_limit = 8
 [agent.dream]
 enabled = true
 schedule = "0 3 * * *"
+run_on_startup = true
+min_interval_secs = 72000
+lock_stale_secs = 21600
+min_sessions_per_run = 5
+max_events_per_run = 80
+max_prompt_chars = 24000
+max_output_tokens = 2048
+max_event_chars = 2000
+max_existing_memories = 24
+max_candidates = 8
 ```
 
 **3. Chat**
@@ -102,7 +112,7 @@ state lives in sidecar files; durable enable/budget knobs live in
 | `cron`      | `~/.mandeven/cron/jobs.json`          | Cron-scheduled prompts that re-enter the agent loop     |
 | `heartbeat` | `[agent.heartbeat]` in `mandeven.toml`| Periodic self-check that can queue follow-up prompts    |
 | `memory`    | `[agent.memory]` in `mandeven.toml`   | Durable memories + frozen per-session prompt snapshot   |
-| `dream`     | `[agent.dream]` in `mandeven.toml`    | Cron-driven background review that distills session evidence into memory |
+| `dream`     | `[agent.dream]` in `mandeven.toml`    | Cron-driven background review that distills session evidence into global memory |
 
 ## 📜 License
 

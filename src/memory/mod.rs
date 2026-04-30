@@ -634,10 +634,24 @@ fn find_memory_index(memories: &[Memory], id: &str) -> Option<usize> {
 
 fn find_duplicate_index(memories: &[Memory], draft: &MemoryDraft) -> Option<usize> {
     let title = normalize_key(&draft.title);
+    let draft_title_terms = significant_terms(&draft.title);
+    let draft_terms = significant_terms(&format!("{} {}", draft.title, draft.summary));
     memories.iter().position(|memory| {
         memory.status == MemoryStatus::Active
             && memory.kind == draft.kind
-            && normalize_key(&memory.title) == title
+            && (normalize_key(&memory.title) == title
+                || terms_are_similar(
+                    &significant_terms(&memory.title),
+                    &draft_title_terms,
+                    66,
+                    2,
+                )
+                || terms_are_similar(
+                    &significant_terms(&format!("{} {}", memory.title, memory.summary)),
+                    &draft_terms,
+                    70,
+                    3,
+                ))
     })
 }
 
@@ -691,6 +705,58 @@ fn normalize_key(value: &str) -> String {
         .collect::<Vec<_>>()
         .join(" ")
         .to_ascii_lowercase()
+}
+
+fn significant_terms(value: &str) -> BTreeSet<String> {
+    tokenize(value)
+        .into_iter()
+        .filter(|term| term.chars().count() > 2 && !is_stop_word(term))
+        .collect()
+}
+
+fn is_stop_word(term: &str) -> bool {
+    matches!(
+        term,
+        "the"
+            | "and"
+            | "for"
+            | "with"
+            | "that"
+            | "this"
+            | "user"
+            | "prefers"
+            | "prefer"
+            | "preference"
+            | "should"
+            | "when"
+            | "about"
+    )
+}
+
+fn terms_are_similar(
+    left: &BTreeSet<String>,
+    right: &BTreeSet<String>,
+    threshold_percent: u32,
+    min_shared: usize,
+) -> bool {
+    if left.is_empty() || right.is_empty() {
+        return false;
+    }
+    let shared = left.intersection(right).count();
+    if shared < min_shared {
+        return false;
+    }
+    let union = left.union(right).count();
+    if union == 0 {
+        return false;
+    }
+    let Ok(shared) = u64::try_from(shared) else {
+        return false;
+    };
+    let Ok(union) = u64::try_from(union) else {
+        return false;
+    };
+    shared.saturating_mul(100) >= union.saturating_mul(u64::from(threshold_percent))
 }
 
 fn tokenize(value: &str) -> Vec<String> {
@@ -943,6 +1009,61 @@ mod tests {
             .await
             .unwrap();
         assert!(matches.is_empty());
+
+        let _ = tokio::fs::remove_dir_all(dir).await;
+    }
+
+    #[tokio::test]
+    async fn remember_updates_similar_active_memory() {
+        let dir = tempdir();
+        let project = dir.join("project");
+        let manager = Manager::new(&dir, &project);
+        let first = manager
+            .remember(
+                MemoryDraft {
+                    scope: MemoryScope::Global,
+                    kind: MemoryKind::Feedback,
+                    title: "Chinese design reviews".to_string(),
+                    summary: "The user prefers Chinese design reviews with concrete tradeoffs."
+                        .to_string(),
+                    body: "Answer design reviews in Chinese and focus on tradeoffs.".to_string(),
+                    tags: Vec::new(),
+                    source: MemorySource {
+                        kind: MemorySourceKind::AssistantObserved,
+                        session_id: None,
+                        quote: None,
+                    },
+                    review_after: None,
+                },
+                None,
+            )
+            .await
+            .unwrap();
+        let second = manager
+            .remember(
+                MemoryDraft {
+                    scope: MemoryScope::Global,
+                    kind: MemoryKind::Feedback,
+                    title: "Chinese reviews".to_string(),
+                    summary: "The user wants Chinese reviews with concrete tradeoffs.".to_string(),
+                    body: "Use Chinese and make the tradeoffs explicit.".to_string(),
+                    tags: Vec::new(),
+                    source: MemorySource {
+                        kind: MemorySourceKind::AssistantObserved,
+                        session_id: None,
+                        quote: None,
+                    },
+                    review_after: None,
+                },
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert!(second.updated_existing);
+        assert_eq!(first.memory.id, second.memory.id);
+        let memories = manager.search(MemoryQuery::default()).await.unwrap();
+        assert_eq!(memories.len(), 1);
 
         let _ = tokio::fs::remove_dir_all(dir).await;
     }

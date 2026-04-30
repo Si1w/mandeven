@@ -26,15 +26,21 @@ impl AppConfig {
     ///   not match the schema.
     /// - [`ConfigError::Invalid`] if the parsed values fail structural
     ///   validation.
+    /// - [`ConfigError::Write`] / [`ConfigError::Serialize`] if the file
+    ///   parsed successfully but needed missing default fields backfilled.
     pub fn from_file(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
         let text = fs::read_to_string(path).map_err(|source| ConfigError::Read {
             path: path.to_path_buf(),
             source,
         })?;
+        let raw: toml::Value = toml::from_str(&text)?;
         let mut cfg: AppConfig = toml::from_str(&text)?;
         cfg.source_path = path.to_path_buf();
         cfg.validate()?;
+        if needs_default_backfill(&raw, &cfg)? {
+            cfg.save()?;
+        }
         Ok(cfg)
     }
 
@@ -93,9 +99,9 @@ impl AppConfig {
     /// Comment preservation is not handled; a `save()` that was
     /// preceded by a user-edited file will round-trip the semantic
     /// values but drop comments. This is acceptable for now because
-    /// the only caller is [`Self::bootstrap`], which writes a fresh
-    /// file. When interactive config mutation lands, swap in
-    /// `toml_edit` to preserve formatting.
+    /// saves happen only during bootstrap, explicit runtime config
+    /// mutations, and default-field backfills. When richer config
+    /// mutation lands, swap in `toml_edit` to preserve formatting.
     ///
     /// # Errors
     ///
@@ -140,7 +146,7 @@ impl AppConfig {
     /// 3. The referenced provider and model both exist in `providers`.
     /// 4. `agent.heartbeat.interval_secs` is greater than zero.
     /// 5. `agent.memory.snapshot_limit` is greater than zero.
-    /// 6. `agent.dream.schedule` parses and Dream budgets are non-zero.
+    /// 6. `agent.dream.schedule` parses and Dream budgets/limits are non-zero.
     fn validate(&self) -> Result<()> {
         if self.llm.providers.is_empty() {
             return Err(ConfigError::Invalid {
@@ -193,6 +199,18 @@ impl AppConfig {
                 reason: "must be greater than zero".into(),
             });
         }
+        if self.agent.dream.lock_stale_secs == 0 {
+            return Err(ConfigError::Invalid {
+                field: "agent.dream.lock_stale_secs",
+                reason: "must be greater than zero".into(),
+            });
+        }
+        if self.agent.dream.min_sessions_per_run < 5 {
+            return Err(ConfigError::Invalid {
+                field: "agent.dream.min_sessions_per_run",
+                reason: "must be at least 5".into(),
+            });
+        }
         if self.agent.dream.max_events_per_run == 0 {
             return Err(ConfigError::Invalid {
                 field: "agent.dream.max_events_per_run",
@@ -208,6 +226,24 @@ impl AppConfig {
         if self.agent.dream.max_output_tokens == 0 {
             return Err(ConfigError::Invalid {
                 field: "agent.dream.max_output_tokens",
+                reason: "must be greater than zero".into(),
+            });
+        }
+        if self.agent.dream.max_event_chars == 0 {
+            return Err(ConfigError::Invalid {
+                field: "agent.dream.max_event_chars",
+                reason: "must be greater than zero".into(),
+            });
+        }
+        if self.agent.dream.max_existing_memories == 0 {
+            return Err(ConfigError::Invalid {
+                field: "agent.dream.max_existing_memories",
+                reason: "must be greater than zero".into(),
+            });
+        }
+        if self.agent.dream.max_candidates == 0 {
+            return Err(ConfigError::Invalid {
+                field: "agent.dream.max_candidates",
                 reason: "must be greater than zero".into(),
             });
         }
@@ -232,6 +268,22 @@ fn split_default(raw: &str) -> Result<(&str, &str)> {
     }
 
     Ok((provider, model))
+}
+
+fn needs_default_backfill(raw: &toml::Value, cfg: &AppConfig) -> Result<bool> {
+    let canonical_text = toml::to_string_pretty(cfg)?;
+    let canonical: toml::Value = toml::from_str(&canonical_text)?;
+    Ok(has_missing_default_keys(&canonical, raw))
+}
+
+fn has_missing_default_keys(canonical: &toml::Value, raw: &toml::Value) -> bool {
+    let (toml::Value::Table(canonical), toml::Value::Table(raw)) = (canonical, raw) else {
+        return false;
+    };
+    canonical.iter().any(|(key, canonical_value)| {
+        raw.get(key)
+            .is_none_or(|raw_value| has_missing_default_keys(canonical_value, raw_value))
+    })
 }
 
 #[cfg(test)]
@@ -293,6 +345,11 @@ mod tests {
         assert!(parsed.agent.memory.session_snapshot);
         assert!(parsed.agent.memory.profile_enabled);
         assert_eq!(parsed.agent.memory.snapshot_limit, 8);
+        assert_eq!(parsed.agent.dream.lock_stale_secs, 21_600);
+        assert_eq!(parsed.agent.dream.min_sessions_per_run, 5);
+        assert_eq!(parsed.agent.dream.max_event_chars, 2_000);
+        assert_eq!(parsed.agent.dream.max_existing_memories, 24);
+        assert_eq!(parsed.agent.dream.max_candidates, 8);
     }
 
     #[test]
@@ -374,6 +431,120 @@ mod tests {
         let err = AppConfig::from_file(&path).unwrap_err().to_string();
 
         assert!(err.contains("agent.dream.schedule"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn from_file_backfills_missing_default_fields() {
+        let path = std::env::temp_dir().join(format!("mandeven-config-{}.toml", Uuid::now_v7()));
+        let text = r#"
+            [llm]
+            default = "acme/my-profile"
+
+            [llm.acme.my-profile]
+            model_name = "upstream-model"
+            max_context_window = 128000
+
+            [agent.dream]
+            schedule = "0 4 * * *"
+        "#;
+        std::fs::write(&path, text).unwrap();
+
+        let cfg = AppConfig::from_file(&path).unwrap();
+        let updated = std::fs::read_to_string(&path).unwrap();
+
+        assert_eq!(cfg.agent.dream.schedule, "0 4 * * *");
+        assert_eq!(cfg.agent.dream.lock_stale_secs, 21_600);
+        assert!(updated.contains("schedule = \"0 4 * * *\""));
+        assert!(updated.contains("lock_stale_secs = 21600"));
+        assert!(updated.contains("min_sessions_per_run = 5"));
+        assert!(updated.contains("max_candidates = 8"));
+        assert!(updated.contains("snapshot_limit = 8"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn from_file_preserves_existing_values_while_backfilling() {
+        let path = std::env::temp_dir().join(format!("mandeven-config-{}.toml", Uuid::now_v7()));
+        let text = r#"
+            [llm]
+            default = "acme/my-profile"
+
+            [llm.acme.my-profile]
+            model_name = "upstream-model"
+            max_context_window = 128000
+
+            [agent.memory]
+            snapshot_limit = 3
+
+            [agent.dream]
+            schedule = "0 4 * * *"
+            lock_stale_secs = 99
+        "#;
+        std::fs::write(&path, text).unwrap();
+
+        let cfg = AppConfig::from_file(&path).unwrap();
+        let updated = std::fs::read_to_string(&path).unwrap();
+
+        assert_eq!(cfg.agent.memory.snapshot_limit, 3);
+        assert_eq!(cfg.agent.dream.lock_stale_secs, 99);
+        assert!(updated.contains("snapshot_limit = 3"));
+        assert!(updated.contains("lock_stale_secs = 99"));
+        assert!(updated.contains("max_event_chars = 2000"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn from_file_rejects_zero_dream_limits() {
+        for field in [
+            "lock_stale_secs",
+            "max_event_chars",
+            "max_existing_memories",
+            "max_candidates",
+        ] {
+            let path =
+                std::env::temp_dir().join(format!("mandeven-config-{}.toml", Uuid::now_v7()));
+            let text = format!(
+                r#"
+                    [llm]
+                    default = "acme/my-profile"
+
+                    [llm.acme.my-profile]
+                    model_name = "upstream-model"
+                    max_context_window = 128000
+
+                    [agent.dream]
+                    {field} = 0
+                "#
+            );
+            std::fs::write(&path, text).unwrap();
+
+            let err = AppConfig::from_file(&path).unwrap_err().to_string();
+
+            assert!(err.contains(&format!("agent.dream.{field}")));
+            let _ = std::fs::remove_file(path);
+        }
+    }
+
+    #[test]
+    fn from_file_rejects_dream_min_sessions_below_five() {
+        let path = std::env::temp_dir().join(format!("mandeven-config-{}.toml", Uuid::now_v7()));
+        let text = r#"
+            [llm]
+            default = "acme/my-profile"
+
+            [llm.acme.my-profile]
+            model_name = "upstream-model"
+            max_context_window = 128000
+
+            [agent.dream]
+            min_sessions_per_run = 4
+        "#;
+        std::fs::write(&path, text).unwrap();
+
+        let err = AppConfig::from_file(&path).unwrap_err().to_string();
+
+        assert!(err.contains("agent.dream.min_sessions_per_run"));
         let _ = std::fs::remove_file(path);
     }
 }

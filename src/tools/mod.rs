@@ -13,6 +13,7 @@
 //! registered in bulk via [`register_builtins`].
 
 pub mod cron;
+pub(crate) mod dream;
 pub mod error;
 pub mod file;
 pub mod grep;

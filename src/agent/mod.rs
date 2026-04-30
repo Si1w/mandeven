@@ -1365,23 +1365,8 @@ impl Agent {
                 content: format!("{{\"error\":\"hook denied tool call: {reason}\"}}"),
                 tool_call_id: call.id,
             };
-            if let Some(exec_id) = iter.exec_id.as_ref()
-                && let Message::Tool {
-                    content,
-                    tool_call_id,
-                } = &blocked_msg
-                && let Err(err) = self
-                    .exec
-                    .tool_result(
-                        exec_id,
-                        tool_call_id.clone(),
-                        call.name.clone(),
-                        content.clone(),
-                    )
-                    .await
-            {
-                eprintln!("[exec] failed to record blocked tool result: {err}");
-            }
+            self.record_blocked_tool_result(iter, &call.name, &blocked_msg)
+                .await;
             self.sessions.append(&iter.session, blocked_msg).await?;
             return Ok(());
         }
@@ -1444,6 +1429,31 @@ impl Agent {
         Ok(())
     }
 
+    async fn record_blocked_tool_result(
+        &self,
+        iter: &Iteration,
+        tool_name: &str,
+        blocked_msg: &Message,
+    ) {
+        if let Some(exec_id) = iter.exec_id.as_ref()
+            && let Message::Tool {
+                content,
+                tool_call_id,
+            } = blocked_msg
+            && let Err(err) = self
+                .exec
+                .tool_result(
+                    exec_id,
+                    tool_call_id.clone(),
+                    tool_name.to_string(),
+                    content.clone(),
+                )
+                .await
+        {
+            eprintln!("[exec] failed to record blocked tool result: {err}");
+        }
+    }
+
     async fn invoke_task_run_to_messages(
         &self,
         iter: &Iteration,
@@ -1476,16 +1486,17 @@ impl Agent {
                     task_id,
                     exec::ExecStatus::Failed,
                     "",
-                    Some("Task not found".to_string()),
+                    Some("Task not found"),
                 );
             }
             Err(err) => {
+                let err_text = err.to_string();
                 return execution_observation(
                     None,
                     task_id,
                     exec::ExecStatus::Failed,
                     "",
-                    Some(err.to_string()),
+                    Some(&err_text),
                 );
             }
         };
@@ -1548,7 +1559,7 @@ impl Agent {
                     &execution.task_id,
                     exec::ExecStatus::Failed,
                     "",
-                    Some(err_text),
+                    Some(&err_text),
                 )
             }
         }
@@ -1929,7 +1940,7 @@ fn execution_observation(
     task_id: &str,
     status: exec::ExecStatus,
     output: &str,
-    error: Option<String>,
+    error: Option<&str>,
 ) -> serde_json::Value {
     serde_json::json!({
         "ok": status == exec::ExecStatus::Succeeded,

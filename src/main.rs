@@ -54,6 +54,7 @@ const WECHAT_CHANNEL: &str = "wechat";
 type DynError = Box<dyn std::error::Error + Send + Sync>;
 
 #[tokio::main]
+#[allow(clippy::too_many_lines)]
 async fn main() -> Result<(), DynError> {
     let cfg = AppConfig::bootstrap()?;
 

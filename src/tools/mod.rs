@@ -13,8 +13,7 @@
 //! registered in bulk via [`register_builtins`]. Stateful primitives
 //! such as [`task`] and [`timer`] register through their own modules.
 
-#[allow(dead_code)]
-pub(crate) mod cron;
+pub mod cron;
 pub(crate) mod dream;
 pub mod error;
 pub mod file;

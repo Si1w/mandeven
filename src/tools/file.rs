@@ -115,89 +115,95 @@ impl BaseTool for FileRead {
             ));
         };
         let content = content.replace("\r\n", "\n");
+        Ok(read_observation(&p.path, &content, p.offset, p.limit)?.into())
+    }
+}
 
-        let lines: Vec<&str> = content.split('\n').collect();
-        // `split('\n')` on a trailing newline yields an extra empty
-        // element; drop it so line counts match `wc -l`.
-        let total = if content.ends_with('\n') && !lines.is_empty() {
-            lines.len() - 1
-        } else {
-            lines.len()
-        };
-        if total == 0 {
-            return Ok(json!({
-                "ok": true,
-                "observation_type": "state",
-                "object": "file",
-                "operation": "read",
-                "path": &p.path,
-                "validated": true,
-                "diagnostics": [],
-                "output": format!("(Empty file: {})", p.path),
-                "total_lines": 0,
-            })
-            .into());
-        }
-
-        let offset = p.offset.unwrap_or(1).max(1);
-        let limit = p.limit.unwrap_or(DEFAULT_READ_LIMIT);
-        if offset > total {
-            return Err(exec(
-                "file_read",
-                format!("offset {offset} is beyond end of file ({total} lines)"),
-            ));
-        }
-
-        let start = offset - 1;
-        let end = (start + limit).min(total);
-        let mut out = String::new();
-        let mut truncated = false;
-        for (i, line) in lines[start..end].iter().enumerate() {
-            let formatted = format!("{}| {}", start + i + 1, line);
-            if out.len() + formatted.len() + 1 > MAX_TOOL_RESULT_BYTES {
-                truncated = true;
-                break;
-            }
-            if !out.is_empty() {
-                out.push('\n');
-            }
-            out.push_str(&formatted);
-        }
-
-        if truncated {
-            write!(
-                out,
-                "\n\n(truncated at ~{}KB — lower `limit` or increase `offset` to page further)",
-                MAX_TOOL_RESULT_BYTES / 1000
-            )
-            .expect("writing to String is infallible");
-        } else if end < total {
-            write!(
-                out,
-                "\n\n(Showing lines {offset}-{end} of {total}. Use offset={} to continue.)",
-                end + 1
-            )
-            .expect("writing to String is infallible");
-        } else {
-            write!(out, "\n\n(End of file — {total} lines total)")
-                .expect("writing to String is infallible");
-        }
-
-        Ok(json!({
+fn read_observation(
+    path: &str,
+    content: &str,
+    offset: Option<usize>,
+    limit: Option<usize>,
+) -> Result<Value> {
+    let lines: Vec<&str> = content.split('\n').collect();
+    // `split('\n')` on a trailing newline yields an extra empty
+    // element; drop it so line counts match `wc -l`.
+    let total = if content.ends_with('\n') && !lines.is_empty() {
+        lines.len() - 1
+    } else {
+        lines.len()
+    };
+    if total == 0 {
+        return Ok(json!({
             "ok": true,
             "observation_type": "state",
             "object": "file",
             "operation": "read",
-            "path": &p.path,
+            "path": path,
             "validated": true,
             "diagnostics": [],
-            "output": out,
-            "offset": offset,
-            "end": end,
-            "total_lines": total,
-        })
-        .into())
+            "output": format!("(Empty file: {path})"),
+            "total_lines": 0,
+        }));
     }
+
+    let offset = offset.unwrap_or(1).max(1);
+    let limit = limit.unwrap_or(DEFAULT_READ_LIMIT);
+    if offset > total {
+        return Err(exec(
+            "file_read",
+            format!("offset {offset} is beyond end of file ({total} lines)"),
+        ));
+    }
+
+    let start = offset - 1;
+    let end = (start + limit).min(total);
+    let mut out = String::new();
+    let mut truncated = false;
+    for (i, line) in lines[start..end].iter().enumerate() {
+        let formatted = format!("{}| {}", start + i + 1, line);
+        if out.len() + formatted.len() + 1 > MAX_TOOL_RESULT_BYTES {
+            truncated = true;
+            break;
+        }
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        out.push_str(&formatted);
+    }
+
+    if truncated {
+        write!(
+            out,
+            "\n\n(truncated at ~{}KB — lower `limit` or increase `offset` to page further)",
+            MAX_TOOL_RESULT_BYTES / 1000
+        )
+        .expect("writing to String is infallible");
+    } else if end < total {
+        write!(
+            out,
+            "\n\n(Showing lines {offset}-{end} of {total}. Use offset={} to continue.)",
+            end + 1
+        )
+        .expect("writing to String is infallible");
+    } else {
+        write!(out, "\n\n(End of file — {total} lines total)")
+            .expect("writing to String is infallible");
+    }
+
+    Ok(json!({
+        "ok": true,
+        "observation_type": "state",
+        "object": "file",
+        "operation": "read",
+        "path": path,
+        "validated": true,
+        "diagnostics": [],
+        "output": out,
+        "offset": offset,
+        "end": end,
+        "total_lines": total,
+    }))
 }
 
 // ---------------------------------------------------------------------------

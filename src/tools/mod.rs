@@ -260,8 +260,9 @@ fn error_content(message: &str) -> String {
 }
 
 /// Install the always-on, stateless built-in tool set ([`file::FileRead`],
-/// [`file::FileWrite`], [`file::FileEdit`], [`shell::Shell`],
-/// [`web::WebSearch`], [`web::WebFetch`]) into `registry`.
+/// [`file::FileWrite`], [`file::FileEdit`], [`grep::Grep`],
+/// [`shell::Shell`], [`web::WebSearch`], [`web::WebFetch`]) into
+/// `registry`.
 ///
 /// Stateful or config-gated tools register through their own modules because
 /// they need runtime handles: [`task::register`], [`timer::register`], and
@@ -273,6 +274,7 @@ pub fn register_builtins(registry: &mut Registry) {
     registry.register(Arc::new(file::FileRead));
     registry.register(Arc::new(file::FileWrite));
     registry.register(Arc::new(file::FileEdit));
+    registry.register(Arc::new(grep::Grep));
     registry.register(Arc::new(shell::Shell));
     registry.register(Arc::new(web::WebSearch));
     registry.register(Arc::new(web::WebFetch));

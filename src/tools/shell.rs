@@ -124,8 +124,8 @@ impl BaseTool for Shell {
             description: "Execute a shell command via `sh -c` (or `$SHELL -lc` \
                 when `login: true`) with a curated environment (HOME, PATH, \
                 LANG, TERM, USER, SHELL). Prefer file_read / file_write / \
-                file_edit over cat / echo / sed. Use rg through shell_exec only \
-                for repository-wide searches. Output is middle-truncated at the shared tool \
+                file_edit over cat / echo / sed, and grep over shell-driven \
+                grep / rg / find / ls searches. Output is middle-truncated at the shared tool \
                 result cap; timeout defaults to 60s, max 600s. A minimal \
                 deny-list always blocks obviously destructive commands \
                 (rm -rf, dd if=, shutdown, fork bomb). Under read_only \

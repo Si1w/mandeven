@@ -12,7 +12,7 @@
 //! swaps that file rather than a source rebuild.
 //!
 //! Tool names referenced in [`USING_TOOLS`] (`file_read`, `file_write`,
-//! `file_edit`, `shell_exec`, `web_search`, `web_fetch`,
+//! `file_edit`, `grep`, `shell_exec`, `web_search`, `web_fetch`,
 //! `task_create`, `task_update`, `task_list`, `task_get`,
 //! `timer_create`, `timer_update`, `timer_list`, `timer_delete`,
 //! `timer_fire_now`) must stay in sync with
@@ -168,8 +168,9 @@ and review your work better:
   - To edit files use `file_edit` instead of sed or awk.
   - To create files use `file_write` instead of cat with heredoc or \
 echo redirection.
-  - To search file contents, prefer `file_read` on focused files; use \
-`shell_exec` with rg only when a repository-wide search is needed.
+  - To search file contents or file paths, use `grep` instead of running \
+grep, rg, find, or ls through `shell_exec`. It is backed by ripgrep and \
+is the stable repository-search primitive.
   - To search the web use `web_search`; to fetch a specific URL use \
 `web_fetch`.
   - For complex multi-step work, use `task_create`, `task_update`, \
@@ -259,6 +260,7 @@ mod tests {
             "file_read",
             "file_write",
             "file_edit",
+            "grep",
             "shell_exec",
             "web_search",
             "web_fetch",

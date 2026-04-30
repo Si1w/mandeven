@@ -18,6 +18,7 @@ pub mod file;
 pub mod grep;
 pub mod heartbeat;
 pub mod memory;
+pub(crate) mod schema;
 pub mod shell;
 pub mod skill;
 pub mod task;
@@ -34,6 +35,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use serde::Deserialize;
 use serde_json::json;
 
 use crate::llm::{Message, Tool, ToolCall};
@@ -100,6 +102,23 @@ pub trait BaseTool: Send + Sync {
     ///
     /// Return [`Error::Execution`] for tool-specific runtime failures.
     async fn call(&self, args: serde_json::Value) -> Result<ToolOutcome>;
+}
+
+pub(crate) fn parse_params<T: for<'de> Deserialize<'de>>(
+    tool: &'static str,
+    args: serde_json::Value,
+) -> Result<T> {
+    serde_json::from_value(args).map_err(|source| Error::InvalidArguments {
+        tool: tool.to_string(),
+        source,
+    })
+}
+
+pub(crate) fn exec_error(tool: &'static str, message: impl std::fmt::Display) -> Error {
+    Error::Execution {
+        tool: tool.to_string(),
+        message: message.to_string(),
+    }
 }
 
 /// Registry of tools available to the agent.
@@ -233,9 +252,13 @@ fn error_content(message: &str) -> String {
         .expect("fixed-shape error object always serializes")
 }
 
-/// Install the built-in tool set ([`file::FileRead`], [`file::FileWrite`],
-/// [`file::FileEdit`], [`grep::Grep`], [`shell::Shell`],
+/// Install the always-on, stateless built-in tool set ([`file::FileRead`],
+/// [`file::FileWrite`], [`file::FileEdit`], [`grep::Grep`], [`shell::Shell`],
 /// [`web::WebSearch`], [`web::WebFetch`]) into `registry`.
+///
+/// Stateful or config-gated tools register through their own modules because
+/// they need runtime handles: [`task::register`], [`memory::register`],
+/// [`cron::register`], and [`skill::SkillTool`].
 /// Callers who want a different subset can register tools directly instead.
 pub fn register_builtins(registry: &mut Registry) {
     registry.register(Arc::new(file::FileRead));

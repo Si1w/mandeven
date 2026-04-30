@@ -364,6 +364,7 @@ fn task_summary(task: &task::Task, all_tasks: &[task::Task]) -> Value {
     let unresolved = task::unresolved_blockers(task, all_tasks);
     json!({
         "id": &task.id,
+        "path": &task.path,
         "subject": &task.subject,
         "status": status_name(task.status),
         "owner": &task.owner,
@@ -376,6 +377,7 @@ fn task_detail(task: &task::Task, all_tasks: &[task::Task]) -> Value {
     let unresolved = task::unresolved_blockers(task, all_tasks);
     json!({
         "id": &task.id,
+        "path": &task.path,
         "subject": &task.subject,
         "description": &task.description,
         "active_form": &task.active_form,
@@ -449,7 +451,7 @@ mod tests {
             tasks: manager.clone(),
         };
 
-        create
+        let result = create
             .call(json!({
                 "subject": "Run tests",
                 "description": "Run the Rust test suite",
@@ -457,9 +459,13 @@ mod tests {
             }))
             .await
             .unwrap();
+        let ToolOutcome::Result(value) = result else {
+            panic!("task_create should return plain result");
+        };
+        let task_id = value["task"]["id"].as_str().unwrap().to_string();
         update
             .call(json!({
-                "task_id": "1",
+                "task_id": task_id,
                 "status": "in_progress",
                 "owner": "main"
             }))

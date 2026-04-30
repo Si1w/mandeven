@@ -20,11 +20,15 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::Mutex;
+use uuid::Uuid;
 
 /// Subdirectory under a project bucket holding the task store.
 pub const TASK_SUBDIR: &str = "tasks";
 
-/// Filename inside [`TASK_SUBDIR`] holding task definitions.
+/// Legacy filename inside [`TASK_SUBDIR`] holding task definitions.
+///
+/// New task stores are one Markdown file per task. The JSON file is
+/// still read so existing installs migrate on the next write.
 pub const TASK_STORE_FILENAME: &str = "tasks.json";
 
 /// Current task store schema version.
@@ -46,9 +50,12 @@ pub enum TaskStatus {
 /// One project-local task.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Task {
-    /// Monotonic project-local id, represented as a string so tools can
+    /// UUID v7 stable machine id, represented as a string so tools can
     /// refer to ids uniformly in JSON.
     pub id: String,
+    /// User-readable Markdown path relative to the project bucket.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
     /// Brief actionable title.
     pub subject: String,
     /// Full description of what needs to be done.
@@ -150,7 +157,7 @@ impl Manager {
         }
     }
 
-    /// Path to the backing store file.
+    /// Path to the backing store directory.
     #[must_use]
     pub fn path(&self) -> &Path {
         self.store.path()
@@ -173,10 +180,10 @@ impl Manager {
 
         let _guard = self.lock.lock().await;
         let mut file = self.store.load().await?;
-        file.high_watermark = file.high_watermark.saturating_add(1);
         let now = Utc::now();
         let task = Task {
-            id: file.high_watermark.to_string(),
+            id: Uuid::now_v7().to_string(),
+            path: None,
             subject: draft.subject,
             description: draft.description,
             active_form: draft.active_form,
@@ -190,7 +197,14 @@ impl Manager {
         };
         file.tasks.push(task.clone());
         self.store.save(&file).await?;
-        Ok(task)
+        Ok(self
+            .store
+            .load()
+            .await?
+            .tasks
+            .into_iter()
+            .find(|stored| stored.id == task.id)
+            .unwrap_or(task))
     }
 
     /// Read a task by id.
@@ -203,7 +217,7 @@ impl Manager {
         Ok(file.tasks.into_iter().find(|task| task.id == id))
     }
 
-    /// List every task sorted by numeric id.
+    /// List every task sorted by creation time.
     ///
     /// # Errors
     ///
@@ -236,6 +250,15 @@ impl Manager {
         if !fields.is_empty() {
             file.tasks[index].updated_at = Utc::now();
             self.store.save(&file).await?;
+            let updated_id = file.tasks[index].id.clone();
+            file = self.store.load().await?;
+            let Some(updated_index) = find_task_index(&file.tasks, &updated_id) else {
+                return Err(Error::TaskNotFound(updated_id));
+            };
+            return Ok(Some(UpdateOutcome {
+                task: file.tasks[updated_index].clone(),
+                updated_fields: fields,
+            }));
         }
         Ok(Some(UpdateOutcome {
             task: file.tasks[index].clone(),
@@ -449,10 +472,8 @@ fn push_unique_field(fields: &mut Vec<String>, field: &str) {
 
 fn sort_tasks(tasks: &mut [Task]) {
     tasks.sort_by(|left, right| {
-        let left_num = left.id.parse::<u64>().ok();
-        let right_num = right.id.parse::<u64>().ok();
-        left_num
-            .cmp(&right_num)
+        left.created_at
+            .cmp(&right.created_at)
             .then_with(|| left.id.cmp(&right.id))
     });
 }
@@ -481,14 +502,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn create_assigns_monotonic_ids() {
+    async fn create_assigns_uuid_ids_and_writes_markdown() {
         let dir = tempdir();
         let manager = Manager::new(&dir);
         let first = manager.create(draft("first")).await.unwrap();
         let second = manager.create(draft("second")).await.unwrap();
 
-        assert_eq!(first.id, "1");
-        assert_eq!(second.id, "2");
+        assert_ne!(first.id, second.id);
+        assert!(uuid::Uuid::parse_str(&first.id).is_ok());
+        assert_eq!(first.path.as_deref(), Some("tasks/first.md"));
+        assert!(dir.join("tasks").join("first.md").exists());
         assert_eq!(manager.list().await.unwrap().len(), 2);
 
         let _ = tokio::fs::remove_dir_all(dir).await;

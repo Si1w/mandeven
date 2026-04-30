@@ -10,7 +10,8 @@
 //! on the next turn.
 //!
 //! Built-in tools live in sibling files ([`mod@file`], [`shell`]) and are
-//! registered in bulk via [`register_builtins`].
+//! registered in bulk via [`register_builtins`]. Stateful primitives
+//! such as [`task`] and [`timer`] register through their own modules.
 
 pub mod cron;
 pub(crate) mod dream;
@@ -23,6 +24,7 @@ pub(crate) mod schema;
 pub mod shell;
 pub mod skill;
 pub mod task;
+pub mod timer;
 pub mod web;
 
 pub use error::{Error, Result};
@@ -258,8 +260,10 @@ fn error_content(message: &str) -> String {
 /// [`web::WebSearch`], [`web::WebFetch`]) into `registry`.
 ///
 /// Stateful or config-gated tools register through their own modules because
-/// they need runtime handles: [`task::register`], [`cron::register`], and
-/// [`skill::SkillTool`].
+/// they need runtime handles: [`task::register`], [`timer::register`], and
+/// [`skill::SkillTool`]. Cron remains an internal/slash-command runtime
+/// compatibility layer; model-facing scheduled work is expressed as
+/// `task + timer`.
 /// Callers who want a different subset can register tools directly instead.
 pub fn register_builtins(registry: &mut Registry) {
     registry.register(Arc::new(file::FileRead));

@@ -14,8 +14,9 @@
 //! Tool names referenced in [`USING_TOOLS`] (`file_read`, `file_write`,
 //! `file_edit`, `grep`, `shell`, `web_search`, `web_fetch`,
 //! `task_create`, `task_update`, `task_list`, `task_get`,
-//! `cron_create`, `cron_list`, `cron_delete`) must stay in sync with
-//! `crate::tools::register_builtins` plus the task/cron/skill tool registration
+//! `timer_create`, `timer_update`, `timer_list`, `timer_delete`,
+//! `timer_fire_now`) must stay in sync with
+//! `crate::tools::register_builtins` plus the task/timer/skill tool registration
 //! in `main.rs`. Rename a tool there and you have to rename it here too.
 
 /// Section name for the agent identity / first-principles framing.
@@ -177,11 +178,12 @@ are model-facing tools, not user slash commands. Create tasks for \
 multiple requirements or 3+ meaningful steps; mark a task \
 `in_progress` before starting it; mark it `completed` only when fully \
 done; use dependencies when work is blocked by another task.
-  - Use `cron_create`, `cron_list`, and `cron_delete` only for explicit \
-user intent to schedule future or recurring autonomous work. Check \
-existing cron jobs before creating duplicates. Cron tools are \
-model-facing; `/cron` is the user-facing governance surface for \
-inspecting, disabling, triggering, and removing schedules.
+  - Use `timer_create`, `timer_update`, `timer_list`, `timer_delete`, \
+and `timer_fire_now` only for explicit user intent to schedule future \
+or recurring autonomous work. Create or reuse a task first, then bind \
+the timer to that task id. Check existing timers before creating \
+duplicates. Timers are Markdown state; they do not replace the need \
+to keep the task itself accurate.
   - Durable memory is managed outside the foreground tool loop by the \
 Dream background reviewer and the user-facing `/memory` governance \
 surface. Do not emulate memory writes in files, tasks, cron jobs, or \
@@ -265,9 +267,11 @@ mod tests {
             "task_update",
             "task_list",
             "task_get",
-            "cron_create",
-            "cron_list",
-            "cron_delete",
+            "timer_create",
+            "timer_update",
+            "timer_list",
+            "timer_delete",
+            "timer_fire_now",
         ] {
             assert!(
                 USING_TOOLS.contains(name),

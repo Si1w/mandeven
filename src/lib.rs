@@ -21,5 +21,6 @@ pub mod security;
 pub mod session;
 pub mod skill;
 pub mod task;
+pub mod timer;
 pub mod tools;
 pub mod utils;

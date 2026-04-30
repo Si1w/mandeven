@@ -114,6 +114,14 @@ state lives in sidecar files; durable enable/budget knobs live in
 | `memory`    | `[agent.memory]` in `mandeven.toml`   | Durable memories + frozen per-session prompt snapshot   |
 | `dream`     | `[agent.dream]` in `mandeven.toml`    | Cron-driven background review that distills session evidence into global memory |
 
+## Architecture notes
+
+The target primitive-runtime design is documented in
+[`docs/primitive-runtime-design.md`](docs/primitive-runtime-design.md). It
+describes the intended direction: validated primitive tools as the RISC
+instruction set, shell and skills as CISC escape hatches, Markdown for
+user-visible state, and JSONL for execution history.
+
 ## 📜 License
 
 Apache License 2.0. See [LICENSE](LICENSE).

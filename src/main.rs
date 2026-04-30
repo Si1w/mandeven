@@ -36,6 +36,7 @@ use mandeven::security::SandboxPolicy;
 use mandeven::session;
 use mandeven::skill::{self, SkillIndex};
 use mandeven::task;
+use mandeven::timer;
 use mandeven::tools;
 use mandeven::utils::workspace;
 
@@ -199,15 +200,15 @@ async fn main() -> Result<(), DynError> {
 
 fn build_tool_registry(
     project_bucket: &Path,
-    cron_wiring: Option<&CronWiring>,
+    _cron_wiring: Option<&CronWiring>,
     skill_index: &Arc<SkillIndex>,
 ) -> tools::Registry {
     let mut registry = tools::Registry::new();
     tools::register_builtins(&mut registry);
     tools::task::register(&mut registry, Arc::new(task::Manager::new(project_bucket)));
-    if let Some(wiring) = cron_wiring {
-        tools::cron::register(&mut registry, wiring.engine.clone());
-    }
+    tools::timer::register(&mut registry, Arc::new(timer::Manager::new(project_bucket)));
+    // Cron remains a runtime/slash-command compatibility layer. The
+    // model-facing scheduling primitive is task + timer.
     if !skill_index.is_empty() {
         registry.register(Arc::new(tools::skill::SkillTool::new(skill_index.clone())));
     }

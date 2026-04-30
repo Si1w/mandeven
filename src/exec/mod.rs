@@ -54,6 +54,64 @@ pub struct ExecStart {
     pub channel: ChannelID,
 }
 
+/// What caused an execution to start.
+#[derive(Clone, Debug)]
+pub enum ExecTrigger {
+    /// Direct task execution.
+    TaskRun,
+    /// Timer scheduler fired.
+    Timer {
+        /// Timer that triggered the execution.
+        timer_id: String,
+        /// Human-readable timer title.
+        timer_title: String,
+    },
+}
+
+impl ExecTrigger {
+    fn timer_id(&self) -> Option<String> {
+        match self {
+            Self::TaskRun => None,
+            Self::Timer { timer_id, .. } => Some(timer_id.clone()),
+        }
+    }
+
+    fn timer_title(&self) -> Option<String> {
+        match self {
+            Self::TaskRun => None,
+            Self::Timer { timer_title, .. } => Some(timer_title.clone()),
+        }
+    }
+}
+
+/// Validated task execution input.
+#[derive(Clone, Debug)]
+pub struct TaskExecution {
+    /// Task being executed.
+    pub task_id: String,
+    /// Human-readable task subject.
+    pub task_subject: String,
+    /// User-message text fed into the agent.
+    pub prompt: String,
+    /// Trigger that started the execution.
+    pub trigger: ExecTrigger,
+}
+
+impl TaskExecution {
+    /// Build the history start record for this execution.
+    #[must_use]
+    pub fn start(&self, session: SessionID, channel: ChannelID) -> ExecStart {
+        ExecStart {
+            task_id: self.task_id.clone(),
+            task_subject: self.task_subject.clone(),
+            timer_id: self.trigger.timer_id(),
+            timer_title: self.trigger.timer_title(),
+            session,
+            channel,
+        }
+    }
+}
+
 /// Terminal execution status.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]

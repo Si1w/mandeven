@@ -686,31 +686,67 @@ impl Agent {
             return Ok(());
         };
 
+        let task = exec::TaskExecution {
+            task_id: tick.task_id.clone(),
+            task_subject: tick.task_subject.clone(),
+            prompt: tick.prompt.clone(),
+            trigger: exec::ExecTrigger::Timer {
+                timer_id: tick.timer_id.clone(),
+                timer_title: tick.timer_title.clone(),
+            },
+        };
+        let iter = match self
+            .execute_task_iteration(session.clone(), target.clone(), task)
+            .await
+        {
+            Ok(iter) => iter,
+            Err(err) => {
+                let reply = OutboundMessage::new(
+                    target.clone(),
+                    session.clone(),
+                    OutboundPayload::Error(format!(
+                        "[timer:{} / task:{}] {}",
+                        tick.timer_title, tick.task_subject, err
+                    )),
+                );
+                let _ = self.out.send(reply).await;
+                Iteration {
+                    session: session.clone(),
+                    channel: target.clone(),
+                    exec_id: None,
+                }
+            }
+        };
+        let _ = self.send_turn_end(&iter).await;
+        Ok(())
+    }
+
+    /// Execute one validated task through the normal visible agent
+    /// iteration and record the machine-readable execution stream.
+    async fn execute_task_iteration(
+        &self,
+        session: SessionID,
+        channel: ChannelID,
+        task: exec::TaskExecution,
+    ) -> Result<Iteration> {
         let exec_id = match self
             .exec
-            .start(exec::ExecStart {
-                task_id: tick.task_id.clone(),
-                task_subject: tick.task_subject.clone(),
-                timer_id: Some(tick.timer_id.clone()),
-                timer_title: Some(tick.timer_title.clone()),
-                session: session.clone(),
-                channel: target.clone(),
-            })
+            .start(task.start(session.clone(), channel.clone()))
             .await
         {
             Ok(exec_id) => Some(exec_id),
             Err(err) => {
-                eprintln!("[exec] failed to start timer execution log: {err}");
+                eprintln!("[exec] failed to start execution log: {err}");
                 None
             }
         };
         let iter = Iteration {
-            session: session.clone(),
-            channel: target.clone(),
+            session,
+            channel,
             exec_id: exec_id.clone(),
         };
 
-        match self.iteration(&iter, tick.prompt.clone()).await {
+        match self.iteration(&iter, task.prompt).await {
             Ok(output) => {
                 if let Some(exec_id) = exec_id.as_ref() {
                     if let Err(err) = self.exec.final_output(exec_id, output).await {
@@ -724,6 +760,7 @@ impl Agent {
                         eprintln!("[exec] failed to finish execution log: {err}");
                     }
                 }
+                Ok(iter)
             }
             Err(err) => {
                 if let Some(exec_id) = exec_id.as_ref()
@@ -734,19 +771,9 @@ impl Agent {
                 {
                     eprintln!("[exec] failed to mark execution failed: {log_err}");
                 }
-                let reply = OutboundMessage::new(
-                    target.clone(),
-                    session.clone(),
-                    OutboundPayload::Error(format!(
-                        "[timer:{} / task:{}] {}",
-                        tick.timer_title, tick.task_subject, err
-                    )),
-                );
-                let _ = self.out.send(reply).await;
+                Err(err)
             }
         }
-        let _ = self.send_turn_end(&iter).await;
-        Ok(())
     }
 
     /// Handle a quiet Dream tick. Errors are logged and swallowed so a failed

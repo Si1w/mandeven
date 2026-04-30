@@ -640,12 +640,7 @@ fn find_duplicate_index(memories: &[Memory], draft: &MemoryDraft) -> Option<usiz
         memory.status == MemoryStatus::Active
             && memory.kind == draft.kind
             && (normalize_key(&memory.title) == title
-                || terms_are_similar(
-                    &significant_terms(&memory.title),
-                    &draft_title_terms,
-                    66,
-                    2,
-                )
+                || terms_are_similar(&significant_terms(&memory.title), &draft_title_terms, 66, 2)
                 || terms_are_similar(
                     &significant_terms(&format!("{} {}", memory.title, memory.summary)),
                     &draft_terms,

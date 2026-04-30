@@ -24,6 +24,7 @@ These principles govern *how* work gets done in this project. They apply to ever
 - **Ship a runnable demo early.** The sooner it actually runs, the sooner you catch a wrong direction.
 - **Unit-test the core logic.** Not 100% coverage — but key algorithms and data transformations must have tests.
 - **A bug isn't fixed until you can reproduce it locally.** No guessing. Reproduce, then fix.
+- **Run CI/CD-equivalent tests before committing.** Before creating a commit or PR, run the project tests that mirror CI/CD for the touched area. For this Rust repo, run `cargo test` unless a narrower documented CI command is clearly sufficient. Report the command and result in the final response.
 - **Keep Clippy strict.** Run `cargo clippy --all-targets --all-features -- -W clippy::pedantic -D warnings` before closing out Rust changes.
 
 ### Defensive Mindset

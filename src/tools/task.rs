@@ -19,6 +19,11 @@ use super::{BaseTool, Registry, ToolOutcome};
 use crate::llm::Tool;
 use crate::task::{self, OptionalTextUpdate, TaskDraft, TaskStatus, TaskUpdate};
 
+/// Tool name for explicit task execution. The agent layer intercepts
+/// this call because running a task requires a nested LLM/tool loop and
+/// execution history recording.
+pub const TASK_RUN_TOOL_NAME: &str = "task_run";
+
 /// Register all model-facing task tools.
 pub fn register(registry: &mut Registry, tasks: Arc<task::Manager>) {
     registry.register(Arc::new(TaskCreate {
@@ -31,6 +36,7 @@ pub fn register(registry: &mut Registry, tasks: Arc<task::Manager>) {
         tasks: tasks.clone(),
     }));
     registry.register(Arc::new(TaskUpdateTool { tasks }));
+    registry.register(Arc::new(TaskRunTool));
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -289,6 +295,40 @@ impl BaseTool for TaskUpdateTool {
             "task": task_summary(&outcome.task, &tasks),
         })
         .into())
+    }
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub(crate) struct TaskRunParams {
+    /// Task id to execute now.
+    pub task_id: String,
+}
+
+/// Schema-only task execution tool.
+///
+/// The agent intercepts this tool before normal registry dispatch so
+/// execution can be recorded under `execution/<exec_id>.jsonl`.
+pub struct TaskRunTool;
+
+#[async_trait]
+impl BaseTool for TaskRunTool {
+    fn schema(&self) -> Tool {
+        Tool {
+            name: TASK_RUN_TOOL_NAME.into(),
+            description: "Execute a task now and return its final output as an execution \
+                observation. The runtime records the execution stream under \
+                execution/<exec_id>.jsonl."
+                .into(),
+            parameters: serde_json::to_value(schema_for!(TaskRunParams))
+                .expect("JsonSchema derive always serializes"),
+        }
+    }
+
+    async fn call(&self, _args: Value) -> Result<ToolOutcome> {
+        Err(exec(
+            TASK_RUN_TOOL_NAME,
+            &"task_run must be handled by the agent execution layer",
+        ))
     }
 }
 

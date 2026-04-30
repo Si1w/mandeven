@@ -134,6 +134,7 @@ async fn main() -> Result<(), DynError> {
     let timer_wiring = Some(TimerWiring { engine, rx });
 
     let memory_manager = Arc::new(memory::Manager::new(&cfg.data_dir(), &project_bucket));
+    let task_manager = Arc::new(task::Manager::new(&project_bucket));
     let exec_manager = Arc::new(exec::Manager::new(&project_bucket));
 
     let dream_wiring = if cfg.agent.dream.enabled && cfg.agent.memory.enabled {
@@ -145,7 +146,12 @@ async fn main() -> Result<(), DynError> {
         None
     };
 
-    let tool_registry = build_tool_registry(&project_bucket, cron_wiring.as_ref(), &skill_index);
+    let tool_registry = build_tool_registry(
+        &project_bucket,
+        cron_wiring.as_ref(),
+        &skill_index,
+        task_manager.clone(),
+    );
 
     let (discord_channel, discord_wiring) = build_discord(&cfg).await?;
     let discord_active_rx = discord_wiring
@@ -166,6 +172,7 @@ async fn main() -> Result<(), DynError> {
         timer_wiring,
         dream_wiring,
         memory_manager,
+        task_manager,
         exec_manager,
         discord_wiring,
         wechat_wiring,
@@ -211,10 +218,11 @@ fn build_tool_registry(
     project_bucket: &Path,
     _cron_wiring: Option<&CronWiring>,
     skill_index: &Arc<SkillIndex>,
+    task_manager: Arc<task::Manager>,
 ) -> tools::Registry {
     let mut registry = tools::Registry::new();
     tools::register_builtins(&mut registry);
-    tools::task::register(&mut registry, Arc::new(task::Manager::new(project_bucket)));
+    tools::task::register(&mut registry, task_manager);
     tools::timer::register(&mut registry, Arc::new(timer::Manager::new(project_bucket)));
     // Cron remains a runtime/slash-command compatibility layer. The
     // model-facing scheduling primitive is task + timer.

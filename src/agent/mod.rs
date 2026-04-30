@@ -52,6 +52,7 @@ use crate::llm::{
 use crate::memory;
 use crate::prompt::{PromptContext, PromptEngine};
 use crate::session;
+use crate::task;
 use crate::timer;
 use crate::tools;
 use crate::tools::heartbeat::{
@@ -128,6 +129,9 @@ pub struct Agent {
     /// Durable memory/profile manager. Dream writes inferred memories;
     /// `/memory` is the user-facing governance surface.
     memory: Arc<memory::Manager>,
+    /// Project-local task manager used by explicit `task_run`
+    /// execution.
+    tasks: Arc<task::Manager>,
     /// Machine-readable execution history writer. Timer-triggered
     /// tasks append JSONL events here.
     exec: Arc<exec::Manager>,
@@ -341,6 +345,7 @@ impl Agent {
         timer: Option<TimerWiring>,
         dream: Option<DreamWiring>,
         memory: Arc<memory::Manager>,
+        tasks: Arc<task::Manager>,
         exec: Arc<exec::Manager>,
         discord: Option<DiscordWiring>,
         wechat: Option<WechatWiring>,
@@ -389,6 +394,7 @@ impl Agent {
             dream: dream_handle,
             dream_rx,
             memory,
+            tasks,
             exec,
             discord: discord_handle,
             wechat: wechat_handle,
@@ -1383,7 +1389,12 @@ impl Agent {
         let tool_name = call.name.clone();
         let tool_use_id = call.id.clone();
         let tool_input_raw = call.arguments.clone();
-        let messages = self.tools.invoke_to_messages(call).await;
+        let messages = if call.name == tools::task::TASK_RUN_TOOL_NAME {
+            self.invoke_task_run_to_messages(iter, &call, &tool_input)
+                .await
+        } else {
+            self.tools.invoke_to_messages(call).await
+        };
         // The first message is the Tool reply; capture it before
         // moving the vec so we can include `tool_response` in the
         // PostToolUse payload.
@@ -1431,6 +1442,215 @@ impl Agent {
             )
             .await;
         Ok(())
+    }
+
+    async fn invoke_task_run_to_messages(
+        &self,
+        iter: &Iteration,
+        call: &ToolCall,
+        tool_input: &serde_json::Value,
+    ) -> Vec<Message> {
+        let content = match serde_json::from_value::<tools::task::TaskRunParams>(tool_input.clone())
+        {
+            Ok(params) => self.task_run_observation(iter, &params.task_id).await,
+            Err(err) => serde_json::json!({
+                "ok": false,
+                "observation_type": "execution",
+                "object": "task_run",
+                "status": "failed",
+                "error": format!("invalid task_run arguments: {err}"),
+            }),
+        };
+        vec![Message::Tool {
+            content: serialize_json(&content),
+            tool_call_id: call.id.clone(),
+        }]
+    }
+
+    async fn task_run_observation(&self, iter: &Iteration, task_id: &str) -> serde_json::Value {
+        let task = match self.tasks.get(task_id).await {
+            Ok(Some(task)) => task,
+            Ok(None) => {
+                return execution_observation(
+                    None,
+                    task_id,
+                    exec::ExecStatus::Failed,
+                    "",
+                    Some("Task not found".to_string()),
+                );
+            }
+            Err(err) => {
+                return execution_observation(
+                    None,
+                    task_id,
+                    exec::ExecStatus::Failed,
+                    "",
+                    Some(err.to_string()),
+                );
+            }
+        };
+
+        let execution = exec::TaskExecution {
+            task_id: task.id.clone(),
+            task_subject: task.subject.clone(),
+            prompt: prompt_for_direct_task(&task),
+            trigger: exec::ExecTrigger::TaskRun,
+        };
+        let exec_id = match self
+            .exec
+            .start(execution.start(iter.session.clone(), iter.channel.clone()))
+            .await
+        {
+            Ok(exec_id) => Some(exec_id),
+            Err(err) => {
+                eprintln!("[exec] failed to start task_run execution log: {err}");
+                None
+            }
+        };
+
+        match self
+            .execute_task_silent(iter, execution.prompt, exec_id.as_ref())
+            .await
+        {
+            Ok(output) => {
+                if let Some(exec_id) = exec_id.as_ref() {
+                    if let Err(err) = self.exec.final_output(exec_id, output.clone()).await {
+                        eprintln!("[exec] failed to write task_run final output: {err}");
+                    }
+                    if let Err(err) = self
+                        .exec
+                        .finish(exec_id, exec::ExecStatus::Succeeded, None)
+                        .await
+                    {
+                        eprintln!("[exec] failed to finish task_run execution: {err}");
+                    }
+                }
+                execution_observation(
+                    exec_id.as_ref(),
+                    &execution.task_id,
+                    exec::ExecStatus::Succeeded,
+                    &output,
+                    None,
+                )
+            }
+            Err(err) => {
+                let err_text = err.to_string();
+                if let Some(exec_id) = exec_id.as_ref()
+                    && let Err(log_err) = self
+                        .exec
+                        .finish(exec_id, exec::ExecStatus::Failed, Some(err_text.clone()))
+                        .await
+                {
+                    eprintln!("[exec] failed to mark task_run failed: {log_err}");
+                }
+                execution_observation(
+                    exec_id.as_ref(),
+                    &execution.task_id,
+                    exec::ExecStatus::Failed,
+                    "",
+                    Some(err_text),
+                )
+            }
+        }
+    }
+
+    async fn execute_task_silent(
+        &self,
+        iter: &Iteration,
+        prompt: String,
+        exec_id: Option<&exec::ExecId>,
+    ) -> Result<String> {
+        let memory_snapshot = self.capture_memory_snapshot(iter).await.unwrap_or_default();
+        let mut messages = vec![Message::User { content: prompt }];
+        let mut i: u8 = 0;
+        loop {
+            if let Some(cap) = self.config.max_iterations
+                && i >= cap
+            {
+                return Err(Error::MaxIterationsExceeded(cap));
+            }
+
+            let request_messages = append_memory_snapshot(
+                self.prepend_iteration_system(messages.clone()),
+                &memory_snapshot,
+            );
+            let model = self.model_snapshot();
+            let request = self.build_request(&model.profile, request_messages);
+            let response = model.client.complete(request).await?;
+            let content = response.content.unwrap_or_default();
+            let tool_calls = response.tool_calls;
+            let no_more_calls = tool_calls.as_ref().is_none_or(Vec::is_empty);
+            messages.push(Message::Assistant {
+                content: (!content.is_empty()).then_some(content.clone()),
+                tool_calls: tool_calls.clone(),
+                reasoning: response.thinking,
+            });
+            if no_more_calls {
+                return Ok(content);
+            }
+            for call in tool_calls.unwrap_or_default() {
+                let tool_messages = self.invoke_silent_tool(exec_id, call).await;
+                messages.extend(tool_messages);
+            }
+            i = i.saturating_add(1);
+        }
+    }
+
+    async fn invoke_silent_tool(
+        &self,
+        exec_id: Option<&exec::ExecId>,
+        call: ToolCall,
+    ) -> Vec<Message> {
+        let tool_input =
+            serde_json::from_str::<serde_json::Value>(&call.arguments).unwrap_or_default();
+        if let Some(exec_id) = exec_id
+            && let Err(err) = self
+                .exec
+                .tool_call(
+                    exec_id,
+                    call.id.clone(),
+                    call.name.clone(),
+                    tool_input.clone(),
+                )
+                .await
+        {
+            eprintln!("[exec] failed to record task_run tool call: {err}");
+        }
+        let messages = if call.name == tools::task::TASK_RUN_TOOL_NAME {
+            vec![Message::Tool {
+                content: serialize_json(&serde_json::json!({
+                    "ok": false,
+                    "observation_type": "execution",
+                    "object": "task_run",
+                    "status": "failed",
+                    "error": "nested task_run is not supported",
+                })),
+                tool_call_id: call.id.clone(),
+            }]
+        } else {
+            self.tools.invoke_to_messages(call.clone()).await
+        };
+        if let Some(exec_id) = exec_id {
+            for message in &messages {
+                if let Message::Tool {
+                    content,
+                    tool_call_id,
+                } = message
+                    && let Err(err) = self
+                        .exec
+                        .tool_result(
+                            exec_id,
+                            tool_call_id.clone(),
+                            call.name.clone(),
+                            content.clone(),
+                        )
+                        .await
+                {
+                    eprintln!("[exec] failed to record task_run tool result: {err}");
+                }
+            }
+        }
+        messages
     }
 
     /// Fire the `Stop` hook with the last assistant text. Outcome
@@ -1693,6 +1913,46 @@ fn append_memory_snapshot(mut messages: Vec<Message>, memory_snapshot: &str) -> 
         content.push_str(snapshot);
     }
     messages
+}
+
+fn prompt_for_direct_task(task: &task::Task) -> String {
+    format!(
+        "# Task: {}\n\nTask ID: {}\n\n{}",
+        task.subject,
+        task.id,
+        task.description.trim()
+    )
+}
+
+fn execution_observation(
+    exec_id: Option<&exec::ExecId>,
+    task_id: &str,
+    status: exec::ExecStatus,
+    output: &str,
+    error: Option<String>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "ok": status == exec::ExecStatus::Succeeded,
+        "observation_type": "execution",
+        "object": "task_run",
+        "exec_id": exec_id.map(ToString::to_string),
+        "task_id": task_id,
+        "status": exec_status_name(status),
+        "output": output,
+        "error": error,
+    })
+}
+
+fn exec_status_name(status: exec::ExecStatus) -> &'static str {
+    match status {
+        exec::ExecStatus::Succeeded => "succeeded",
+        exec::ExecStatus::Failed => "failed",
+        exec::ExecStatus::Skipped => "skipped",
+    }
+}
+
+fn serialize_json(value: &serde_json::Value) -> String {
+    serde_json::to_string(value).expect("serde_json::Value always serializes")
 }
 
 #[cfg(test)]

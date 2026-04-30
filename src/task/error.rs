@@ -46,4 +46,8 @@ pub enum Error {
     /// TOML front matter serialization failed.
     #[error("task store TOML encode error: {0}")]
     TomlEncode(#[from] toml::ser::Error),
+
+    /// YAML front matter serialization or deserialization failed.
+    #[error("task store YAML error: {0}")]
+    Yaml(#[from] serde_yaml::Error),
 }

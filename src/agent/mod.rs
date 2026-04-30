@@ -51,6 +51,7 @@ use crate::llm::{
 use crate::memory;
 use crate::prompt::{PromptContext, PromptEngine};
 use crate::session;
+use crate::timer;
 use crate::tools;
 use crate::tools::heartbeat::{
     HEARTBEAT_DECIDE_TOOL_NAME, HeartbeatDecideArgs, heartbeat_decide_tool,
@@ -112,6 +113,12 @@ pub struct Agent {
     /// Receiver paired with the cron engine. Raced against `inbox`
     /// (and the heartbeat receiver, when present) in [`Agent::run`].
     cron_rx: Option<mpsc::Receiver<cron::CronTick>>,
+    /// Timer scheduler handle, present iff the Markdown timer engine
+    /// was wired in.
+    timer: Option<Arc<timer::TimerEngine>>,
+    /// Receiver paired with the timer engine. Timer ticks are the
+    /// runtime form of `task + timer` state.
+    timer_rx: Option<mpsc::Receiver<timer::TimerTick>>,
     /// Dream scheduler handle, present iff the engine was wired in.
     dream: Option<Arc<dream::DreamEngine>>,
     /// Receiver paired with the Dream engine. Dream ticks are quiet
@@ -240,6 +247,14 @@ pub struct CronWiring {
     pub rx: mpsc::Receiver<cron::CronTick>,
 }
 
+/// Options for the Markdown timer scheduler.
+pub struct TimerWiring {
+    /// Scheduler handle.
+    pub engine: Arc<timer::TimerEngine>,
+    /// Tick stream from the scheduler.
+    pub rx: mpsc::Receiver<timer::TimerTick>,
+}
+
 /// Options for optional Dream wiring. Same scheduler-handle + receiver shape
 /// as heartbeat and cron, but Dream ticks are handled quietly and never route to
 /// a user channel.
@@ -277,6 +292,8 @@ enum Event {
     HeartbeatTick(Option<HeartbeatTick>),
     /// Cron tick fired. `None` semantics match the heartbeat arm.
     CronTick(Option<cron::CronTick>),
+    /// Timer tick fired. `None` semantics match the heartbeat arm.
+    TimerTick(Option<timer::TimerTick>),
     /// Dream tick fired. `None` semantics match the heartbeat arm.
     DreamTick(Option<dream::DreamTick>),
 }
@@ -317,6 +334,7 @@ impl Agent {
         active_sessions: ActiveSessions,
         heartbeat: Option<HeartbeatWiring>,
         cron: Option<CronWiring>,
+        timer: Option<TimerWiring>,
         dream: Option<DreamWiring>,
         memory: Arc<memory::Manager>,
         discord: Option<DiscordWiring>,
@@ -334,6 +352,10 @@ impl Agent {
         };
         let (cron_handle, cron_rx) = match cron {
             Some(CronWiring { engine, rx }) => (Some(engine), Some(rx)),
+            None => (None, None),
+        };
+        let (timer_handle, timer_rx) = match timer {
+            Some(TimerWiring { engine, rx }) => (Some(engine), Some(rx)),
             None => (None, None),
         };
         let (dream_handle, dream_rx) = match dream {
@@ -357,6 +379,8 @@ impl Agent {
             heartbeat_rx,
             cron: cron_handle,
             cron_rx,
+            timer: timer_handle,
+            timer_rx,
             dream: dream_handle,
             dream_rx,
             memory,
@@ -392,16 +416,19 @@ impl Agent {
             // `self.handle_*` are clean.
             let heartbeat_enabled = self.heartbeat_rx.is_some();
             let cron_enabled = self.cron_rx.is_some();
+            let timer_enabled = self.timer_rx.is_some();
             let dream_enabled = self.dream_rx.is_some();
             let inbox = &mut self.inbox;
             let heartbeat_rx = &mut self.heartbeat_rx;
             let cron_rx = &mut self.cron_rx;
+            let timer_rx = &mut self.timer_rx;
             let dream_rx = &mut self.dream_rx;
             let event = tokio::select! {
                 biased;
                 msg = inbox.recv() => Event::Dispatch(msg),
                 tick = recv_enabled(heartbeat_rx), if heartbeat_enabled => Event::HeartbeatTick(tick),
                 tick = recv_enabled(cron_rx), if cron_enabled => Event::CronTick(tick),
+                tick = recv_enabled(timer_rx), if timer_enabled => Event::TimerTick(tick),
                 tick = recv_enabled(dream_rx), if dream_enabled => Event::DreamTick(tick),
             };
 
@@ -421,6 +448,10 @@ impl Agent {
                     self.cron_rx = None;
                 }
                 Event::CronTick(Some(tick)) => self.handle_cron_tick(tick).await?,
+                Event::TimerTick(None) => {
+                    self.timer_rx = None;
+                }
+                Event::TimerTick(Some(tick)) => self.handle_timer_tick(tick).await?,
                 Event::DreamTick(None) => {
                     self.dream_rx = None;
                 }
@@ -619,6 +650,47 @@ impl Agent {
                     target.clone(),
                     session.clone(),
                     OutboundPayload::Error(format!("[cron:{}] {err_text}", tick.job_name)),
+                );
+                let _ = self.out.send(reply).await;
+            }
+        }
+        let _ = self.send_turn_end(&iter).await;
+        Ok(())
+    }
+
+    /// Handle a Markdown timer tick.
+    ///
+    /// Timers are the runtime form of `task + timer` state. The
+    /// scheduler has already advanced the timer before emitting this
+    /// tick, so this handler only routes the referenced task prompt
+    /// through the normal iteration loop.
+    async fn handle_timer_tick(&self, tick: timer::TimerTick) -> Result<()> {
+        if self.timer.is_none() {
+            return Ok(());
+        }
+        let target = ChannelID::new(HEARTBEAT_TARGET_CHANNEL);
+        let session = {
+            let map = self.active_sessions.lock().await;
+            map.get(&target).cloned()
+        };
+        let Some(session) = session else {
+            return Ok(());
+        };
+
+        let iter = Iteration {
+            session: session.clone(),
+            channel: target.clone(),
+        };
+        match self.iteration(&iter, tick.prompt.clone()).await {
+            Ok(()) => {}
+            Err(err) => {
+                let reply = OutboundMessage::new(
+                    target.clone(),
+                    session.clone(),
+                    OutboundPayload::Error(format!(
+                        "[timer:{} / task:{}] {}",
+                        tick.timer_title, tick.task_subject, err
+                    )),
                 );
                 let _ = self.out.send(reply).await;
             }

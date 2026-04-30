@@ -254,14 +254,25 @@ impl TaskFrontMatter {
             updated_at: self.updated_at,
         }
     }
+
+    fn from_yaml(raw: &str) -> Result<Self> {
+        Ok(serde_yaml::from_str(raw)?)
+    }
+
+    fn to_yaml(&self) -> Result<String> {
+        serialize_yaml_front_matter(self)
+    }
 }
 
 async fn read_task(path: &Path) -> Result<Option<Task>> {
     let content = tokio::fs::read_to_string(path).await?;
-    let Some((front_matter, body)) = split_front_matter(&content) else {
+    let Some((format, front_matter, body)) = split_front_matter(&content) else {
         return Ok(None);
     };
-    let front_matter: TaskFrontMatter = toml::from_str(front_matter)?;
+    let front_matter = match format {
+        FrontMatterFormat::Yaml => TaskFrontMatter::from_yaml(front_matter)?,
+        FrontMatterFormat::Toml => toml::from_str(front_matter)?,
+    };
     if front_matter.kind != "task" {
         return Ok(None);
     }
@@ -282,20 +293,37 @@ async fn write_task(path: &Path, task: &Task) -> Result<()> {
 }
 
 fn render_task(task: &Task) -> Result<String> {
-    let mut front_matter = toml::to_string_pretty(&TaskFrontMatter::from_task(task))?;
+    let mut front_matter = TaskFrontMatter::from_task(task).to_yaml()?;
     if !front_matter.ends_with('\n') {
         front_matter.push('\n');
     }
     Ok(format!(
-        "+++\n{front_matter}+++\n\n# {}\n\n{}\n",
+        "---\n{front_matter}---\n\n# {}\n\n{}\n",
         task.subject.trim(),
         task.description.trim_end()
     ))
 }
 
-fn split_front_matter(content: &str) -> Option<(&str, &str)> {
-    let rest = content.strip_prefix("+++\n")?;
-    let delimiter = "\n+++\n";
+#[derive(Clone, Copy)]
+enum FrontMatterFormat {
+    Yaml,
+    Toml,
+}
+
+fn split_front_matter(content: &str) -> Option<(FrontMatterFormat, &str, &str)> {
+    if let Some(parts) = split_front_matter_with(content, "---\n", "\n---\n") {
+        return Some((FrontMatterFormat::Yaml, parts.0, parts.1));
+    }
+    split_front_matter_with(content, "+++\n", "\n+++\n")
+        .map(|(front_matter, body)| (FrontMatterFormat::Toml, front_matter, body))
+}
+
+fn split_front_matter_with<'a>(
+    content: &'a str,
+    opening: &str,
+    delimiter: &str,
+) -> Option<(&'a str, &'a str)> {
+    let rest = content.strip_prefix(opening)?;
     let end = rest.find(delimiter)?;
     let front_matter = &rest[..end];
     let body = &rest[end + delimiter.len()..];
@@ -327,6 +355,17 @@ fn parse_body(body: &str) -> Result<(String, String)> {
         ));
     }
     Ok((subject, description))
+}
+
+fn serialize_yaml_front_matter<T: Serialize>(value: &T) -> Result<String> {
+    let mut yaml = serde_yaml::to_string(value)?;
+    if let Some(stripped) = yaml.strip_prefix("---\n") {
+        yaml = stripped.to_string();
+    }
+    if yaml.ends_with("...\n") {
+        yaml.truncate(yaml.len() - "...\n".len());
+    }
+    Ok(yaml)
 }
 
 fn markdown_path_from_task(dir: &Path, task: &Task) -> Option<PathBuf> {
@@ -421,6 +460,10 @@ mod tests {
             loaded.tasks[0].path.as_deref(),
             Some("tasks/daily-paper-progress.md")
         );
+        let raw = tokio::fs::read_to_string(dir.join("daily-paper-progress.md"))
+            .await
+            .unwrap();
+        assert!(raw.starts_with("---\n"));
 
         let _ = tokio::fs::remove_dir_all(dir).await;
     }

@@ -49,4 +49,13 @@ pub enum Error {
     /// TOML front matter serialization failed.
     #[error("timer store TOML encode error: {0}")]
     TomlEncode(#[from] toml::ser::Error),
+
+    /// JSON serialization or deserialization failed for inline
+    /// front matter values such as schedules.
+    #[error("timer store JSON error: {0}")]
+    Json(#[from] serde_json::Error),
+
+    /// YAML front matter serialization or deserialization failed.
+    #[error("timer store YAML error: {0}")]
+    Yaml(#[from] serde_yaml::Error),
 }

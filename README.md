@@ -86,8 +86,8 @@ Registered automatically and advertised to the model on every turn.
 | File       | Read regular UTF-8 files up to 5 MiB; write/edit inside the workspace; content search |
 | Shell      | Run commands with read-only allow-listing or workspace-write deny-listing; not an OS sandbox |
 | Web        | DuckDuckGo search and URL fetch with HTML→Markdown + SSRF guard |
-| Task       | In-session progress ledger (create / update / list / get) for multi-step plans |
-| Cron       | Manage scheduled prompts (create / list / delete); paired with the user-facing `/cron` command |
+| Task       | Markdown-backed progress ledger (create / update / list / get) for multi-step plans |
+| Timer      | Markdown-backed schedules bound to task ids (create / update / list / delete / fire now) |
 
 ## 📡 Channels
 
@@ -109,7 +109,8 @@ state lives in sidecar files; durable enable/budget knobs live in
 | ----------- | ------------------------------------- | ------------------------------------------------------- |
 | `skills`    | `~/.mandeven/skills/<name>/SKILL.md`  | Surfaced as `/<name>` slash commands + the `skill` tool |
 | `hooks`     | `~/.mandeven/hooks.json`              | Shell commands fired on lifecycle events                |
-| `cron`      | `~/.mandeven/cron/jobs.json`          | Cron-scheduled prompts that re-enter the agent loop     |
+| `timers`    | project bucket `timers/*.md`          | Scheduled tasks that re-enter the agent loop            |
+| `cron`      | `~/.mandeven/cron/jobs.json`          | Compatibility scheduler for existing `/cron` jobs       |
 | `heartbeat` | `[agent.heartbeat]` in `mandeven.toml`| Periodic self-check that can queue follow-up prompts    |
 | `memory`    | `[agent.memory]` in `mandeven.toml`   | Durable memories + frozen per-session prompt snapshot   |
 | `dream`     | `[agent.dream]` in `mandeven.toml`    | Cron-driven background review that distills session evidence into global memory |

@@ -5,9 +5,11 @@
 //! timer`; the scheduler/runner layer can later consume this state and
 //! invoke `task.run` without exposing cron as a separate primitive.
 
+pub mod engine;
 pub mod error;
 pub mod store;
 
+pub use engine::{TimerEngine, TimerTick};
 pub use error::{Error, Result};
 pub use store::{Store, StoreFile};
 

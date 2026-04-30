@@ -17,7 +17,7 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 
 use mandeven::agent::{
-    Agent, CronWiring, DiscordWiring, DreamWiring, HeartbeatWiring, WechatWiring,
+    Agent, CronWiring, DiscordWiring, DreamWiring, HeartbeatWiring, TimerWiring, WechatWiring,
 };
 use mandeven::bus::{Bus, ChannelID};
 use mandeven::channels::Manager;
@@ -127,6 +127,11 @@ async fn main() -> Result<(), DynError> {
         None
     };
 
+    let (engine, rx) = timer::TimerEngine::new(&project_bucket).await?;
+    let engine = Arc::new(engine);
+    engine.start().await;
+    let timer_wiring = Some(TimerWiring { engine, rx });
+
     let memory_manager = Arc::new(memory::Manager::new(&cfg.data_dir(), &project_bucket));
 
     let dream_wiring = if cfg.agent.dream.enabled && cfg.agent.memory.enabled {
@@ -156,6 +161,7 @@ async fn main() -> Result<(), DynError> {
         active_sessions.clone(),
         heartbeat_wiring,
         cron_wiring,
+        timer_wiring,
         dream_wiring,
         memory_manager,
         discord_wiring,

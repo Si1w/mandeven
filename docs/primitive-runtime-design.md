@@ -68,9 +68,8 @@ Target layout:
 ```
 
 Markdown filenames are for humans, so they should be title slugs. Stable
-machine identity lives in Markdown front matter as a UUID v7. The current
-implementation uses TOML front matter delimited by `+++` so state files are
-machine-validated without adding another parser dependency.
+machine identity lives in Markdown front matter as a UUID v7. New state files
+use the common `---` front matter delimiter with YAML front matter.
 
 References between runtime objects should use UUIDs, not filenames. This lets a
 user rename `daily-paper-progress.md` without breaking the timer that points to
@@ -91,14 +90,14 @@ contains one.
 Task Markdown is declarative state: it says what the agent may execute.
 
 ```markdown
-+++
-id = "0190b8e2-7a2c-7c40-a8d0-8a6a6f6f5c01"
-kind = "task"
-enabled = true
-status = "pending"
-created_at = "2026-04-30T12:00:00Z"
-updated_at = "2026-04-30T12:00:00Z"
-+++
+---
+id: "0190b8e2-7a2c-7c40-a8d0-8a6a6f6f5c01"
+kind: "task"
+enabled: true
+status: "pending"
+created_at: "2026-04-30T12:00:00Z"
+updated_at: "2026-04-30T12:00:00Z"
+---
 
 # Daily Paper Progress
 
@@ -108,19 +107,18 @@ Summarize recent paper progress and report blockers.
 Timer Markdown is declarative state: it says why and when a task should run.
 
 ```markdown
-+++
-id = "0190b8e3-1b4e-7a20-b991-2ad25fd7d301"
-kind = "timer"
-enabled = true
-task_id = "0190b8e2-7a2c-7c40-a8d0-8a6a6f6f5c01"
-next_fire_at = "2026-05-01T09:00:00Z"
-created_at = "2026-04-30T12:01:00Z"
-updated_at = "2026-04-30T12:01:00Z"
-
-[schedule]
-kind = "cron"
-expr = "0 9 * * *"
-+++
+---
+id: "0190b8e3-1b4e-7a20-b991-2ad25fd7d301"
+kind: "timer"
+enabled: true
+task_id: "0190b8e2-7a2c-7c40-a8d0-8a6a6f6f5c01"
+schedule:
+  kind: cron
+  expr: "0 9 * * *"
+next_fire_at: "2026-05-01T09:00:00Z"
+created_at: "2026-04-30T12:01:00Z"
+updated_at: "2026-04-30T12:01:00Z"
+---
 
 # Daily 9am Timer
 ```
@@ -397,6 +395,14 @@ Runner:
 - executes the task through the normal tool loop;
 - writes run JSONL;
 - returns output as the execution observation.
+
+Current implementation status:
+
+- task and timer state are Markdown-backed;
+- `TimerEngine` scans `timers/*.md`, advances due timers, and routes the
+  referenced task through the normal agent iteration loop;
+- explicit `task.run` and run JSONL are the next layer to split out of the
+  agent iteration path.
 
 Watchdog:
 

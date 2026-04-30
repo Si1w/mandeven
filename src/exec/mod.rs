@@ -31,6 +31,19 @@ pub struct Manager {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ExecId(pub Uuid);
 
+impl ExecId {
+    /// Parse an execution id from its UUID string form.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidExecId`] when `raw` is not a UUID.
+    pub fn parse(raw: &str) -> Result<Self> {
+        Uuid::parse_str(raw)
+            .map(Self)
+            .map_err(|_| Error::InvalidExecId(raw.to_string()))
+    }
+}
+
 impl std::fmt::Display for ExecId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         self.0.fmt(f)
@@ -192,6 +205,25 @@ pub enum ExecEvent {
     },
 }
 
+/// Compact listing entry for one execution JSONL stream.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExecSummary {
+    /// Execution id.
+    pub exec_id: String,
+    /// Project-bucket-relative JSONL path.
+    pub path: String,
+    /// Task being executed, when the log has a start event.
+    pub task_id: Option<String>,
+    /// Human-readable task subject, when known.
+    pub task_subject: Option<String>,
+    /// Terminal status, when the log has finished.
+    pub status: Option<ExecStatus>,
+    /// Start timestamp, when known.
+    pub started_at: Option<DateTime<Utc>>,
+    /// Finish timestamp, when known.
+    pub finished_at: Option<DateTime<Utc>>,
+}
+
 impl Manager {
     /// Construct a manager rooted at the given project bucket.
     #[must_use]
@@ -331,6 +363,47 @@ impl Manager {
             .collect()
     }
 
+    /// Load one execution log by UUID string.
+    ///
+    /// # Errors
+    ///
+    /// Returns invalid-id, I/O, or JSON deserialization errors.
+    pub async fn load_str(&self, raw_id: &str) -> Result<Vec<ExecEvent>> {
+        self.load(&ExecId::parse(raw_id)?).await
+    }
+
+    /// List execution logs as compact summaries.
+    ///
+    /// # Errors
+    ///
+    /// Returns I/O or JSON deserialization errors.
+    pub async fn list(&self) -> Result<Vec<ExecSummary>> {
+        let mut entries = match tokio::fs::read_dir(&self.dir).await {
+            Ok(entries) => entries,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(err) => return Err(Error::Io(err)),
+        };
+        let mut summaries = Vec::new();
+        while let Some(entry) = entries.next_entry().await? {
+            let path = entry.path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("jsonl") {
+                continue;
+            }
+            let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
+                continue;
+            };
+            let id = ExecId::parse(stem)?;
+            let events = self.load(&id).await?;
+            summaries.push(summary_from_events(&id, &events));
+        }
+        summaries.sort_by(|left, right| {
+            left.started_at
+                .cmp(&right.started_at)
+                .then_with(|| left.exec_id.cmp(&right.exec_id))
+        });
+        Ok(summaries)
+    }
+
     async fn append(&self, id: &ExecId, event: &ExecEvent) -> Result<()> {
         tokio::fs::create_dir_all(&self.dir).await?;
         let mut line = serde_json::to_string(event)?;
@@ -345,9 +418,51 @@ impl Manager {
         Ok(())
     }
 
-    fn path_for(&self, id: &ExecId) -> PathBuf {
+    /// Absolute path to an execution JSONL log.
+    #[must_use]
+    pub fn path_for(&self, id: &ExecId) -> PathBuf {
         self.dir.join(format!("{}.jsonl", id.0))
     }
+
+    /// Project-bucket-relative path to an execution JSONL log.
+    #[must_use]
+    pub fn relative_path_for(&self, id: &ExecId) -> String {
+        format!("{EXEC_SUBDIR}/{}.jsonl", id.0)
+    }
+}
+
+fn summary_from_events(id: &ExecId, events: &[ExecEvent]) -> ExecSummary {
+    let mut summary = ExecSummary {
+        exec_id: id.to_string(),
+        path: format!("{EXEC_SUBDIR}/{id}.jsonl"),
+        task_id: None,
+        task_subject: None,
+        status: None,
+        started_at: None,
+        finished_at: None,
+    };
+    for event in events {
+        match event {
+            ExecEvent::ExecutionStarted {
+                task_id,
+                task_subject,
+                at,
+                ..
+            } => {
+                summary.task_id = Some(task_id.clone());
+                summary.task_subject = Some(task_subject.clone());
+                summary.started_at = Some(*at);
+            }
+            ExecEvent::ExecutionFinished { status, at, .. } => {
+                summary.status = Some(*status);
+                summary.finished_at = Some(*at);
+            }
+            ExecEvent::FinalOutput { .. }
+            | ExecEvent::ToolCall { .. }
+            | ExecEvent::ToolResult { .. } => {}
+        }
+    }
+    summary
 }
 
 #[cfg(test)]
@@ -403,6 +518,14 @@ mod tests {
                 ..
             }
         ));
+        let loaded_by_str = manager.load_str(&exec_id.to_string()).await.unwrap();
+        assert_eq!(loaded_by_str.len(), events.len());
+        let summaries = manager.list().await.unwrap();
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].exec_id, exec_id.to_string());
+        assert_eq!(summaries[0].task_id.as_deref(), Some("task-1"));
+        assert_eq!(summaries[0].status, Some(ExecStatus::Succeeded));
+        assert_eq!(summaries[0].path, manager.relative_path_for(&exec_id));
 
         let _ = tokio::fs::remove_dir_all(dir).await;
     }

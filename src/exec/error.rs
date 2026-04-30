@@ -8,6 +8,10 @@ pub type Result<T> = std::result::Result<T, Error>;
 /// Execution history read/write failures.
 #[derive(Debug, Error)]
 pub enum Error {
+    /// Caller supplied an invalid execution id.
+    #[error("invalid exec id: {0}")]
+    InvalidExecId(String),
+
     /// Disk I/O failed reading or writing an execution log.
     #[error("execution history I/O failed: {0}")]
     Io(#[from] std::io::Error),

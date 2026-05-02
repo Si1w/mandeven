@@ -41,7 +41,7 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     tools::task::register(&mut registry, Arc::new(task::Manager::new(&project_bucket)));
     tools::timer::register(
         &mut registry,
-        Arc::new(timer::Manager::new(&project_bucket)),
+        Arc::new(timer::Manager::new(&cfg.data_dir(), &project_bucket)),
     );
     if !skills.is_empty() {
         registry.register(Arc::new(tools::skill::SkillTool::new(skills.clone())));

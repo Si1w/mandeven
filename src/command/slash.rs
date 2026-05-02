@@ -27,8 +27,6 @@ pub enum SlashCommand {
     Switch(SwitchCommand),
     /// `/compact [focus...]`
     Compact { focus: Option<String> },
-    /// `/memory ...`
-    Memory(MemoryCommand),
     /// `/discord ...`
     Discord(DiscordCommand),
     /// `/wechat ...`
@@ -49,21 +47,6 @@ pub enum SwitchCommand {
     ShowDefault,
     /// `/switch default <provider/profile>`
     SetDefault { profile_id: String },
-}
-
-/// Parsed `/memory` command.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum MemoryCommand {
-    /// `/memory` or `/memory list`
-    List,
-    /// `/memory search <query...>`
-    Search { query: String },
-    /// `/memory show <id>`
-    Show { id: String },
-    /// `/memory forget <id>`
-    Forget { id: String },
-    /// `/memory profile`
-    Profile,
 }
 
 /// Parsed `/discord` command.
@@ -149,7 +132,6 @@ enum RawCommand {
     },
     Switch(SwitchArgs),
     Compact(CompactArgs),
-    Memory(MemoryArgs),
     Discord(DiscordArgs),
     Wechat(WechatArgs),
     #[command(external_subcommand)]
@@ -180,37 +162,6 @@ enum SwitchSubcommand {
     },
     #[command(external_subcommand)]
     Runtime(Vec<String>),
-}
-
-#[derive(Debug, Args)]
-struct MemoryArgs {
-    #[command(subcommand)]
-    command: Option<MemorySubcommand>,
-}
-
-#[derive(Debug, Subcommand)]
-enum MemorySubcommand {
-    List,
-    Search(MemorySearchArgs),
-    Show {
-        #[arg(value_name = "id")]
-        id: String,
-    },
-    Forget {
-        #[arg(value_name = "id")]
-        id: String,
-    },
-    Profile,
-}
-
-#[derive(Debug, Args)]
-struct MemorySearchArgs {
-    #[arg(
-        value_name = "query",
-        trailing_var_arg = true,
-        allow_hyphen_values = true
-    )]
-    query: Vec<String>,
 }
 
 #[derive(Debug, Args)]
@@ -292,7 +243,6 @@ impl TryFrom<RawCommand> for SlashCommand {
             RawCommand::Compact(args) => Ok(Self::Compact {
                 focus: non_empty_join(&args.focus),
             }),
-            RawCommand::Memory(args) => args.try_into().map(Self::Memory),
             RawCommand::Discord(args) => Ok(Self::Discord(args.into())),
             RawCommand::Wechat(args) => Ok(Self::Wechat(args.into())),
             RawCommand::External(raw) => external_command(&raw),
@@ -320,22 +270,6 @@ impl TryFrom<SwitchArgs> for SwitchCommand {
                     Err("usage: /switch <provider/profile>".to_string())
                 }
             }
-        }
-    }
-}
-
-impl TryFrom<MemoryArgs> for MemoryCommand {
-    type Error = String;
-
-    fn try_from(value: MemoryArgs) -> Result<Self, Self::Error> {
-        match value.command {
-            None | Some(MemorySubcommand::List) => Ok(Self::List),
-            Some(MemorySubcommand::Search(args)) => non_empty_join(&args.query)
-                .map(|query| Self::Search { query })
-                .ok_or_else(|| "usage: /memory search <query>".to_string()),
-            Some(MemorySubcommand::Show { id }) => Ok(Self::Show { id }),
-            Some(MemorySubcommand::Forget { id }) => Ok(Self::Forget { id }),
-            Some(MemorySubcommand::Profile) => Ok(Self::Profile),
         }
     }
 }
@@ -470,31 +404,11 @@ mod tests {
         );
         assert_eq!(
             parse("memory").unwrap(),
-            SlashCommand::Memory(MemoryCommand::List)
+            SlashCommand::External {
+                name: "memory".to_string(),
+                args: Vec::new(),
+            }
         );
-        assert_eq!(
-            parse("memory search response style").unwrap(),
-            SlashCommand::Memory(MemoryCommand::Search {
-                query: "response style".to_string(),
-            })
-        );
-        assert_eq!(
-            parse("memory show mem-1").unwrap(),
-            SlashCommand::Memory(MemoryCommand::Show {
-                id: "mem-1".to_string(),
-            })
-        );
-        assert_eq!(
-            parse("memory forget mem-1").unwrap(),
-            SlashCommand::Memory(MemoryCommand::Forget {
-                id: "mem-1".to_string(),
-            })
-        );
-        assert_eq!(
-            parse("memory profile").unwrap(),
-            SlashCommand::Memory(MemoryCommand::Profile)
-        );
-        assert!(parse("memory search").is_err());
         assert_eq!(
             parse("discord").unwrap(),
             SlashCommand::Discord(DiscordCommand::Toggle)

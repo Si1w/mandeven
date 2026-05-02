@@ -11,7 +11,6 @@ use serde::{Deserialize, Serialize};
 
 use super::paths;
 use crate::agent::compact::CompactConfig;
-use crate::dream::DreamConfig;
 use crate::hook::HookConfig;
 use crate::memory::MemoryConfig;
 use crate::security::SandboxConfig;
@@ -197,16 +196,10 @@ pub struct AgentConfig {
     #[serde(default)]
     pub hook: HookConfig,
 
-    /// Per-agent memory configuration. Records remain in JSON stores under
-    /// `~/.mandeven/`; this block controls the memory subsystem and the frozen
-    /// session snapshot budget.
+    /// Per-agent memory configuration. Memory lives in the single editable
+    /// `~/.mandeven/MEMORY.md` file and is injected as transient user context.
     #[serde(default)]
     pub memory: MemoryConfig,
-
-    /// Per-agent Dream configuration. Dream is a quiet background review pass
-    /// that distills append-only session evidence into memory.
-    #[serde(default)]
-    pub dream: DreamConfig,
 }
 
 impl AppConfig {
@@ -214,9 +207,9 @@ impl AppConfig {
     ///
     /// Always resolves through [`paths::home_dir`] (i.e.
     /// `$MANDEVEN_HOME` if set, else `~/.mandeven/`). All
-    /// agent-managed state — `AGENTS.md`, global timer state,
+    /// agent-managed state — `AGENTS.md`, `MEMORY.md`, global timer state,
     /// editable skills, and per-project `projects/<bucket>/`
-    /// session/task/memory/timer directories — lives under this root.
+    /// session/task/timer directories — lives under this root.
     ///
     /// Independent of `source_path`: the config file location is for
     /// diagnostics only. This guarantees `data_dir()` is consistent

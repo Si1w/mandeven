@@ -11,15 +11,14 @@
 //! ~/.mandeven/                            ← override with $MANDEVEN_HOME
 //!   mandeven.toml                         ← global config
 //!   AGENTS.md                             ← global agent instructions
-//!   timers.json                           ← global skill timers
+//!   MEMORY.md                             ← global durable user memory
+//!   timers.json                           ← global task and skill timers
 //!   skills/                               ← editable skill definitions
-//!   projects/                             ← per-project session/task/memory/timer bucket
+//!   projects/                             ← per-project session/task bucket
 //!     cron/                               ← background timer/task sessions
 //!     -Users-foo-projectA/
 //!       <session-uuid>.jsonl
 //!       tasks/
-//!       timers/
-//!       memory/
 //! ```
 //!
 //! Project-local overrides (e.g. a `<project>/.agents/AGENTS.md`
@@ -42,7 +41,7 @@ pub const HOME_ENV_VAR: &str = "MANDEVEN_HOME";
 /// Filename of the canonical config file inside [`HOME_SUBDIR`].
 pub const CONFIG_FILENAME: &str = "mandeven.toml";
 
-/// Subdirectory of [`HOME_SUBDIR`] holding per-project session/task/memory buckets.
+/// Subdirectory of [`HOME_SUBDIR`] holding per-project session/task buckets.
 pub const PROJECTS_SUBDIR: &str = "projects";
 
 /// Fixed project bucket name for background timer/task sessions.

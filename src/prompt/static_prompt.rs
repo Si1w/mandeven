@@ -157,6 +157,6 @@ mod tests {
     fn static_prompts_include_execution_and_memory_discipline() {
         assert!(content(DOING_TASKS_NAME).contains("same turn"));
         assert!(content(SYSTEM_RULES_NAME).contains("background context"));
-        assert!(content(USING_TOOLS_NAME).contains("Dream background reviewer"));
+        assert!(content(USING_TOOLS_NAME).contains("memorize"));
     }
 }

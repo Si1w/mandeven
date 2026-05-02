@@ -35,8 +35,8 @@ pub struct SkillFrontmatter {
     /// Whether the user can invoke this skill as `/<name>`.
     #[serde(default = "default_user_invocable", rename = "user-invocable")]
     pub user_invocable: bool,
-    /// Optional global cron expression. When present, the global
-    /// timer store materializes a `skill:<name>` timer for this skill.
+    /// Optional global cron expression. When present, the timer store
+    /// materializes a UUID-backed skill timer for this skill.
     #[serde(default)]
     pub timers: Option<String>,
     /// When true, timer-triggered invocations run in a background

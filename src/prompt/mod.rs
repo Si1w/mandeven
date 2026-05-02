@@ -28,6 +28,9 @@
 //! sections. All rendered sections go through [`section::SectionCache`]
 //! so the bytes sent to the model stay stable until an explicit cache
 //! clear.
+//! Highly mutable context such as `MEMORY.md` is intentionally not part
+//! of this system message; the agent injects it as transient user
+//! context during request assembly.
 //!
 //! ## Project-local overlay (deferred)
 //!

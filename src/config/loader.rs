@@ -144,8 +144,7 @@ impl AppConfig {
     /// 2. `llm.default` parses as `"provider/model"` with exactly one `/`
     ///    and non-empty sides.
     /// 3. The referenced provider and model both exist in `providers`.
-    /// 4. `agent.memory.snapshot_limit` is greater than zero.
-    /// 5. `agent.dream.schedule` parses and Dream budgets/limits are non-zero.
+    /// 4. `agent.memory.max_bytes` and `agent.memory.max_lines` are greater than zero.
     fn validate(&self) -> Result<()> {
         if self.llm.providers.is_empty() {
             return Err(ConfigError::Invalid {
@@ -172,70 +171,15 @@ impl AppConfig {
             });
         }
 
-        if self.agent.memory.snapshot_limit == 0 {
+        if self.agent.memory.max_bytes == 0 {
             return Err(ConfigError::Invalid {
-                field: "agent.memory.snapshot_limit",
+                field: "agent.memory.max_bytes",
                 reason: "must be greater than zero".into(),
             });
         }
-
-        crate::timer::Schedule::cron(&self.agent.dream.schedule).map_err(|err| {
-            ConfigError::Invalid {
-                field: "agent.dream.schedule",
-                reason: err.to_string(),
-            }
-        })?;
-        if self.agent.dream.min_interval_secs == 0 {
+        if self.agent.memory.max_lines == 0 {
             return Err(ConfigError::Invalid {
-                field: "agent.dream.min_interval_secs",
-                reason: "must be greater than zero".into(),
-            });
-        }
-        if self.agent.dream.lock_stale_secs == 0 {
-            return Err(ConfigError::Invalid {
-                field: "agent.dream.lock_stale_secs",
-                reason: "must be greater than zero".into(),
-            });
-        }
-        if self.agent.dream.min_sessions_per_run < 5 {
-            return Err(ConfigError::Invalid {
-                field: "agent.dream.min_sessions_per_run",
-                reason: "must be at least 5".into(),
-            });
-        }
-        if self.agent.dream.max_events_per_run == 0 {
-            return Err(ConfigError::Invalid {
-                field: "agent.dream.max_events_per_run",
-                reason: "must be greater than zero".into(),
-            });
-        }
-        if self.agent.dream.max_prompt_chars == 0 {
-            return Err(ConfigError::Invalid {
-                field: "agent.dream.max_prompt_chars",
-                reason: "must be greater than zero".into(),
-            });
-        }
-        if self.agent.dream.max_output_tokens == 0 {
-            return Err(ConfigError::Invalid {
-                field: "agent.dream.max_output_tokens",
-                reason: "must be greater than zero".into(),
-            });
-        }
-        if self.agent.dream.max_event_chars == 0 {
-            return Err(ConfigError::Invalid {
-                field: "agent.dream.max_event_chars",
-                reason: "must be greater than zero".into(),
-            });
-        }
-        if self.agent.dream.max_existing_memories == 0 {
-            return Err(ConfigError::Invalid {
-                field: "agent.dream.max_existing_memories",
-                reason: "must be greater than zero".into(),
-            });
-        }
-        if self.agent.dream.max_candidates == 0 {
-            return Err(ConfigError::Invalid {
-                field: "agent.dream.max_candidates",
+                field: "agent.memory.max_lines",
                 reason: "must be greater than zero".into(),
             });
         }
@@ -334,14 +278,8 @@ mod tests {
         assert_eq!(prof.temperature, None);
         assert!(!parsed.tui.show_thinking);
         assert!(parsed.agent.memory.enabled);
-        assert!(parsed.agent.memory.session_snapshot);
-        assert!(parsed.agent.memory.profile_enabled);
-        assert_eq!(parsed.agent.memory.snapshot_limit, 8);
-        assert_eq!(parsed.agent.dream.lock_stale_secs, 21_600);
-        assert_eq!(parsed.agent.dream.min_sessions_per_run, 5);
-        assert_eq!(parsed.agent.dream.max_event_chars, 2_000);
-        assert_eq!(parsed.agent.dream.max_existing_memories, 24);
-        assert_eq!(parsed.agent.dream.max_candidates, 8);
+        assert_eq!(parsed.agent.memory.max_bytes, 25_000);
+        assert_eq!(parsed.agent.memory.max_lines, 200);
     }
 
     #[test]
@@ -361,46 +299,28 @@ mod tests {
     }
 
     #[test]
-    fn from_file_rejects_zero_memory_snapshot_limit() {
+    fn from_file_rejects_zero_memory_limits() {
         let path = std::env::temp_dir().join(format!("mandeven-config-{}.toml", Uuid::now_v7()));
-        let text = r#"
-            [llm]
-            default = "acme/my-profile"
+        for field in ["max_bytes", "max_lines"] {
+            let text = format!(
+                r#"
+                    [llm]
+                    default = "acme/my-profile"
 
-            [llm.acme.my-profile]
-            model_name = "upstream-model"
-            max_context_window = 128000
+                    [llm.acme.my-profile]
+                    model_name = "upstream-model"
+                    max_context_window = 128000
 
-            [agent.memory]
-            snapshot_limit = 0
-        "#;
-        std::fs::write(&path, text).unwrap();
+                    [agent.memory]
+                    {field} = 0
+                "#
+            );
+            std::fs::write(&path, text).unwrap();
 
-        let err = AppConfig::from_file(&path).unwrap_err().to_string();
+            let err = AppConfig::from_file(&path).unwrap_err().to_string();
 
-        assert!(err.contains("agent.memory.snapshot_limit"));
-        let _ = std::fs::remove_file(path);
-    }
-
-    #[test]
-    fn from_file_rejects_invalid_dream_schedule() {
-        let path = std::env::temp_dir().join(format!("mandeven-config-{}.toml", Uuid::now_v7()));
-        let text = r#"
-            [llm]
-            default = "acme/my-profile"
-
-            [llm.acme.my-profile]
-            model_name = "upstream-model"
-            max_context_window = 128000
-
-            [agent.dream]
-            schedule = "not a cron"
-        "#;
-        std::fs::write(&path, text).unwrap();
-
-        let err = AppConfig::from_file(&path).unwrap_err().to_string();
-
-        assert!(err.contains("agent.dream.schedule"));
+            assert!(err.contains(&format!("agent.memory.{field}")));
+        }
         let _ = std::fs::remove_file(path);
     }
 
@@ -415,21 +335,18 @@ mod tests {
             model_name = "upstream-model"
             max_context_window = 128000
 
-            [agent.dream]
-            schedule = "0 4 * * *"
+            [agent.memory]
+            max_lines = 40
         "#;
         std::fs::write(&path, text).unwrap();
 
         let cfg = AppConfig::from_file(&path).unwrap();
         let updated = std::fs::read_to_string(&path).unwrap();
 
-        assert_eq!(cfg.agent.dream.schedule, "0 4 * * *");
-        assert_eq!(cfg.agent.dream.lock_stale_secs, 21_600);
-        assert!(updated.contains("schedule = \"0 4 * * *\""));
-        assert!(updated.contains("lock_stale_secs = 21600"));
-        assert!(updated.contains("min_sessions_per_run = 5"));
-        assert!(updated.contains("max_candidates = 8"));
-        assert!(updated.contains("snapshot_limit = 8"));
+        assert_eq!(cfg.agent.memory.max_lines, 40);
+        assert_eq!(cfg.agent.memory.max_bytes, 25_000);
+        assert!(updated.contains("max_lines = 40"));
+        assert!(updated.contains("max_bytes = 25000"));
         let _ = std::fs::remove_file(path);
     }
 
@@ -445,76 +362,17 @@ mod tests {
             max_context_window = 128000
 
             [agent.memory]
-            snapshot_limit = 3
-
-            [agent.dream]
-            schedule = "0 4 * * *"
-            lock_stale_secs = 99
+            max_bytes = 3000
         "#;
         std::fs::write(&path, text).unwrap();
 
         let cfg = AppConfig::from_file(&path).unwrap();
         let updated = std::fs::read_to_string(&path).unwrap();
 
-        assert_eq!(cfg.agent.memory.snapshot_limit, 3);
-        assert_eq!(cfg.agent.dream.lock_stale_secs, 99);
-        assert!(updated.contains("snapshot_limit = 3"));
-        assert!(updated.contains("lock_stale_secs = 99"));
-        assert!(updated.contains("max_event_chars = 2000"));
-        let _ = std::fs::remove_file(path);
-    }
-
-    #[test]
-    fn from_file_rejects_zero_dream_limits() {
-        for field in [
-            "lock_stale_secs",
-            "max_event_chars",
-            "max_existing_memories",
-            "max_candidates",
-        ] {
-            let path =
-                std::env::temp_dir().join(format!("mandeven-config-{}.toml", Uuid::now_v7()));
-            let text = format!(
-                r#"
-                    [llm]
-                    default = "acme/my-profile"
-
-                    [llm.acme.my-profile]
-                    model_name = "upstream-model"
-                    max_context_window = 128000
-
-                    [agent.dream]
-                    {field} = 0
-                "#
-            );
-            std::fs::write(&path, text).unwrap();
-
-            let err = AppConfig::from_file(&path).unwrap_err().to_string();
-
-            assert!(err.contains(&format!("agent.dream.{field}")));
-            let _ = std::fs::remove_file(path);
-        }
-    }
-
-    #[test]
-    fn from_file_rejects_dream_min_sessions_below_five() {
-        let path = std::env::temp_dir().join(format!("mandeven-config-{}.toml", Uuid::now_v7()));
-        let text = r#"
-            [llm]
-            default = "acme/my-profile"
-
-            [llm.acme.my-profile]
-            model_name = "upstream-model"
-            max_context_window = 128000
-
-            [agent.dream]
-            min_sessions_per_run = 4
-        "#;
-        std::fs::write(&path, text).unwrap();
-
-        let err = AppConfig::from_file(&path).unwrap_err().to_string();
-
-        assert!(err.contains("agent.dream.min_sessions_per_run"));
+        assert_eq!(cfg.agent.memory.max_bytes, 3000);
+        assert_eq!(cfg.agent.memory.max_lines, 200);
+        assert!(updated.contains("max_bytes = 3000"));
+        assert!(updated.contains("max_lines = 200"));
         let _ = std::fs::remove_file(path);
     }
 }

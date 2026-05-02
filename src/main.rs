@@ -16,14 +16,13 @@ use std::sync::Arc;
 
 use tokio::sync::Mutex;
 
-use mandeven::agent::{Agent, DiscordWiring, DreamWiring, TimerWiring, WechatWiring};
+use mandeven::agent::{Agent, DiscordWiring, TimerWiring, WechatWiring};
 use mandeven::bus::{Bus, ChannelID};
 use mandeven::channels::Manager;
 use mandeven::channels::discord::{self, DiscordChannel};
 use mandeven::channels::wechat::{self, WechatChannel};
 use mandeven::cli::CliChannel;
 use mandeven::config::{self, AppConfig};
-use mandeven::dream::DreamEngine;
 use mandeven::exec;
 use mandeven::gateway::{Gateway, dispatch_channel};
 use mandeven::hook::HookEngine;
@@ -116,20 +115,17 @@ async fn main() -> Result<(), DynError> {
     engine.start().await;
     let timer_wiring = Some(TimerWiring { engine, rx });
 
-    let memory_manager = Arc::new(memory::Manager::new(&cfg.data_dir(), &project_bucket));
+    let memory_manager = Arc::new(memory::Manager::new(&cfg.data_dir()));
+    memory_manager.ensure_exists(&cfg.agent.memory).await?;
     let task_manager = Arc::new(task::Manager::new(&project_bucket));
     let exec_manager = Arc::new(exec::Manager::new(&project_bucket));
 
-    let dream_wiring = if cfg.agent.dream.enabled && cfg.agent.memory.enabled {
-        let (engine, rx) = DreamEngine::new(&cfg.agent.dream, &project_bucket)?;
-        let engine = Arc::new(engine);
-        engine.start().await;
-        Some(DreamWiring { engine, rx })
-    } else {
-        None
-    };
-
-    let tool_registry = build_tool_registry(&project_bucket, &skill_index, task_manager.clone());
+    let tool_registry = build_tool_registry(
+        &cfg.data_dir(),
+        &project_bucket,
+        &skill_index,
+        task_manager.clone(),
+    );
 
     let (discord_channel, discord_wiring) = build_discord(&cfg).await?;
     let discord_active_rx = discord_wiring
@@ -147,7 +143,6 @@ async fn main() -> Result<(), DynError> {
         outbound_tx.clone(),
         active_sessions.clone(),
         timer_wiring,
-        dream_wiring,
         memory_manager,
         task_manager,
         skill_index.clone(),
@@ -193,6 +188,7 @@ async fn main() -> Result<(), DynError> {
 }
 
 fn build_tool_registry(
+    data_dir: &Path,
     project_bucket: &Path,
     skill_index: &Arc<SkillIndex>,
     task_manager: Arc<task::Manager>,
@@ -200,7 +196,10 @@ fn build_tool_registry(
     let mut registry = tools::Registry::new();
     tools::register_builtins(&mut registry);
     tools::task::register(&mut registry, task_manager);
-    tools::timer::register(&mut registry, Arc::new(timer::Manager::new(project_bucket)));
+    tools::timer::register(
+        &mut registry,
+        Arc::new(timer::Manager::new(data_dir, project_bucket)),
+    );
     if !skill_index.is_empty() {
         registry.register(Arc::new(tools::skill::SkillTool::new(skill_index.clone())));
     }

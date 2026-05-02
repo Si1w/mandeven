@@ -2,7 +2,7 @@
 
 use thiserror::Error;
 
-use crate::{bus, llm, session};
+use crate::{bus, llm, memory, session};
 
 /// Errors that can occur while the agent is running.
 #[derive(Debug, Error)]
@@ -18,6 +18,10 @@ pub enum Error {
     /// Propagated from publishing on the bus.
     #[error("bus error: {0}")]
     Bus(#[from] bus::Error),
+
+    /// Propagated from loading or validating `MEMORY.md`.
+    #[error("memory error: {0}")]
+    Memory(#[from] memory::Error),
 
     /// The provider named in config is not registered in
     /// [`crate::llm::providers`].

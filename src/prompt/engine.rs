@@ -8,6 +8,10 @@
 //!   [`PromptEngine::iteration_system`] is byte-identical from one call to
 //!   the next, keeping `DeepSeek`'s prefix cache hot.
 //!
+//! Fast-changing context such as `MEMORY.md` is deliberately excluded
+//! from this system prompt. The agent injects it as a synthetic user
+//! message during request assembly.
+//!
 //! Specialized prompts (`title`, `compact_summary`) are exposed as
 //! thin delegates to the [`super::specialized`] free functions — the
 //! engine method is the one stable address the agent imports against,
@@ -112,7 +116,7 @@ impl PromptEngine {
     /// load-bearing invariant for `DeepSeek`'s automatic prefix
     /// cache. [`Self::clear_cache`] is the one explicit invalidation
     /// path, called from `/compact` after the conversation prefix
-    /// has been rewritten.
+    /// has been rewritten or from `/switch` when model metadata changes.
     ///
     /// # Panics
     ///

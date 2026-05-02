@@ -32,6 +32,7 @@ use uuid::Uuid;
 use super::error::{Error, Result};
 use super::{BaseTool, MAX_TOOL_RESULT_BYTES, ToolOutcome};
 use crate::llm::Tool;
+use crate::memory;
 use crate::security::{SandboxPolicy, ensure_writable_now};
 use crate::utils::workspace;
 
@@ -310,6 +311,9 @@ impl BaseTool for FileEdit {
     async fn call(&self, args: Value) -> Result<ToolOutcome> {
         let p: EditParams = parse_params("file_edit", args)?;
         ensure_writable_now("file_edit", SandboxPolicy::current())?;
+        if let Some(path) = managed_memory_target(&p.path) {
+            return edit_managed_memory(p, &path).await;
+        }
         let path = workspace::resolve_for_write(&p.path)
             .await
             .map_err(|e| exec("file_edit", e.to_string()))?;
@@ -404,6 +408,139 @@ impl BaseTool for FileEdit {
         })
         .into())
     }
+}
+
+fn managed_memory_target(raw: &str) -> Option<std::path::PathBuf> {
+    if raw.trim().is_empty() {
+        return None;
+    }
+    let input = Path::new(raw);
+    let candidate = if input.is_absolute() {
+        input.to_path_buf()
+    } else {
+        workspace::root().join(input)
+    };
+    let normalized = workspace::lexical_normalize(&candidate);
+    memory::is_managed_memory_path(&normalized).then_some(normalized)
+}
+
+async fn edit_managed_memory(p: EditParams, path: &Path) -> Result<ToolOutcome> {
+    if p.old_string.is_empty()
+        && !tokio::fs::try_exists(path)
+            .await
+            .map_err(|e| exec("file_edit", format!("{}: {e}", path.display())))?
+    {
+        write_managed_memory_atomic(path, &p.new_string).await?;
+        return Ok(json!({
+            "ok": true,
+            "observation_type": "state",
+            "object": "file",
+            "operation": "create",
+            "path": &p.path,
+            "validated": true,
+            "diagnostics": [],
+            "bytes": p.new_string.len(),
+            "message": "Memory file created",
+        })
+        .into());
+    }
+
+    let raw = tokio::fs::read(path)
+        .await
+        .map_err(|e| exec("file_edit", format!("{}: {e}", p.path)))?;
+    let source = String::from_utf8(raw)
+        .map_err(|_| exec("file_edit", format!("{} is not valid UTF-8", p.path)))?;
+    let uses_crlf = source.contains("\r\n");
+    let content = source.replace("\r\n", "\n");
+    let old = p.old_string.replace("\r\n", "\n");
+    let new = p.new_string.replace("\r\n", "\n");
+
+    let mut matches = find_exact(&content, &old);
+    if matches.is_empty() {
+        matches = find_trim(&content, &old);
+    }
+    if matches.is_empty() {
+        return Err(exec(
+            "file_edit",
+            format!("old_string not found in {}", p.path),
+        ));
+    }
+    if matches.len() > 1 && !p.replace_all {
+        let lines: Vec<String> = matches
+            .iter()
+            .take(3)
+            .map(|m| format!("line {}", m.line))
+            .collect();
+        let suffix = if matches.len() > 3 { ", ..." } else { "" };
+        return Err(exec(
+            "file_edit",
+            format!(
+                "old_string matches {} times at {}{}. Add more context or set replace_all=true.",
+                matches.len(),
+                lines.join(", "),
+                suffix
+            ),
+        ));
+    }
+
+    let selected = if p.replace_all {
+        matches.as_slice()
+    } else {
+        &matches[..1]
+    };
+    let mut result = content.clone();
+    for m in selected.iter().rev() {
+        result.replace_range(m.start..m.end, &new);
+    }
+    let final_content = if uses_crlf {
+        result.replace('\n', "\r\n")
+    } else {
+        result
+    };
+    write_managed_memory_atomic(path, &final_content).await?;
+    Ok(json!({
+        "ok": true,
+        "observation_type": "state",
+        "object": "file",
+        "operation": "edit",
+        "path": &p.path,
+        "validated": true,
+        "diagnostics": [],
+        "replacements": selected.len(),
+        "message": format!("Replaced {} occurrence(s)", selected.len()),
+    })
+    .into())
+}
+
+async fn write_managed_memory_atomic(path: &Path, content: &str) -> Result<()> {
+    memory::validate_memory_markdown(content).map_err(|err| exec("file_edit", err.to_string()))?;
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .ok_or_else(|| {
+            exec(
+                "file_edit",
+                format!("{} has no parent directory", path.display()),
+            )
+        })?;
+    tokio::fs::create_dir_all(parent).await.map_err(|e| {
+        exec(
+            "file_edit",
+            format!("create parents of {}: {e}", path.display()),
+        )
+    })?;
+    let tmp = parent.join(format!(".MEMORY.md.{}.tmp", Uuid::now_v7()));
+    tokio::fs::write(&tmp, content)
+        .await
+        .map_err(|e| exec("file_edit", format!("write {}: {e}", tmp.display())))?;
+    if let Err(err) = tokio::fs::rename(&tmp, path).await {
+        let _ = tokio::fs::remove_file(&tmp).await;
+        return Err(exec(
+            "file_edit",
+            format!("rename {} to {}: {err}", tmp.display(), path.display()),
+        ));
+    }
+    Ok(())
 }
 
 /// Exact substring search. Matches are non-overlapping.
@@ -649,6 +786,44 @@ mod tests {
             .to_string();
 
         assert!(err.contains("sensitive path"));
+        let _ = tokio::fs::remove_dir_all(dir).await;
+    }
+
+    #[tokio::test]
+    async fn managed_memory_edit_writes_and_validates_memory_file() {
+        let dir = workspace_tmp_path("memory-edit");
+        let path = dir.join("MEMORY.md");
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        tokio::fs::write(&path, "# Memory\n").await.unwrap();
+
+        edit_managed_memory(
+            EditParams {
+                path: path.display().to_string(),
+                old_string: "# Memory".to_string(),
+                new_string: "# Memory\n\n- Prefers focused tests.".to_string(),
+                replace_all: false,
+            },
+            &path,
+        )
+        .await
+        .unwrap();
+
+        let content = tokio::fs::read_to_string(&path).await.unwrap();
+        assert!(content.contains("Prefers focused tests"));
+
+        let err = edit_managed_memory(
+            EditParams {
+                path: path.display().to_string(),
+                old_string: "Prefers focused tests".to_string(),
+                new_string: "api_key = abc".to_string(),
+                replace_all: false,
+            },
+            &path,
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("secret-like"));
         let _ = tokio::fs::remove_dir_all(dir).await;
     }
 

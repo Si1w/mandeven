@@ -54,23 +54,8 @@ max_context_window = 1000000
 
 [agent.memory]
 enabled = true
-session_snapshot = true
-profile_enabled = true
-snapshot_limit = 8
-
-[agent.dream]
-enabled = true
-schedule = "0 3 * * *"
-run_on_startup = true
-min_interval_secs = 72000
-lock_stale_secs = 21600
-min_sessions_per_run = 5
-max_events_per_run = 80
-max_prompt_chars = 24000
-max_output_tokens = 2048
-max_event_chars = 2000
-max_existing_memories = 24
-max_candidates = 8
+max_bytes = 25000
+max_lines = 200
 ```
 
 **3. Chat**
@@ -87,7 +72,7 @@ Registered automatically and advertised to the model on every turn.
 | Shell      | Run commands with read-only allow-listing or workspace-write deny-listing; not an OS sandbox |
 | Web        | DuckDuckGo search and URL fetch with HTML→Markdown + SSRF guard |
 | Task       | Markdown-backed work items (create / update / list / get / run) for multi-step plans and scheduled work |
-| Timer      | Markdown-backed `at` / `every` / `cron` schedules bound to task ids (create / update / list / delete / fire now) |
+| Timer      | JSON-backed `at` / `every` / `cron` schedules bound to task ids (create / update / list / delete / fire now) |
 
 ## 📡 Channels
 
@@ -99,34 +84,20 @@ The agent talks to the user through a pluggable channel layer.
 | `discord` | DM-only adapter, opt-in via `[channels.discord]`|
 | `wechat`  | text-only personal WeChat iLink adapter with QR login, opt-in via `[channels.wechat]` |
 
-## 🧩 Extra features
+## 🧩 Runtime state
 
-Optional subsystems are wired through global `~/.mandeven/` state and
-project-local runtime state. Runtime-mutable state lives in sidecar files;
-durable enable/budget knobs live in `mandeven.toml`.
+These are backing stores for the tool instruction set and optional
+subsystems, not separate tool categories. Runtime-mutable state lives in
+sidecar files; durable enable/budget knobs live in `mandeven.toml`.
 
-| Feature     | Source                                | Effect                                                  |
+| State       | Source                                | Effect                                                  |
 | ----------- | ------------------------------------- | ------------------------------------------------------- |
 | `skills`    | built-in + `~/.mandeven/skills/<name>/SKILL.md` | Surfaced as `/<name>` slash commands + the `skill` tool |
 | `hooks`     | `~/.mandeven/hooks.json`              | Shell commands fired on lifecycle events                |
 | `tasks`     | project bucket `tasks/*.md`           | User-visible task state and explicit task executions    |
-| `timers`    | project bucket `timers/*.md` + `~/.mandeven/timers.json` | Scheduled tasks and skill timers |
+| `timers`    | `~/.mandeven/timers.json`             | Schedule triggers for tasks and skills                  |
 | `exec`      | project bucket `execution/*.jsonl`    | Machine-readable history for task executions            |
-| `memory`    | `memory/*.md` + `[agent.memory]`      | Durable memories + frozen per-session prompt snapshot   |
-| `dream`     | `[agent.dream]` in `mandeven.toml`    | Background review that distills session evidence into global memory |
-
-## Architecture notes
-
-Validated primitive tools are the small model-facing instruction set. Shell
-and skills remain escape hatches: shell executes command text, while skills
-inject workflow text for the agent to follow.
-
-Higher-level runtime features compile down to primitive state and execution:
-cron-style scheduled work is represented as a task plus a timer with a
-`cron` schedule, while recurring routines such as heartbeat are editable
-skills with timer declarations. New scheduled work should use `task + timer`
-or a timer-backed skill.
-User-visible state is Markdown; execution history is JSONL.
+| `memory`    | `~/.mandeven/MEMORY.md` + `[agent.memory]` | Durable user memory injected as transient user context |
 
 ## 📜 License
 

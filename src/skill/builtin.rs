@@ -24,6 +24,10 @@ const BUILTINS: &[BuiltinSkill] = &[
         name: "heartbeat",
         content: include_str!("builtin/heartbeat/SKILL.md"),
     },
+    BuiltinSkill {
+        name: "memorize",
+        content: include_str!("builtin/memorize/SKILL.md"),
+    },
 ];
 
 /// Seed built-in skills into `<data_dir>/skills/` when missing.

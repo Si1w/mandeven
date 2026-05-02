@@ -39,7 +39,6 @@ use crate::bus::{
 use crate::command::CommandOutcome;
 use crate::command::slash::{self, SlashCommand, SwitchCommand};
 use crate::config::{AgentConfig, AppConfig, LLMConfig, LLMProfile};
-use crate::dream;
 use crate::exec;
 use crate::gateway::{ActiveSessions, DispatchReceiver, InboundDispatch};
 use crate::hook::{HookEngine, HookEvent};
@@ -56,8 +55,7 @@ use crate::timer;
 use crate::tools;
 
 use self::command::{
-    AgentCommandCtx, format_compact_report, run_discord_command, run_memory_command,
-    run_wechat_command,
+    AgentCommandCtx, format_compact_report, run_discord_command, run_wechat_command,
 };
 
 /// Upper bound on completion tokens for title generation.
@@ -98,25 +96,21 @@ pub struct Agent {
     /// [`crate::config::LLMConfig::timeout_secs`] so every iteration
     /// builds its [`Request`] without re-reading the config.
     timeout_secs: Option<u64>,
-    /// Timer scheduler handle, present iff the Markdown timer engine
-    /// was wired in.
+    /// Timer scheduler handle, present iff the timer engine was wired
+    /// in.
     timer: Option<Arc<timer::TimerEngine>>,
     /// Receiver paired with the timer engine. Timer ticks are the
     /// runtime form of `task + timer` state.
     timer_rx: Option<mpsc::Receiver<timer::TimerTick>>,
-    /// Dream scheduler handle, present iff the engine was wired in.
-    dream: Option<Arc<dream::DreamEngine>>,
-    /// Receiver paired with the Dream engine. Dream ticks are quiet
-    /// background review passes and never enter the user transcript.
-    dream_rx: Option<mpsc::Receiver<dream::DreamTick>>,
-    /// Durable memory/profile manager. Dream writes inferred memories;
-    /// `/memory` is the user-facing governance surface.
+    /// Durable `MEMORY.md` manager. The file is injected as transient
+    /// user context on each model request and edited through the
+    /// `memorize` skill plus normal file tools.
     memory: Arc<memory::Manager>,
     /// Project-local task manager used by explicit `task_run`
     /// execution.
     tasks: Arc<task::Manager>,
-    /// Skill index used by global skill timers to expand `skill:<name>`
-    /// ticks into the same body the `/name` slash fallback would send.
+    /// Skill index used by global skill timers to expand timer ticks
+    /// into the same body the `/name` slash fallback would send.
     skills: Arc<SkillIndex>,
     /// Machine-readable execution history writer. Timer-triggered
     /// tasks append JSONL events here.
@@ -218,21 +212,12 @@ fn parse_profile_id(raw: &str) -> Result<(&str, &str)> {
     Ok((provider, model))
 }
 
-/// Options for the Markdown timer scheduler.
+/// Options for the timer scheduler.
 pub struct TimerWiring {
     /// Scheduler handle.
     pub engine: Arc<timer::TimerEngine>,
     /// Tick stream from the scheduler.
     pub rx: mpsc::Receiver<timer::TimerTick>,
-}
-
-/// Options for optional Dream wiring. Dream ticks are handled
-/// quietly and never route to a user channel.
-pub struct DreamWiring {
-    /// Scheduler/store handle.
-    pub engine: Arc<dream::DreamEngine>,
-    /// Tick stream from the scheduler.
-    pub rx: mpsc::Receiver<dream::DreamTick>,
 }
 
 /// Options for the optional Discord wiring. Carries only the runtime
@@ -258,8 +243,6 @@ enum Event {
     Dispatch(Option<InboundDispatch>),
     /// Timer tick fired. `None` means the engine dropped its sender.
     TimerTick(Option<timer::TimerTick>),
-    /// Dream tick fired. `None` means the engine dropped its sender.
-    DreamTick(Option<dream::DreamTick>),
 }
 
 async fn recv_enabled<T>(rx: &mut Option<mpsc::Receiver<T>>) -> Option<T> {
@@ -298,7 +281,6 @@ impl Agent {
         out: OutboundSender,
         active_sessions: ActiveSessions,
         timer: Option<TimerWiring>,
-        dream: Option<DreamWiring>,
         memory: Arc<memory::Manager>,
         tasks: Arc<task::Manager>,
         skills: Arc<SkillIndex>,
@@ -314,10 +296,6 @@ impl Agent {
 
         let (timer_handle, timer_rx) = match timer {
             Some(TimerWiring { engine, rx }) => (Some(engine), Some(rx)),
-            None => (None, None),
-        };
-        let (dream_handle, dream_rx) = match dream {
-            Some(DreamWiring { engine, rx }) => (Some(engine), Some(rx)),
             None => (None, None),
         };
         let discord_handle = discord.map(|w| w.control);
@@ -336,8 +314,6 @@ impl Agent {
             timeout_secs: cfg.llm.timeout_secs,
             timer: timer_handle,
             timer_rx,
-            dream: dream_handle,
-            dream_rx,
             memory,
             tasks,
             skills,
@@ -373,15 +349,12 @@ impl Agent {
             // releases the field borrows), so subsequent calls into
             // `self.handle_*` are clean.
             let timer_enabled = self.timer_rx.is_some();
-            let dream_enabled = self.dream_rx.is_some();
             let inbox = &mut self.inbox;
             let timer_rx = &mut self.timer_rx;
-            let dream_rx = &mut self.dream_rx;
             let event = tokio::select! {
                 biased;
                 msg = inbox.recv() => Event::Dispatch(msg),
                 tick = recv_enabled(timer_rx), if timer_enabled => Event::TimerTick(tick),
-                tick = recv_enabled(dream_rx), if dream_enabled => Event::DreamTick(tick),
             };
 
             match event {
@@ -395,10 +368,6 @@ impl Agent {
                     self.timer_rx = None;
                 }
                 Event::TimerTick(Some(tick)) => self.handle_timer_tick(tick).await?,
-                Event::DreamTick(None) => {
-                    self.dream_rx = None;
-                }
-                Event::DreamTick(Some(tick)) => self.handle_dream_tick(tick).await?,
             }
         }
     }
@@ -439,7 +408,7 @@ impl Agent {
         }
     }
 
-    /// Handle a Markdown timer tick.
+    /// Handle a timer tick.
     ///
     /// Timers are the runtime form of `task + timer` state. The
     /// scheduler has already advanced the timer before emitting this
@@ -454,11 +423,11 @@ impl Agent {
         let timer_id = tick.timer_id;
         match tick.target {
             timer::TimerTarget::Task {
-                timer_title,
                 task_id,
                 task_subject,
                 prompt,
             } => {
+                let timer_title = task_subject.clone();
                 let task = exec::TaskExecution {
                     task_id,
                     task_subject: task_subject.clone(),
@@ -576,10 +545,7 @@ impl Agent {
             None
         };
         let iter = Iteration::silent_cron(session.clone(), channel.clone(), exec_id.clone());
-        let memory_snapshot = self.capture_memory_snapshot(&iter).await;
-        self.cron_sessions
-            .create_with_memory_snapshot(&session, title, channel, memory_snapshot)
-            .await?;
+        self.cron_sessions.create(&session, title, channel).await?;
         let input = with_timer_context(input, timer_id.as_deref());
         match self.iteration(&iter, input).await {
             Ok(output) => {
@@ -644,42 +610,6 @@ impl Agent {
         let _ = self.out.send(msg).await;
     }
 
-    /// Handle a quiet Dream tick. Errors are logged and swallowed so a failed
-    /// background review never interrupts foreground conversation handling.
-    async fn handle_dream_tick(&self, tick: dream::DreamTick) -> Result<()> {
-        let Some(engine) = self.dream.as_ref() else {
-            return Ok(());
-        };
-        let model = self.model_snapshot();
-        let outcome = dream::run_once(dream::RunInput {
-            config: &self.config.dream,
-            store: engine.store(),
-            sessions: self.sessions.clone(),
-            memory: self.memory.clone(),
-            client: model.client.clone(),
-            model_name: model.profile.model_name.clone(),
-            timeout_secs: self.timeout_secs,
-            now: tick.at,
-        })
-        .await;
-
-        match outcome {
-            Ok(outcome) if outcome.status == dream::RunStatus::Succeeded => {
-                eprintln!(
-                    "[dream] {}: reviewed {} session(s), {} event(s), created {}, updated {}",
-                    outcome.message,
-                    outcome.reviewed_sessions,
-                    outcome.reviewed_events,
-                    outcome.memories_created,
-                    outcome.memories_updated
-                );
-            }
-            Ok(_) => {}
-            Err(err) => eprintln!("[dream] review failed: {err}"),
-        }
-        Ok(())
-    }
-
     /// Dispatch one forwarded slash command through the agent layer
     /// and send a reply (when applicable) to the originating
     /// channel. Named to mirror `CliChannel::dispatch_command` — same
@@ -711,7 +641,6 @@ impl Agent {
         let ctx = AgentCommandCtx {
             channel: channel.clone(),
             session: session.clone(),
-            memory: self.memory.clone(),
             discord: self.discord.clone(),
             wechat: self.wechat.clone(),
             out: self.out.clone(),
@@ -720,14 +649,6 @@ impl Agent {
 
         let payload = match parsed {
             SlashCommand::Switch(command) => self.run_switch_command(command),
-            SlashCommand::Memory(command) => match run_memory_command(command, &ctx).await {
-                CommandOutcome::Completed => return Ok(()),
-                CommandOutcome::Feedback(msg) => OutboundPayload::Notice(msg),
-                CommandOutcome::Exit => {
-                    eprintln!("[agent] command {body:?} returned Exit at agent layer; ignoring");
-                    return Ok(());
-                }
-            },
             SlashCommand::Discord(command) => match run_discord_command(command, &ctx).await {
                 CommandOutcome::Completed => return Ok(()),
                 CommandOutcome::Feedback(msg) => OutboundPayload::Notice(msg),
@@ -1072,7 +993,7 @@ impl Agent {
             return Ok(String::new());
         }
 
-        let memory_snapshot = self.ensure_session(iter, &user_text).await?;
+        self.ensure_session(iter, &user_text).await?;
         self.session_manager(iter)
             .append(&iter.session, Message::User { content: user_text })
             .await?;
@@ -1088,14 +1009,13 @@ impl Agent {
             let messages = self.load_history(iter).await?;
             let messages = self.maybe_auto_compact(iter, messages).await?;
             // Prepend the freshly-built iteration system prompt
-            // here rather than persisting it: env_info changes every
-            // call, AGENTS.md edits should take effect on the next
-            // iteration without rewriting history, and Claude Code
-            // does the same — the system prompt is rendered into
-            // toolUseContext.renderedSystemPrompt per call, never
-            // appended to the transcript.
+            // here rather than persisting it: the system prompt belongs
+            // to request assembly, not transcript history. `MEMORY.md`
+            // is injected separately as transient user context so edits
+            // can take effect on the next request without invalidating
+            // the cached system prefix.
             let messages = self.prepend_iteration_system(messages);
-            let messages = append_memory_snapshot(messages, &memory_snapshot);
+            let messages = self.inject_memory_context(messages).await?;
             let outcome = self.call(iter, messages).await?;
             let CallOutcome {
                 content,
@@ -1336,7 +1256,7 @@ impl Agent {
         };
 
         match self
-            .execute_task_silent(iter, execution.prompt, exec_id.as_ref())
+            .execute_task_silent(execution.prompt, exec_id.as_ref())
             .await
         {
             Ok(output) => {
@@ -1383,11 +1303,9 @@ impl Agent {
 
     async fn execute_task_silent(
         &self,
-        iter: &Iteration,
         prompt: String,
         exec_id: Option<&exec::ExecId>,
     ) -> Result<String> {
-        let memory_snapshot = self.capture_memory_snapshot(iter).await.unwrap_or_default();
         let mut messages = vec![Message::User { content: prompt }];
         let mut i: u8 = 0;
         loop {
@@ -1397,10 +1315,9 @@ impl Agent {
                 return Err(Error::MaxIterationsExceeded(cap));
             }
 
-            let request_messages = append_memory_snapshot(
-                self.prepend_iteration_system(messages.clone()),
-                &memory_snapshot,
-            );
+            let request_messages = self
+                .inject_memory_context(self.prepend_iteration_system(messages.clone()))
+                .await?;
             let model = self.model_snapshot();
             let request = self.build_request(&model.profile, request_messages);
             let response = model.client.complete(request).await?;
@@ -1523,22 +1440,11 @@ impl Agent {
         out
     }
 
-    async fn capture_memory_snapshot(&self, iter: &Iteration) -> Option<String> {
-        if !self.config.memory.enabled || !self.config.memory.session_snapshot {
-            return Some(String::new());
-        }
-        match self
-            .memory
-            .render_system_snapshot(&self.config.memory)
-            .await
-        {
-            Ok(context) => Some(context.unwrap_or_default()),
-            Err(err) => {
-                self.send_notice(iter, &format!("memory snapshot unavailable: {err}"))
-                    .await;
-                None
-            }
-        }
+    async fn inject_memory_context(&self, messages: Vec<Message>) -> Result<Vec<Message>> {
+        let Some(content) = self.memory.render_user_context(&self.config.memory).await? else {
+            return Ok(messages);
+        };
+        Ok(insert_user_context_after_system(messages, content))
     }
 
     /// Consume a [`ResponseStream`], forwarding text chunks to the bus
@@ -1628,32 +1534,17 @@ impl Agent {
     /// Create a session on first encounter, generating a short title
     /// from the user's opening message. If title generation fails or
     /// returns empty, falls back to a truncated prefix of the input.
-    async fn ensure_session(&self, iter: &Iteration, first_text: &str) -> Result<String> {
+    async fn ensure_session(&self, iter: &Iteration, first_text: &str) -> Result<()> {
         let sessions = self.session_manager(iter);
-        if let Some(metadata) = sessions.metadata(&iter.session).await? {
-            if let Some(snapshot) = metadata.memory_snapshot {
-                return Ok(snapshot);
-            }
-            if let Some(snapshot) = self.capture_memory_snapshot(iter).await {
-                sessions
-                    .set_memory_snapshot(&iter.session, Some(snapshot.clone()))
-                    .await?;
-                return Ok(snapshot);
-            }
-            return Ok(String::new());
+        if sessions.metadata(&iter.session).await?.is_some() {
+            return Ok(());
         }
         let title = match self.generate_title(first_text).await {
             Ok(t) if !t.is_empty() => t,
             _ => fallback_title(first_text),
         };
-        let memory_snapshot = self.capture_memory_snapshot(iter).await;
         sessions
-            .create_with_memory_snapshot(
-                &iter.session,
-                title,
-                iter.channel.clone(),
-                memory_snapshot.clone(),
-            )
+            .create(&iter.session, title, iter.channel.clone())
             .await?;
         // SessionStart hook fires once per fresh session — never on
         // resume, never per iteration. `source: startup` distinguishes
@@ -1670,7 +1561,7 @@ impl Agent {
                 &self.cwd,
             )
             .await;
-        Ok(memory_snapshot.unwrap_or_default())
+        Ok(())
     }
 
     /// Generate a short session title from the first user message
@@ -1736,15 +1627,12 @@ impl Agent {
     }
 }
 
-fn append_memory_snapshot(mut messages: Vec<Message>, memory_snapshot: &str) -> Vec<Message> {
-    let snapshot = memory_snapshot.trim();
-    if snapshot.is_empty() {
+fn insert_user_context_after_system(mut messages: Vec<Message>, content: String) -> Vec<Message> {
+    if content.trim().is_empty() {
         return messages;
     }
-    if let Some(Message::System { content }) = messages.first_mut() {
-        content.push_str("\n\n");
-        content.push_str(snapshot);
-    }
+    let insert_at = usize::from(matches!(messages.first(), Some(Message::System { .. })));
+    messages.insert(insert_at, Message::User { content });
     messages
 }
 
@@ -1805,7 +1693,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn memory_snapshot_is_appended_to_system_message() {
+    fn memory_context_is_inserted_after_system_message() {
         let messages = vec![
             Message::System {
                 content: "system".to_string(),
@@ -1822,24 +1710,29 @@ mod tests {
                 content: "current".to_string(),
             },
         ];
-        let messages = append_memory_snapshot(messages, "# Memory Snapshot\n- x");
+        let messages =
+            insert_user_context_after_system(messages, "# User Memory\n\n- x".to_string());
 
         let Message::System { content } = &messages[0] else {
             panic!("expected system message");
         };
-        assert_eq!(content, "system\n\n# Memory Snapshot\n- x");
-        let Message::User { content } = &messages[3] else {
+        assert_eq!(content, "system");
+        let Message::User { content } = &messages[1] else {
+            panic!("expected memory user-context message");
+        };
+        assert_eq!(content, "# User Memory\n\n- x");
+        let Message::User { content } = &messages[4] else {
             panic!("expected user message");
         };
         assert_eq!(content, "current");
     }
 
     #[test]
-    fn empty_memory_snapshot_leaves_messages_unchanged() {
+    fn empty_memory_context_leaves_messages_unchanged() {
         let messages = vec![Message::System {
             content: "system".to_string(),
         }];
-        let updated = append_memory_snapshot(messages.clone(), " \n");
+        let updated = insert_user_context_after_system(messages.clone(), " \n".to_string());
         let Message::System { content } = &updated[0] else {
             panic!("expected system message");
         };

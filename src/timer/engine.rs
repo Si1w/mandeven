@@ -1,10 +1,8 @@
-//! Timer scheduler that consumes timer state.
+//! Timer scheduler that consumes `~/.mandeven/timers.json`.
 //!
-//! The engine polls `<project_bucket>/timers/*.md`, finds due timers,
-//! advances their next fire time before dispatch, and emits
-//! [`TimerTick`]s to the agent loop. This is the runtime side of the
-//! `task + timer` primitive pair. It also polls global
-//! `~/.mandeven/timers.json` entries materialized from skill
+//! The engine finds due timers, advances their next fire time before
+//! dispatch, and emits [`TimerTick`]s to the agent loop. This is the
+//! runtime side of the `task + timer` primitive pair and of skill
 //! frontmatter such as `timers: "0 9 * * *"`.
 
 use std::path::{Path, PathBuf};
@@ -17,8 +15,7 @@ use tokio::sync::mpsc;
 use tokio::time::sleep;
 
 use super::error::Result;
-use super::global::{GlobalStore, GlobalStoreFile, GlobalTimer};
-use super::{Schedule, Store, StoreFile, TIMER_SUBDIR, Timer};
+use super::{Store, StoreFile, Timer, TimerTargetRef};
 use crate::task;
 
 /// Maximum sleep between timer scans.
@@ -32,8 +29,8 @@ const TICK_QUEUE_CAPACITY: usize = 32;
 #[derive(Debug)]
 pub struct TimerEngine {
     store: Store,
-    global_store: GlobalStore,
     tasks: task::Manager,
+    project: String,
     state: Arc<AsyncMutex<EngineState>>,
     tick_tx: mpsc::Sender<TimerTick>,
 }
@@ -57,10 +54,8 @@ pub struct TimerTick {
 /// Runtime target for a timer tick.
 #[derive(Clone, Debug)]
 pub enum TimerTarget {
-    /// A project-local task timer.
+    /// A task timer for the current project.
     Task {
-        /// Human-readable timer title.
-        timer_title: String,
         /// Referenced task id.
         task_id: String,
         /// Human-readable task subject.
@@ -84,28 +79,27 @@ impl TimerEngine {
     ///
     /// # Errors
     ///
-    /// Returns store errors when existing Markdown timers are
-    /// unreadable or invalid.
+    /// Returns store errors when existing JSON timers are unreadable
+    /// or invalid.
     pub async fn new(
         project_bucket: &Path,
         data_dir: &Path,
     ) -> Result<(Self, mpsc::Receiver<TimerTick>)> {
-        let store = Store::new(&project_bucket.join(TIMER_SUBDIR));
+        let project = project_bucket.to_string_lossy().into_owned();
+        let store = Store::new(data_dir);
         let mut file = store.load().await?;
         let now = Utc::now();
         let recomputed = recompute_next_fires(&mut file.timers, now);
         if recomputed > 0 {
             store.save(&file).await?;
         }
-        let global_store = GlobalStore::new(data_dir);
-        recompute_global_next_fires(&global_store, now).await?;
 
         let (tick_tx, tick_rx) = mpsc::channel(TICK_QUEUE_CAPACITY);
         Ok((
             Self {
                 store,
-                global_store,
                 tasks: task::Manager::new(project_bucket),
+                project,
                 state: Arc::new(AsyncMutex::new(EngineState::default())),
                 tick_tx,
             },
@@ -135,7 +129,7 @@ impl TimerEngine {
         }
     }
 
-    /// Path to the timer directory.
+    /// Path to the timer JSON file.
     #[must_use]
     pub fn path(&self) -> PathBuf {
         self.store.path().to_path_buf()
@@ -169,27 +163,13 @@ async fn compute_sleep(engine: &TimerEngine) -> StdDuration {
             StoreFile::default()
         }
     };
-    let global_file = match engine.global_store.load().await {
-        Ok(file) => file,
-        Err(err) => {
-            eprintln!("[timer] failed to read global timers while computing sleep: {err}");
-            GlobalStoreFile::default()
-        }
-    };
     let now = Utc::now();
-    let next_project = file
+    let next = file
         .timers
         .iter()
-        .filter(|timer| timer.enabled)
+        .filter(|timer| timer.enabled && is_runnable_by_engine(timer, &engine.project))
         .filter_map(|timer| timer.next_fire_at)
         .min();
-    let next_global = global_file
-        .timers
-        .iter()
-        .filter(|timer| timer.enabled)
-        .filter_map(|timer| timer.next_fire_at)
-        .min();
-    let next = [next_project, next_global].into_iter().flatten().min();
     match next {
         Some(time) => match (time - now).to_std() {
             Ok(duration) => duration.min(MAX_SLEEP),
@@ -202,12 +182,12 @@ async fn compute_sleep(engine: &TimerEngine) -> StdDuration {
 async fn collect_and_advance_due(engine: &TimerEngine) -> Result<Vec<TimerTick>> {
     let _guard = engine.state.lock().await;
     let now = Utc::now();
-    let mut due = collect_and_advance_due_global(engine, now).await?;
     let mut file = engine.store.load().await?;
+    let mut due = Vec::new();
     let mut changed = false;
 
     for timer in &mut file.timers {
-        if !timer.enabled {
+        if !timer.enabled || !is_runnable_by_engine(timer, &engine.project) {
             continue;
         }
         let Some(due_at) = timer.next_fire_at else {
@@ -217,67 +197,42 @@ async fn collect_and_advance_due(engine: &TimerEngine) -> Result<Vec<TimerTick>>
             continue;
         }
 
-        let Some(task) = engine.tasks.get(&timer.task_id).await? else {
-            eprintln!(
-                "[timer] skipping timer {} because task {} is missing",
-                timer.id, timer.task_id
-            );
-            advance_timer(timer, now);
-            changed = true;
-            continue;
-        };
+        match timer.target.clone() {
+            TimerTargetRef::Task { task_id, .. } => {
+                let Some(task) = engine.tasks.get(&task_id).await? else {
+                    eprintln!(
+                        "[timer] skipping timer {} because task {} is missing",
+                        timer.id, task_id
+                    );
+                    advance_timer(timer, now);
+                    changed = true;
+                    continue;
+                };
 
-        due.push(TimerTick {
-            timer_id: timer.id.clone(),
-            target: TimerTarget::Task {
-                timer_title: timer.title.clone(),
-                task_id: task.id.clone(),
-                task_subject: task.subject.clone(),
-                prompt: prompt_for_task(timer, &task),
-            },
-            at: now,
-        });
+                due.push(TimerTick {
+                    timer_id: timer.id.clone(),
+                    target: TimerTarget::Task {
+                        task_id: task.id.clone(),
+                        task_subject: task.subject.clone(),
+                        prompt: prompt_for_task(timer, &task),
+                    },
+                    at: now,
+                });
+            }
+            TimerTargetRef::Skill { skill } => {
+                due.push(TimerTick {
+                    timer_id: timer.id.clone(),
+                    target: TimerTarget::Skill { skill },
+                    at: now,
+                });
+            }
+        }
         advance_timer(timer, now);
         changed = true;
     }
 
     if changed {
         engine.store.save(&file).await?;
-    }
-    Ok(due)
-}
-
-async fn collect_and_advance_due_global(
-    engine: &TimerEngine,
-    now: DateTime<Utc>,
-) -> Result<Vec<TimerTick>> {
-    let mut file = engine.global_store.load().await?;
-    let mut due = Vec::new();
-    let mut changed = false;
-
-    for timer in &mut file.timers {
-        if timer.kind != "skill" || !timer.enabled {
-            continue;
-        }
-        let Some(due_at) = timer.next_fire_at else {
-            continue;
-        };
-        if now < due_at {
-            continue;
-        }
-        due.push(TimerTick {
-            timer_id: timer.id.clone(),
-            target: TimerTarget::Skill {
-                skill: timer.skill.clone(),
-            },
-            at: now,
-        });
-        advance_global_timer(timer, now);
-        changed = true;
-    }
-
-    if changed {
-        engine.global_store.save(&file).await?;
     }
     Ok(due)
 }
@@ -291,41 +246,6 @@ fn advance_timer(timer: &mut Timer, now: DateTime<Utc>) {
         timer.enabled = false;
         timer.next_fire_at = None;
     }
-}
-
-fn advance_global_timer(timer: &mut GlobalTimer, now: DateTime<Utc>) {
-    timer.last_fire_at = Some(now);
-    timer.next_fire_at = Schedule::cron(&timer.expr)
-        .ok()
-        .and_then(|schedule| schedule.next_after(now));
-    if timer.next_fire_at.is_none() {
-        timer.enabled = false;
-    }
-}
-
-async fn recompute_global_next_fires(store: &GlobalStore, now: DateTime<Utc>) -> Result<()> {
-    let mut file = store.load().await?;
-    let mut changed = false;
-    for timer in &mut file.timers {
-        if timer.kind != "skill" || !timer.enabled {
-            continue;
-        }
-        let next = Schedule::cron(&timer.expr)
-            .ok()
-            .and_then(|schedule| schedule.next_after(now));
-        if timer.next_fire_at != next {
-            timer.next_fire_at = next;
-            changed = true;
-        }
-        if next.is_none() {
-            timer.enabled = false;
-            changed = true;
-        }
-    }
-    if changed {
-        store.save(&file).await?;
-    }
-    Ok(())
 }
 
 fn recompute_next_fires(timers: &mut [Timer], now: DateTime<Utc>) -> usize {
@@ -349,11 +269,20 @@ fn recompute_next_fires(timers: &mut [Timer], now: DateTime<Utc>) -> usize {
     changed
 }
 
+fn is_runnable_by_engine(timer: &Timer, project: &str) -> bool {
+    match &timer.target {
+        TimerTargetRef::Task {
+            project: timer_project,
+            ..
+        } => timer_project == project,
+        TimerTargetRef::Skill { .. } => true,
+    }
+}
+
 fn prompt_for_task(timer: &Timer, task: &task::Task) -> String {
     format!(
-        "# Scheduled task: {}\n\nTimer: {}\nTimer ID: {}\nTask ID: {}\n\n{}",
+        "# Scheduled task: {}\n\nTimer ID: {}\nTask ID: {}\n\n{}",
         task.subject,
-        timer.title,
         timer.id,
         task.id,
         task.description.trim()
@@ -398,11 +327,13 @@ mod tests {
         let now = Utc::now();
         file.timers.push(Timer {
             id: uuid::Uuid::now_v7().to_string(),
-            path: None,
-            title: "Build timer".to_string(),
-            task_id: task.id.clone(),
+            target: TimerTargetRef::Task {
+                project: dir.to_string_lossy().into_owned(),
+                task_id: task.id.clone(),
+            },
             enabled: true,
-            schedule: Schedule::every(Duration::minutes(5), now - Duration::hours(1)).unwrap(),
+            schedule: super::super::Schedule::every(Duration::minutes(5), now - Duration::hours(1))
+                .unwrap(),
             next_fire_at: Some(now - Duration::seconds(1)),
             last_fire_at: None,
             created_at: now,
@@ -433,11 +364,11 @@ mod tests {
         let now = Utc::now();
         let mut timers = vec![Timer {
             id: uuid::Uuid::now_v7().to_string(),
-            path: None,
-            title: "Expired".to_string(),
-            task_id: uuid::Uuid::now_v7().to_string(),
+            target: TimerTargetRef::Skill {
+                skill: "heartbeat".to_string(),
+            },
             enabled: true,
-            schedule: Schedule::at(now - Duration::minutes(1)),
+            schedule: super::super::Schedule::at(now - Duration::minutes(1)),
             next_fire_at: Some(now - Duration::minutes(1)),
             last_fire_at: None,
             created_at: now,

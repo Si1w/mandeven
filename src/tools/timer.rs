@@ -1,8 +1,8 @@
 //! Model-facing timer tools.
 //!
-//! Timers are validated Markdown state. They bind a task id to a
-//! schedule and make cron-style work composable as `task + timer`
-//! rather than as a separate high-level cron instruction.
+//! Timers are validated JSON state. They bind a task id to a schedule
+//! and make cron-style work composable as `task + timer` rather than
+//! as a separate high-level cron instruction.
 
 use std::sync::Arc;
 
@@ -36,8 +36,6 @@ pub fn register(registry: &mut Registry, timers: Arc<timer::Manager>) {
 
 #[derive(Deserialize, JsonSchema)]
 struct TimerCreateParams {
-    /// Human-readable timer title.
-    title: String,
     /// Existing task id this timer should fire.
     task_id: String,
     /// Structured schedule.
@@ -54,7 +52,7 @@ impl BaseTool for TimerCreate {
     fn schema(&self) -> Tool {
         Tool {
             name: "timer_create".into(),
-            description: "Create validated timer Markdown state for an existing task. \
+            description: "Create validated timer JSON state for an existing task. \
                 Use this for delayed, recurring, or calendar-based work after task_create \
                 has produced the task. This replaces model-facing cron creation."
                 .into(),
@@ -68,7 +66,6 @@ impl BaseTool for TimerCreate {
         let timer = self
             .timers
             .create(TimerDraft {
-                title: params.title,
                 task_id: params.task_id,
                 schedule: params.schedule.into_schedule("timer_create")?,
             })
@@ -98,7 +95,7 @@ impl BaseTool for TimerList {
     fn schema(&self) -> Tool {
         Tool {
             name: "timer_list".into(),
-            description: "List timer Markdown state. Use this before creating a schedule \
+            description: "List current-project task timers. Use this before creating a schedule \
                 to avoid duplicates, and when the user asks what automated work is active."
                 .into(),
             parameters: serde_json::to_value(schema_for!(TimerListParams))
@@ -135,9 +132,6 @@ impl BaseTool for TimerList {
 struct TimerUpdateParams {
     /// Timer id to update.
     timer_id: String,
-    /// Replacement title.
-    #[serde(default)]
-    title: Option<String>,
     /// Replacement task id.
     #[serde(default)]
     task_id: Option<String>,
@@ -159,8 +153,8 @@ impl BaseTool for TimerUpdateTool {
     fn schema(&self) -> Tool {
         Tool {
             name: "timer_update".into(),
-            description: "Update a timer's title, referenced task, enabled flag, or \
-                schedule. This edits validated Markdown state and recomputes next_fire_at \
+            description: "Update a timer's referenced task, enabled flag, or schedule. \
+                This edits validated JSON state and recomputes next_fire_at \
                 when the schedule or enabled flag changes."
                 .into(),
             parameters: serde_json::to_value(schema_for!(TimerUpdateParams))
@@ -179,7 +173,6 @@ impl BaseTool for TimerUpdateTool {
             .update(
                 &params.timer_id,
                 TimerUpdate {
-                    title: params.title,
                     task_id: params.task_id,
                     enabled: params.enabled,
                     schedule,
@@ -220,7 +213,7 @@ impl BaseTool for TimerDelete {
     fn schema(&self) -> Tool {
         Tool {
             name: "timer_delete".into(),
-            description: "Delete timer Markdown state when a schedule is no longer needed.".into(),
+            description: "Delete timer JSON state when a schedule is no longer needed.".into(),
             parameters: serde_json::to_value(schema_for!(TimerDeleteParams))
                 .expect("JsonSchema derive always serializes"),
         }
@@ -294,7 +287,6 @@ impl BaseTool for TimerFireNow {
             "observation_type": "state",
             "object": "timer_fire",
             "id": outcome.timer.id,
-            "path": outcome.timer.path,
             "validated": true,
             "diagnostics": [],
             "spec": timer_spec(&outcome.timer),
@@ -359,7 +351,7 @@ fn should_include_timer(timer: &timer::Timer, params: &TimerListParams) -> bool 
         return false;
     }
     if let Some(task_id) = params.task_id.as_deref()
-        && timer.task_id != task_id
+        && timer.target.task_id() != Some(task_id)
     {
         return false;
     }
@@ -372,7 +364,6 @@ fn state_observation(object: &'static str, timer: &timer::Timer, message: &'stat
         "observation_type": "state",
         "object": object,
         "id": &timer.id,
-        "path": &timer.path,
         "validated": true,
         "diagnostics": [],
         "spec": timer_spec(timer),
@@ -383,9 +374,8 @@ fn state_observation(object: &'static str, timer: &timer::Timer, message: &'stat
 fn timer_summary(timer: &timer::Timer) -> Value {
     json!({
         "id": &timer.id,
-        "path": &timer.path,
-        "title": &timer.title,
-        "task_id": &timer.task_id,
+        "target": &timer.target,
+        "task_id": timer.target.task_id(),
         "enabled": timer.enabled,
         "schedule": timer.schedule.describe(),
         "next_fire_at": timer.next_fire_at.map(|time| time.to_rfc3339()),
@@ -395,8 +385,8 @@ fn timer_summary(timer: &timer::Timer) -> Value {
 
 fn timer_spec(timer: &timer::Timer) -> Value {
     json!({
-        "title": &timer.title,
-        "task_id": &timer.task_id,
+        "target": &timer.target,
+        "task_id": timer.target.task_id(),
         "enabled": timer.enabled,
         "schedule": &timer.schedule,
         "schedule_description": timer.schedule.describe(),
@@ -459,7 +449,7 @@ mod tests {
         let dir = tempdir();
         let tasks = task::Manager::new(&dir);
         let task = tasks.create(task_draft("Run tests")).await.unwrap();
-        let manager = Arc::new(timer::Manager::new(&dir));
+        let manager = Arc::new(timer::Manager::new(&dir, &dir));
         let create = TimerCreate {
             timers: manager.clone(),
         };
@@ -478,7 +468,6 @@ mod tests {
 
         let result = create
             .call(json!({
-                "title": "Daily test run",
                 "task_id": task.id,
                 "schedule": { "kind": "cron", "expr": "0 9 * * *" }
             }))
@@ -488,7 +477,7 @@ mod tests {
             panic!("timer_create should return plain result");
         };
         let timer_id = value["id"].as_str().unwrap().to_string();
-        assert_eq!(value["path"], "timers/daily-test-run.md");
+        assert!(uuid::Uuid::parse_str(&timer_id).is_ok());
 
         let result = list
             .call(json!({ "include_disabled": false }))

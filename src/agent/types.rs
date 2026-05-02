@@ -4,6 +4,24 @@ use crate::bus::{ChannelID, SessionID};
 use crate::exec::ExecId;
 use crate::llm::{FinishReason, ToolCall, Usage};
 
+/// Which session store an iteration should persist into.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionScope {
+    /// The active project bucket.
+    Foreground,
+    /// The global cron/background bucket.
+    Cron,
+}
+
+/// How an iteration should surface model output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeliveryMode {
+    /// Stream deltas and notices to the iteration channel.
+    Visible,
+    /// Persist the transcript only; do not send outbound messages.
+    Silent,
+}
+
 /// Identifier for a single iteration — session plus source channel.
 ///
 /// An iteration is one outer-loop cycle: receive one user message, run
@@ -17,9 +35,46 @@ pub struct Iteration {
     pub session: SessionID,
     /// Channel that produced the user input and will receive the reply.
     pub channel: ChannelID,
+    /// Session store that owns this iteration's transcript.
+    pub scope: SessionScope,
+    /// Output delivery behavior.
+    pub delivery: DeliveryMode,
     /// Machine-readable execution log to append events to, when this
     /// iteration was started by a scheduled task.
     pub exec_id: Option<ExecId>,
+}
+
+impl Iteration {
+    /// Construct a normal user-visible iteration in the foreground
+    /// project bucket.
+    #[must_use]
+    pub fn visible(session: SessionID, channel: ChannelID, exec_id: Option<ExecId>) -> Self {
+        Self {
+            session,
+            channel,
+            scope: SessionScope::Foreground,
+            delivery: DeliveryMode::Visible,
+            exec_id,
+        }
+    }
+
+    /// Construct a silent background iteration in the cron bucket.
+    #[must_use]
+    pub fn silent_cron(session: SessionID, channel: ChannelID, exec_id: Option<ExecId>) -> Self {
+        Self {
+            session,
+            channel,
+            scope: SessionScope::Cron,
+            delivery: DeliveryMode::Silent,
+            exec_id,
+        }
+    }
+
+    /// Whether outbound messages should be sent to the channel layer.
+    #[must_use]
+    pub fn is_visible(&self) -> bool {
+        self.delivery == DeliveryMode::Visible
+    }
 }
 
 /// Outcome of a single LLM call within an iteration.

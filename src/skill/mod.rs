@@ -3,9 +3,11 @@
 //!
 //! Skills are the lowest-friction extension layer mandeven exposes:
 //! drop a directory into `~/.mandeven/skills/<name>/SKILL.md`, fill
-//! in YAML frontmatter (`name`, `description`), and the body becomes
-//! a reusable workflow the user can invoke as `/<name>` or the model
-//! can invoke via `skill_use`.
+//! in YAML frontmatter (`name`, `description`, plus optional
+//! Claude-Code-style fields such as `allowed-tools`), and the body
+//! becomes a reusable workflow the user can invoke as `/<name>`, the
+//! model can invoke via `skill_use`, or a global timer can invoke
+//! through `timers`.
 //!
 //! ## On-disk layout
 //!
@@ -29,10 +31,15 @@
 //!    looks up the body and injects it as a new user message via the
 //!    [`crate::tools::ToolOutcome::Inject`] effect. Same downstream
 //!    behavior as path 1 from the model's perspective.
+//! 3. **Timer fired for a skill with `timers` frontmatter**: the
+//!    timer engine invokes the body either in the foreground session
+//!    or, when `fork: true`, in a background cron-bucket session.
 //!
 //! Both paths share the same source of truth: a single
 //! [`SkillIndex`] loaded once at boot from
-//! `<data_dir>/skills/`.
+//! `<data_dir>/skills/`. Built-in skills are seeded into that same
+//! directory when missing, so users can edit them like any other
+//! skill.
 //!
 //! ## What v1 deliberately does not do
 //!
@@ -41,9 +48,7 @@
 //!   case is rare.
 //! - Argument substitution (`${1}`, `${ARG_NAME}`).
 //! - Conditional auto-trigger via `paths` glob.
-//! - Per-skill tool allowlist or model override.
-//! - Bundled (compile-time) skills — mandeven has no "factory
-//!   skills" concept.
+//! - Enforced per-skill tool allowlist or model override.
 //! - Plugin / MCP skills — outside scope.
 //!
 //! Each of these has a clean addition path: extend
@@ -51,10 +56,12 @@
 //! [`loader::load`], and react in the [`crate::tools::skill::SkillTool`]
 //! call path.
 
+pub mod builtin;
 pub mod error;
 pub mod loader;
 pub mod types;
 
+pub use builtin::seed as seed_builtins;
 pub use error::{Error, Result};
 pub use loader::{SKILL_FILENAME, load};
 pub use types::{Skill, SkillFrontmatter, SkillIndex};
@@ -62,7 +69,7 @@ pub use types::{Skill, SkillFrontmatter, SkillIndex};
 use serde::{Deserialize, Serialize};
 
 /// Subdirectory under [`crate::config::home_dir`] holding skill
-/// directories. Same naming convention as `cron/` and `sessions/`.
+/// directories.
 pub const SKILLS_SUBDIR: &str = "skills";
 
 /// User-tunable knobs for the skill subsystem.

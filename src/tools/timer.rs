@@ -14,9 +14,8 @@ use serde_json::{Value, json};
 
 use super::error::{Error, Result};
 use super::{BaseTool, Registry, ToolOutcome};
-use crate::cron::Schedule;
 use crate::llm::Tool;
-use crate::timer::{self, TimerDraft, TimerUpdate};
+use crate::timer::{self, Schedule, TimerDraft, TimerUpdate};
 
 /// Register all model-facing timer tools.
 pub fn register(registry: &mut Registry, timers: Arc<timer::Manager>) {

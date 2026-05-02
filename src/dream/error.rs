@@ -18,7 +18,7 @@ pub enum Error {
 
     /// Schedule parsing failure.
     #[error("dream schedule failed: {0}")]
-    Schedule(#[from] crate::cron::ScheduleError),
+    Schedule(#[from] crate::timer::ScheduleError),
 
     /// Session store failure.
     #[error("dream session review failed: {0}")]

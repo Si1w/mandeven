@@ -146,8 +146,7 @@ impl HookEngine {
     /// outcomes.
     ///
     /// `target` is the matcher key — tool name for `Pre/PostToolUse`,
-    /// job name for `CronTick`, `None` for events without a target
-    /// dimension.
+    /// `None` for events without a target dimension.
     ///
     /// `payload` is the event-specific JSON object passed on stdin.
     /// Caller assembles it; this engine passes through verbatim plus

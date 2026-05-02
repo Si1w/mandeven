@@ -1,7 +1,7 @@
 //! Dream — quiet background review that distills session evidence into memory.
 //!
-//! Dream is not a normal cron prompt and does not enter the user-visible
-//! transcript. Cron-style scheduling owns time; this module owns the semantic
+//! Dream is not a normal user prompt and does not enter the user-visible
+//! transcript. Timer scheduling owns time; this module owns the semantic
 //! review of append-only session events and the idempotent memory upserts.
 
 pub mod engine;
@@ -41,8 +41,8 @@ pub struct DreamConfig {
     /// Enable the background Dream scheduler.
     #[serde(default = "default_enabled")]
     pub enabled: bool,
-    /// Cron expression for scheduled Dream review. Evaluated in UTC, matching
-    /// the rest of mandeven's cron machinery.
+    /// Cron expression for scheduled Dream review. Evaluated in UTC by the
+    /// timer schedule parser.
     #[serde(default = "default_schedule")]
     pub schedule: String,
     /// Emit one startup tick so missed nightly reviews can catch up after the
@@ -159,7 +159,7 @@ pub struct DreamTick {
 pub enum DreamTickReason {
     /// Startup catch-up tick.
     Startup,
-    /// Cron-scheduled tick.
+    /// Scheduled tick.
     Scheduled,
 }
 

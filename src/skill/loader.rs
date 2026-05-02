@@ -4,10 +4,9 @@
 //! shape Claude Code uses for `~/.claude/skills/<name>/SKILL.md` (see
 //! `agent-examples/claude-code-analysis/src/skills/loadSkillsDir.ts`).
 //!
-//! Frontmatter parsing is hand-rolled for the v1 minimal shape (just
-//! `name` and `description`). Once the schema grows beyond flat
-//! single-line strings, swap in `serde_yml` or `gray_matter` — the
-//! `parse_frontmatter` private function is the only call site.
+//! Frontmatter parsing uses `serde_yaml` because mandeven supports
+//! Claude Code-compatible fields such as `allowed-tools` and
+//! `user-invocable`, plus mandeven's own `timers` extension.
 
 use std::fs;
 use std::path::Path;
@@ -150,66 +149,25 @@ fn split_frontmatter<'a>(path: &Path, raw: &'a str) -> Result<(&'a str, &'a str)
     Ok((frontmatter, body))
 }
 
-/// Parse the frontmatter block into a [`SkillFrontmatter`].
-///
-/// Hand-rolled for v1's two-field schema — handles `key: value`,
-/// optional surrounding quotes (single or double), and ignores blank
-/// lines + `# comment` lines. Multi-line values, nested objects, and
-/// arrays are all unsupported and would throw a parse error here;
-/// when we need them, swap in `serde_yml`.
 fn parse_frontmatter(path: &Path, block: &str) -> Result<SkillFrontmatter> {
-    let mut name: Option<String> = None;
-    let mut description: Option<String> = None;
-
-    for raw_line in block.lines() {
-        let line = raw_line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        let Some((key, value)) = line.split_once(':') else {
-            return Err(Error::FrontmatterParse {
-                path: path.to_path_buf(),
-                reason: format!("line missing ':' separator: {raw_line:?}"),
-            });
-        };
-        let key = key.trim();
-        let value = strip_quotes(value.trim());
-
-        match key {
-            "name" => name = Some(value.to_string()),
-            "description" => description = Some(value.to_string()),
-            // Unknown keys are tolerated — future fields can land in
-            // SKILL.md before they're parsed here. Logging would be
-            // noisy at this layer; loader.rs's eprintln on outright
-            // failure is enough.
-            _ => {}
-        }
+    let parsed: SkillFrontmatter =
+        serde_yaml::from_str(block).map_err(|source| Error::FrontmatterParse {
+            path: path.to_path_buf(),
+            reason: source.to_string(),
+        })?;
+    if parsed.name.trim().is_empty() {
+        return Err(Error::MissingField {
+            path: path.to_path_buf(),
+            field: "name",
+        });
     }
-
-    let name = name.ok_or(Error::MissingField {
-        path: path.to_path_buf(),
-        field: "name",
-    })?;
-    let description = description.ok_or(Error::MissingField {
-        path: path.to_path_buf(),
-        field: "description",
-    })?;
-
-    Ok(SkillFrontmatter { name, description })
-}
-
-/// Strip a single layer of matching `'…'` or `"…"` quotes if present.
-/// Otherwise return the input unchanged.
-fn strip_quotes(s: &str) -> &str {
-    let bytes = s.as_bytes();
-    if bytes.len() >= 2
-        && ((bytes[0] == b'"' && bytes[bytes.len() - 1] == b'"')
-            || (bytes[0] == b'\'' && bytes[bytes.len() - 1] == b'\''))
-    {
-        &s[1..s.len() - 1]
-    } else {
-        s
+    if parsed.description.trim().is_empty() {
+        return Err(Error::MissingField {
+            path: path.to_path_buf(),
+            field: "description",
+        });
     }
+    Ok(parsed)
 }
 
 #[cfg(test)]
@@ -278,17 +236,22 @@ mod tests {
         )
         .unwrap();
         assert_eq!(fm.name, "foo");
-        // Outer quotes stripped; inner escapes left literal — v1 is
-        // not a YAML lib, just a flat key:value reader.
-        assert_eq!(fm.description, "says \\\"hi\\\" politely");
+        assert_eq!(fm.description, "says \"hi\" politely");
     }
 
     #[test]
-    fn parse_frontmatter_ignores_blank_and_comment_lines() {
+    fn parse_frontmatter_reads_claude_code_style_fields() {
         let path = std::path::PathBuf::from("/tmp/x");
-        let fm = parse_frontmatter(&path, "# comment\nname: bar\n\ndescription: ok\n").unwrap();
-        assert_eq!(fm.name, "bar");
-        assert_eq!(fm.description, "ok");
+        let fm = parse_frontmatter(
+            &path,
+            "# comment\nname: cron\ndescription: ok\nallowed-tools: task_* timer_*\nuser-invocable: false\ntimers: \"0 9 * * *\"\nfork: true\n",
+        )
+        .unwrap();
+        assert_eq!(fm.name, "cron");
+        assert_eq!(fm.allowed_tools, vec!["task_*", "timer_*"]);
+        assert!(!fm.user_invocable);
+        assert_eq!(fm.timers.as_deref(), Some("0 9 * * *"));
+        assert!(fm.fork);
     }
 
     #[test]

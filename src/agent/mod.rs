@@ -19,7 +19,7 @@ pub mod error;
 pub mod types;
 
 pub use error::{Error, Result};
-pub use types::{CallOutcome, Iteration};
+pub use types::{CallOutcome, Iteration, SessionScope};
 
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write as _;
@@ -39,11 +39,9 @@ use crate::bus::{
 use crate::command::CommandOutcome;
 use crate::command::slash::{self, SlashCommand, SwitchCommand};
 use crate::config::{AgentConfig, AppConfig, LLMConfig, LLMProfile};
-use crate::cron;
 use crate::dream;
 use crate::exec;
 use crate::gateway::{ActiveSessions, DispatchReceiver, InboundDispatch};
-use crate::heartbeat::{HeartbeatEngine, HeartbeatTick};
 use crate::hook::{HookEngine, HookEvent};
 use crate::llm::{
     self, BaseLLMClient, CompactTrigger, FinishReason, Message, Request, ResponseStream, Thinking,
@@ -52,16 +50,14 @@ use crate::llm::{
 use crate::memory;
 use crate::prompt::{PromptContext, PromptEngine};
 use crate::session;
+use crate::skill::SkillIndex;
 use crate::task;
 use crate::timer;
 use crate::tools;
-use crate::tools::heartbeat::{
-    HEARTBEAT_DECIDE_TOOL_NAME, HeartbeatDecideArgs, heartbeat_decide_tool,
-};
 
 use self::command::{
-    AgentCommandCtx, format_compact_report, run_cron_command, run_discord_command,
-    run_heartbeat_command, run_memory_command, run_wechat_command,
+    AgentCommandCtx, format_compact_report, run_discord_command, run_memory_command,
+    run_wechat_command,
 };
 
 /// Upper bound on completion tokens for title generation.
@@ -71,17 +67,17 @@ const TITLE_MAX_TOKENS: u32 = 32;
 /// message when [`Agent::generate_title`] fails or returns empty.
 const FALLBACK_TITLE_MAX_CHARS: usize = 40;
 
-/// Channel that heartbeat phase-2 iterations target. Hard-coded
-/// because `tui` is the only registered channel today.
-//
-// TODO(target-routing): switch to the per-tick target resolved from
-// `HeartbeatConfig.target` once that field lands. See the
-// `target-routing` TODO on `crate::heartbeat::HeartbeatConfig`.
-const HEARTBEAT_TARGET_CHANNEL: &str = "tui";
+/// Channel that receives ambient notifications when a background
+/// timer run produces user-visible output.
+const DEFAULT_NOTIFY_CHANNEL: &str = "tui";
 
-/// Token cap for phase-1. Phase-1 only ever emits a tool call payload
-/// (skip/run + a short tasks string), so a tight cap is enough.
-const HEARTBEAT_DECIDE_MAX_TOKENS: u32 = 256;
+/// Synthetic channel id persisted on background sessions. It is not
+/// registered with the channel manager; silent delivery prevents bus
+/// sends to this id.
+const CRON_CHANNEL: &str = "cron";
+
+/// Marker a background skill can emit to suppress ambient notices.
+const SILENT_MARKER: &str = "[SILENT]";
 
 /// Conversation agent.
 ///
@@ -93,6 +89,7 @@ pub struct Agent {
     model_catalog: Arc<ModelCatalog>,
     app_config: Arc<RwLock<AppConfig>>,
     sessions: Arc<session::Manager>,
+    cron_sessions: Arc<session::Manager>,
     tools: tools::Registry,
     inbox: DispatchReceiver,
     out: OutboundSender,
@@ -101,20 +98,6 @@ pub struct Agent {
     /// [`crate::config::LLMConfig::timeout_secs`] so every iteration
     /// builds its [`Request`] without re-reading the config.
     timeout_secs: Option<u64>,
-    /// Heartbeat control handle, present iff the engine was wired in.
-    /// Cloned into [`AgentCommandCtx`] so `/heartbeat` subcommands can
-    /// pause / resume / set the interval.
-    heartbeat: Option<Arc<HeartbeatEngine>>,
-    /// Receiver paired with the heartbeat engine. Raced against
-    /// `inbox` in [`Agent::run`].
-    heartbeat_rx: Option<mpsc::Receiver<HeartbeatTick>>,
-    /// Cron control handle, present iff the engine was wired in.
-    /// Cloned into [`AgentCommandCtx`] so `/cron` subcommands can
-    /// list, trigger, or pause individual jobs.
-    cron: Option<Arc<cron::CronEngine>>,
-    /// Receiver paired with the cron engine. Raced against `inbox`
-    /// (and the heartbeat receiver, when present) in [`Agent::run`].
-    cron_rx: Option<mpsc::Receiver<cron::CronTick>>,
     /// Timer scheduler handle, present iff the Markdown timer engine
     /// was wired in.
     timer: Option<Arc<timer::TimerEngine>>,
@@ -132,6 +115,9 @@ pub struct Agent {
     /// Project-local task manager used by explicit `task_run`
     /// execution.
     tasks: Arc<task::Manager>,
+    /// Skill index used by global skill timers to expand `skill:<name>`
+    /// ticks into the same body the `/name` slash fallback would send.
+    skills: Arc<SkillIndex>,
     /// Machine-readable execution history writer. Timer-triggered
     /// tasks append JSONL events here.
     exec: Arc<exec::Manager>,
@@ -143,8 +129,9 @@ pub struct Agent {
     /// registered.
     wechat: Option<crate::channels::wechat::WechatControl>,
     /// Live view of the gateway's per-channel session bindings.
-    /// Heartbeat ticks read this to land in the user's main session
-    /// rather than running isolated; written only by the gateway.
+    /// Background timer runs read this to send a final ambient
+    /// notice to the user's current TUI session when there is one.
+    /// Written only by the gateway.
     active_sessions: ActiveSessions,
     /// Window-relative compact thresholds. Cloned from the config
     /// so the agent doesn't refer back to the full `AppConfig` for
@@ -156,15 +143,13 @@ pub struct Agent {
     /// (`dispatch_command`) bump it from `&self` async contexts.
     compact_state: Arc<AsyncMutex<CompactState>>,
     /// Prompt assembly engine. Owns `AGENTS.md` plus the section
-    /// cache; every call site (`generate_title`, `heartbeat_decide`,
-    /// the compact pipeline, the iteration system prompt) goes
-    /// through it so future per-task prompt changes only touch one
-    /// module.
+    /// cache; every call site goes through it so future per-task
+    /// prompt changes only touch one module.
     prompt: Arc<PromptEngine>,
     /// Hook engine. Fired at every lifecycle event (`UserPromptSubmit`,
     /// `Pre/PostToolUse`, `SessionStart`, `Stop`, `Pre/PostCompact`,
-    /// `HeartbeatTick`, `CronTick`). When `enabled = false` or no
-    /// `hooks.json` exists, every fire becomes a no-op so the
+    /// When `enabled = false` or no `hooks.json` exists, every fire
+    /// becomes a no-op so the
     /// orchestration adds zero overhead.
     hook: Arc<HookEngine>,
     /// Process launch directory captured once in `main`. Surfaces in
@@ -233,28 +218,6 @@ fn parse_profile_id(raw: &str) -> Result<(&str, &str)> {
     Ok((provider, model))
 }
 
-/// Options for the optional heartbeat wiring. Constructed by
-/// `main.rs` and threaded into [`Agent::new`].
-pub struct HeartbeatWiring {
-    /// Control handle. Stored on the agent and cloned into
-    /// [`AgentCommandCtx`].
-    pub engine: Arc<HeartbeatEngine>,
-    /// Tick stream from the engine, raced against the dispatch
-    /// queue in the main loop.
-    pub rx: mpsc::Receiver<HeartbeatTick>,
-}
-
-/// Options for the optional cron wiring. Same shape as
-/// [`HeartbeatWiring`] — `main.rs` constructs the engine and threads
-/// these handles into [`Agent::new`].
-pub struct CronWiring {
-    /// Control handle. Stored on the agent and cloned into
-    /// [`AgentCommandCtx`].
-    pub engine: Arc<cron::CronEngine>,
-    /// Tick stream from the engine.
-    pub rx: mpsc::Receiver<cron::CronTick>,
-}
-
 /// Options for the Markdown timer scheduler.
 pub struct TimerWiring {
     /// Scheduler handle.
@@ -263,9 +226,8 @@ pub struct TimerWiring {
     pub rx: mpsc::Receiver<timer::TimerTick>,
 }
 
-/// Options for optional Dream wiring. Same scheduler-handle + receiver shape
-/// as heartbeat and cron, but Dream ticks are handled quietly and never route to
-/// a user channel.
+/// Options for optional Dream wiring. Dream ticks are handled
+/// quietly and never route to a user channel.
 pub struct DreamWiring {
     /// Scheduler/store handle.
     pub engine: Arc<dream::DreamEngine>,
@@ -275,9 +237,8 @@ pub struct DreamWiring {
 
 /// Options for the optional Discord wiring. Carries only the runtime
 /// control handle — Discord has no tick stream, just the
-/// allowlist mutator. Threaded into [`Agent::new`] alongside
-/// [`HeartbeatWiring`] / [`CronWiring`] so all three optional
-/// subsystems follow the same registration shape.
+/// allowlist mutator. Threaded into [`Agent::new`] alongside other
+/// optional subsystem wiring.
 pub struct DiscordWiring {
     /// Allowlist mutator, cloned into [`AgentCommandCtx`].
     pub control: crate::channels::discord::DiscordControl,
@@ -295,14 +256,9 @@ enum Event {
     /// Inbound dispatch arrived from the gateway. `None` means the
     /// dispatch queue closed (clean shutdown).
     Dispatch(Option<InboundDispatch>),
-    /// Heartbeat tick fired. `None` means the engine dropped its
-    /// sender — the branch is dynamically disabled afterwards.
-    HeartbeatTick(Option<HeartbeatTick>),
-    /// Cron tick fired. `None` semantics match the heartbeat arm.
-    CronTick(Option<cron::CronTick>),
-    /// Timer tick fired. `None` semantics match the heartbeat arm.
+    /// Timer tick fired. `None` means the engine dropped its sender.
     TimerTick(Option<timer::TimerTick>),
-    /// Dream tick fired. `None` semantics match the heartbeat arm.
+    /// Dream tick fired. `None` means the engine dropped its sender.
     DreamTick(Option<dream::DreamTick>),
 }
 
@@ -336,16 +292,16 @@ impl Agent {
     pub fn new(
         cfg: &AppConfig,
         sessions: Arc<session::Manager>,
+        cron_sessions: Arc<session::Manager>,
         tools: tools::Registry,
         inbox: DispatchReceiver,
         out: OutboundSender,
         active_sessions: ActiveSessions,
-        heartbeat: Option<HeartbeatWiring>,
-        cron: Option<CronWiring>,
         timer: Option<TimerWiring>,
         dream: Option<DreamWiring>,
         memory: Arc<memory::Manager>,
         tasks: Arc<task::Manager>,
+        skills: Arc<SkillIndex>,
         exec: Arc<exec::Manager>,
         discord: Option<DiscordWiring>,
         wechat: Option<WechatWiring>,
@@ -356,14 +312,6 @@ impl Agent {
         let model_catalog = Arc::new(ModelCatalog::from_config(&cfg.llm)?);
         let model = Arc::new(RwLock::new(model_catalog.get(&cfg.llm.default)?));
 
-        let (heartbeat_handle, heartbeat_rx) = match heartbeat {
-            Some(HeartbeatWiring { engine, rx }) => (Some(engine), Some(rx)),
-            None => (None, None),
-        };
-        let (cron_handle, cron_rx) = match cron {
-            Some(CronWiring { engine, rx }) => (Some(engine), Some(rx)),
-            None => (None, None),
-        };
         let (timer_handle, timer_rx) = match timer {
             Some(TimerWiring { engine, rx }) => (Some(engine), Some(rx)),
             None => (None, None),
@@ -380,21 +328,19 @@ impl Agent {
             model_catalog,
             app_config: Arc::new(RwLock::new(cfg.clone())),
             sessions,
+            cron_sessions,
             tools,
             inbox,
             out,
             config: cfg.agent.clone(),
             timeout_secs: cfg.llm.timeout_secs,
-            heartbeat: heartbeat_handle,
-            heartbeat_rx,
-            cron: cron_handle,
-            cron_rx,
             timer: timer_handle,
             timer_rx,
             dream: dream_handle,
             dream_rx,
             memory,
             tasks,
+            skills,
             exec,
             discord: discord_handle,
             wechat: wechat_handle,
@@ -426,20 +372,14 @@ impl Agent {
             // `await` ends before any `&self` method call below (NLL
             // releases the field borrows), so subsequent calls into
             // `self.handle_*` are clean.
-            let heartbeat_enabled = self.heartbeat_rx.is_some();
-            let cron_enabled = self.cron_rx.is_some();
             let timer_enabled = self.timer_rx.is_some();
             let dream_enabled = self.dream_rx.is_some();
             let inbox = &mut self.inbox;
-            let heartbeat_rx = &mut self.heartbeat_rx;
-            let cron_rx = &mut self.cron_rx;
             let timer_rx = &mut self.timer_rx;
             let dream_rx = &mut self.dream_rx;
             let event = tokio::select! {
                 biased;
                 msg = inbox.recv() => Event::Dispatch(msg),
-                tick = recv_enabled(heartbeat_rx), if heartbeat_enabled => Event::HeartbeatTick(tick),
-                tick = recv_enabled(cron_rx), if cron_enabled => Event::CronTick(tick),
                 tick = recv_enabled(timer_rx), if timer_enabled => Event::TimerTick(tick),
                 tick = recv_enabled(dream_rx), if dream_enabled => Event::DreamTick(tick),
             };
@@ -451,15 +391,6 @@ impl Agent {
                         return Ok(());
                     }
                 }
-                Event::HeartbeatTick(None) => {
-                    // Engine dropped its sender — disable the branch.
-                    self.heartbeat_rx = None;
-                }
-                Event::HeartbeatTick(Some(tick)) => self.handle_tick(tick).await?,
-                Event::CronTick(None) => {
-                    self.cron_rx = None;
-                }
-                Event::CronTick(Some(tick)) => self.handle_cron_tick(tick).await?,
                 Event::TimerTick(None) => {
                     self.timer_rx = None;
                 }
@@ -484,11 +415,7 @@ impl Agent {
         } = msg;
         match payload {
             InboundPayload::UserInput(text) => {
-                let iter = Iteration {
-                    session: session.clone(),
-                    channel: channel.clone(),
-                    exec_id: None,
-                };
+                let iter = Iteration::visible(session.clone(), channel.clone(), None);
                 if let Err(err) = self.iteration(&iter, text).await {
                     let reply = OutboundMessage::new(
                         channel.clone(),
@@ -512,250 +439,152 @@ impl Agent {
         }
     }
 
-    /// Handle a heartbeat tick.
+    /// Handle a Markdown timer tick.
     ///
-    /// Resolves the user's main session via `active_sessions[tui]`,
-    /// runs a phase-1 decide call (gated to the `heartbeat_decide`
-    /// tool), and on `run` continues into a full phase-2 iteration
-    /// whose outbound stream goes back to the `tui` channel. Skips
-    /// silently when:
-    ///
-    /// - the user has no active main session yet (no `/new` or first
-    ///   message), so there is no place to land the heartbeat output
-    ///   without spinning up an isolated session;
-    /// - phase-1 returns `skip` (or any malformed answer);
-    /// - phase-2 errors — the error is rendered as an
-    ///   [`OutboundPayload::Error`] on the same target channel.
-    async fn handle_tick(&self, tick: HeartbeatTick) -> Result<()> {
-        let target = ChannelID::new(HEARTBEAT_TARGET_CHANNEL);
-        let session = {
-            let map = self.active_sessions.lock().await;
-            map.get(&target).cloned()
-        };
-        let Some(session) = session else {
+    /// Timers are the runtime form of `task + timer` state. The
+    /// scheduler has already advanced the timer before emitting this
+    /// tick. Task timers always run in the fixed cron bucket; skill
+    /// timers choose foreground vs. background through frontmatter
+    /// `fork`.
+    async fn handle_timer_tick(&self, tick: timer::TimerTick) -> Result<()> {
+        if self.timer.is_none() {
+            return Ok(());
+        }
+        let notify = self.active_notify_target().await;
+        let timer_id = tick.timer_id;
+        match tick.target {
+            timer::TimerTarget::Task {
+                timer_title,
+                task_id,
+                task_subject,
+                prompt,
+            } => {
+                let task = exec::TaskExecution {
+                    task_id,
+                    task_subject: task_subject.clone(),
+                    prompt,
+                    trigger: exec::ExecTrigger::Timer {
+                        timer_id: timer_id.clone(),
+                        timer_title: timer_title.clone(),
+                    },
+                };
+                let label = format!("[timer:{timer_title} / task:{task_subject}]");
+                match self
+                    .run_in_forked_session(
+                        format!("timer: {timer_title}"),
+                        task.prompt.clone(),
+                        Some(timer_id),
+                        Some(task),
+                    )
+                    .await
+                {
+                    Ok(output) => {
+                        self.notify_background_output(notify, &label, &output).await;
+                    }
+                    Err(err) => {
+                        self.notify_background_error(notify, &label, &err).await;
+                    }
+                }
+            }
+            timer::TimerTarget::Skill { skill } => {
+                return self.handle_skill_timer_tick(timer_id, skill, notify).await;
+            }
+        }
+        Ok(())
+    }
+
+    async fn handle_skill_timer_tick(
+        &self,
+        timer_id: String,
+        skill: String,
+        notify: Option<(ChannelID, SessionID)>,
+    ) -> Result<()> {
+        let Some((body, fork)) = self
+            .skills
+            .get(&skill)
+            .map(|skill_def| (skill_def.body.clone(), skill_def.frontmatter.fork))
+        else {
+            eprintln!("[timer] skill timer {timer_id} references unknown skill /{skill}");
             return Ok(());
         };
-
-        let prompt = match self.heartbeat_decide(&tick).await {
-            Ok(HeartbeatDecision::Run { prompt }) => prompt,
-            Ok(HeartbeatDecision::Skip) => return Ok(()),
-            Err(err) => {
-                eprintln!("[heartbeat] phase-1 failed: {err}");
-                return Ok(());
+        let label = format!("[timer:{timer_id} / skill:{skill}]");
+        if fork {
+            match self
+                .run_in_forked_session(format!("skill timer: {skill}"), body, Some(timer_id), None)
+                .await
+            {
+                Ok(output) => {
+                    self.notify_background_output(notify, &label, &output).await;
+                }
+                Err(err) => {
+                    self.notify_background_error(notify, &label, &err).await;
+                }
             }
-        };
-
-        // HeartbeatTick hook fires once per phase-2-bound tick. A
-        // blocked hook drops the iteration so heartbeat-driven turns
-        // can be selectively muted (e.g. business-hours-only audit).
-        let pre = self
-            .hook
-            .fire(
-                HookEvent::HeartbeatTick,
-                None,
-                serde_json::json!({ "tick_at": tick.at.to_rfc3339() }),
-                &session.0.to_string(),
-                &self.cwd,
-            )
-            .await;
-        if pre.is_blocked() {
             return Ok(());
         }
 
-        let iter = Iteration {
-            session: session.clone(),
-            channel: target.clone(),
-            exec_id: None,
+        let Some((channel, session)) = notify else {
+            eprintln!("[timer] skipped foreground skill timer {label}: no active TUI session");
+            return Ok(());
         };
-        if let Err(err) = self.iteration(&iter, prompt).await {
+        let iter = Iteration::visible(session.clone(), channel.clone(), None);
+        if let Err(err) = self.iteration(&iter, body).await {
             let reply = OutboundMessage::new(
-                target.clone(),
-                session.clone(),
-                OutboundPayload::Error(err.to_string()),
+                channel.clone(),
+                session,
+                OutboundPayload::Error(format!("{label} {err}")),
             );
-            // Outbound bus closed during error reporting just means
-            // the channel layer is gone — same shutdown signal the
-            // dispatch path treats as `Ok(false)`. Heartbeat ticks
-            // can't propagate that, so drop and move on.
             let _ = self.out.send(reply).await;
         }
         let _ = self.send_turn_end(&iter).await;
         Ok(())
     }
 
-    /// Handle a cron tick.
-    ///
-    /// Unlike heartbeat there is no phase-1 decide step — the user
-    /// already told us when this job should run, so we go straight
-    /// into a phase-2 iteration with the job's prompt as the user
-    /// message. The outcome is reported back to
-    /// [`cron::CronEngine::report_outcome`] so consecutive-error
-    /// auto-disable can fire.
-    ///
-    /// Skipped silently when the `tui` channel has no active session
-    /// yet — same reasoning as heartbeat (no place to land output).
-    /// The engine still hears about the skip so `last_status` shows
-    /// it.
-    async fn handle_cron_tick(&self, tick: cron::CronTick) -> Result<()> {
-        let target = ChannelID::new(HEARTBEAT_TARGET_CHANNEL);
+    async fn active_notify_target(&self) -> Option<(ChannelID, SessionID)> {
+        let channel = ChannelID::new(DEFAULT_NOTIFY_CHANNEL);
         let session = {
             let map = self.active_sessions.lock().await;
-            map.get(&target).cloned()
-        };
-        let Some(session) = session else {
-            if let Some(engine) = self.cron.as_ref() {
-                engine
-                    .report_outcome(&tick.job_id, cron::RunStatus::Skipped, None)
-                    .await;
-            }
-            return Ok(());
-        };
-
-        // CronTick hook fires before the iteration. Matcher targets
-        // the job name so users can scope hooks per-job (`matcher:
-        // "daily-summary"`). A blocked hook reports `Skipped` to the
-        // engine so consecutive-error tracking doesn't fire.
-        let pre = self
-            .hook
-            .fire(
-                HookEvent::CronTick,
-                Some(&tick.job_name),
-                serde_json::json!({
-                    "job_id": tick.job_id,
-                    "job_name": tick.job_name,
-                }),
-                &session.0.to_string(),
-                &self.cwd,
-            )
-            .await;
-        if pre.is_blocked() {
-            if let Some(engine) = self.cron.as_ref() {
-                engine
-                    .report_outcome(&tick.job_id, cron::RunStatus::Skipped, None)
-                    .await;
-            }
-            return Ok(());
-        }
-
-        let iter = Iteration {
-            session: session.clone(),
-            channel: target.clone(),
-            exec_id: None,
-        };
-        match self.iteration(&iter, tick.prompt.clone()).await {
-            Ok(_) => {
-                if let Some(engine) = self.cron.as_ref() {
-                    engine
-                        .report_outcome(&tick.job_id, cron::RunStatus::Succeeded, None)
-                        .await;
-                }
-            }
-            Err(err) => {
-                let err_text = err.to_string();
-                if let Some(engine) = self.cron.as_ref() {
-                    engine
-                        .report_outcome(
-                            &tick.job_id,
-                            cron::RunStatus::Failed,
-                            Some(err_text.clone()),
-                        )
-                        .await;
-                }
-                let reply = OutboundMessage::new(
-                    target.clone(),
-                    session.clone(),
-                    OutboundPayload::Error(format!("[cron:{}] {err_text}", tick.job_name)),
-                );
-                let _ = self.out.send(reply).await;
-            }
-        }
-        let _ = self.send_turn_end(&iter).await;
-        Ok(())
+            map.get(&channel).cloned()
+        }?;
+        Some((channel, session))
     }
 
-    /// Handle a Markdown timer tick.
-    ///
-    /// Timers are the runtime form of `task + timer` state. The
-    /// scheduler has already advanced the timer before emitting this
-    /// tick, so this handler only routes the referenced task prompt
-    /// through the normal iteration loop.
-    async fn handle_timer_tick(&self, tick: timer::TimerTick) -> Result<()> {
-        if self.timer.is_none() {
-            return Ok(());
-        }
-        let target = ChannelID::new(HEARTBEAT_TARGET_CHANNEL);
-        let session = {
-            let map = self.active_sessions.lock().await;
-            map.get(&target).cloned()
-        };
-        let Some(session) = session else {
-            return Ok(());
-        };
-
-        let task = exec::TaskExecution {
-            task_id: tick.task_id.clone(),
-            task_subject: tick.task_subject.clone(),
-            prompt: tick.prompt.clone(),
-            trigger: exec::ExecTrigger::Timer {
-                timer_id: tick.timer_id.clone(),
-                timer_title: tick.timer_title.clone(),
-            },
-        };
-        let iter = match self
-            .execute_task_iteration(session.clone(), target.clone(), task)
-            .await
-        {
-            Ok(iter) => iter,
-            Err(err) => {
-                let reply = OutboundMessage::new(
-                    target.clone(),
-                    session.clone(),
-                    OutboundPayload::Error(format!(
-                        "[timer:{} / task:{}] {}",
-                        tick.timer_title, tick.task_subject, err
-                    )),
-                );
-                let _ = self.out.send(reply).await;
-                Iteration {
-                    session: session.clone(),
-                    channel: target.clone(),
-                    exec_id: None,
-                }
-            }
-        };
-        let _ = self.send_turn_end(&iter).await;
-        Ok(())
-    }
-
-    /// Execute one validated task through the normal visible agent
-    /// iteration and record the machine-readable execution stream.
-    async fn execute_task_iteration(
+    /// Execute one input in a fresh silent session under the fixed
+    /// cron bucket. Used by scheduled tasks and forked skill timers.
+    async fn run_in_forked_session(
         &self,
-        session: SessionID,
-        channel: ChannelID,
-        task: exec::TaskExecution,
-    ) -> Result<Iteration> {
-        let exec_id = match self
-            .exec
-            .start(task.start(session.clone(), channel.clone()))
-            .await
-        {
-            Ok(exec_id) => Some(exec_id),
-            Err(err) => {
-                eprintln!("[exec] failed to start execution log: {err}");
-                None
+        title: String,
+        input: String,
+        timer_id: Option<String>,
+        execution: Option<exec::TaskExecution>,
+    ) -> Result<String> {
+        let session = SessionID::new();
+        let channel = ChannelID::new(CRON_CHANNEL);
+        let exec_id = if let Some(execution) = execution.as_ref() {
+            match self
+                .exec
+                .start(execution.start(session.clone(), channel.clone()))
+                .await
+            {
+                Ok(exec_id) => Some(exec_id),
+                Err(err) => {
+                    eprintln!("[exec] failed to start execution log: {err}");
+                    None
+                }
             }
+        } else {
+            None
         };
-        let iter = Iteration {
-            session,
-            channel,
-            exec_id: exec_id.clone(),
-        };
-
-        match self.iteration(&iter, task.prompt).await {
+        let iter = Iteration::silent_cron(session.clone(), channel.clone(), exec_id.clone());
+        let memory_snapshot = self.capture_memory_snapshot(&iter).await;
+        self.cron_sessions
+            .create_with_memory_snapshot(&session, title, channel, memory_snapshot)
+            .await?;
+        let input = with_timer_context(input, timer_id.as_deref());
+        match self.iteration(&iter, input).await {
             Ok(output) => {
                 if let Some(exec_id) = exec_id.as_ref() {
-                    if let Err(err) = self.exec.final_output(exec_id, output).await {
+                    if let Err(err) = self.exec.final_output(exec_id, output.clone()).await {
                         eprintln!("[exec] failed to write final output: {err}");
                     }
                     if let Err(err) = self
@@ -766,7 +595,7 @@ impl Agent {
                         eprintln!("[exec] failed to finish execution log: {err}");
                     }
                 }
-                Ok(iter)
+                Ok(output)
             }
             Err(err) => {
                 if let Some(exec_id) = exec_id.as_ref()
@@ -780,6 +609,39 @@ impl Agent {
                 Err(err)
             }
         }
+    }
+
+    async fn notify_background_output(
+        &self,
+        notify: Option<(ChannelID, SessionID)>,
+        label: &str,
+        output: &str,
+    ) {
+        if !should_notify_background(output) {
+            return;
+        }
+        let Some((channel, session)) = notify else {
+            eprintln!("[timer] background output produced with no active TUI target: {label}");
+            return;
+        };
+        let text = format!("{label}\n\n{}", output.trim());
+        let msg = OutboundMessage::new(channel, session, OutboundPayload::Notice(text));
+        let _ = self.out.send(msg).await;
+    }
+
+    async fn notify_background_error(
+        &self,
+        notify: Option<(ChannelID, SessionID)>,
+        label: &str,
+        err: &Error,
+    ) {
+        let text = format!("{label} {err}");
+        let Some((channel, session)) = notify else {
+            eprintln!("{text}");
+            return;
+        };
+        let msg = OutboundMessage::new(channel, session, OutboundPayload::Error(text));
+        let _ = self.out.send(msg).await;
     }
 
     /// Handle a quiet Dream tick. Errors are logged and swallowed so a failed
@@ -818,52 +680,6 @@ impl Agent {
         Ok(())
     }
 
-    /// Phase-1: ask the model to call `heartbeat_decide` and report
-    /// `skip` or `run`. Any non-conforming response (no tool call,
-    /// wrong tool name, malformed JSON, `run` without `tasks`) is
-    /// folded into [`HeartbeatDecision::Skip`] so a confused model
-    /// errs on the side of staying silent.
-    async fn heartbeat_decide(&self, tick: &HeartbeatTick) -> Result<HeartbeatDecision> {
-        let model = self.model_snapshot();
-        let request = Request {
-            messages: self
-                .prompt
-                .heartbeat_decide_messages(&tick.content, tick.at),
-            tools: vec![heartbeat_decide_tool()],
-            model_name: model.profile.model_name.clone(),
-            max_tokens: Some(HEARTBEAT_DECIDE_MAX_TOKENS),
-            // Temperature deliberately left unset — see the title
-            // generation comment for the reasoning.
-            temperature: None,
-            timeout_secs: self.timeout_secs,
-            // Phase-1 is a structured tool call; the reasoning trace
-            // would be discarded anyway. Leave thinking off so even
-            // a thinking-capable model returns just the tool call.
-            thinking: Some(Thinking {
-                enabled: false,
-                reasoning_effort: None,
-            }),
-        };
-
-        let response = model.client.complete(request).await?;
-        let Some(call) = response
-            .tool_calls
-            .into_iter()
-            .flatten()
-            .find(|c| c.name == HEARTBEAT_DECIDE_TOOL_NAME)
-        else {
-            return Ok(HeartbeatDecision::Skip);
-        };
-
-        let args: HeartbeatDecideArgs = serde_json::from_str(&call.arguments).unwrap_or_default();
-        match args.action.as_str() {
-            "run" if !args.tasks.trim().is_empty() => {
-                Ok(HeartbeatDecision::Run { prompt: args.tasks })
-            }
-            _ => Ok(HeartbeatDecision::Skip),
-        }
-    }
-
     /// Dispatch one forwarded slash command through the agent layer
     /// and send a reply (when applicable) to the originating
     /// channel. Named to mirror `CliChannel::dispatch_command` — same
@@ -895,8 +711,6 @@ impl Agent {
         let ctx = AgentCommandCtx {
             channel: channel.clone(),
             session: session.clone(),
-            heartbeat: self.heartbeat.clone(),
-            cron: self.cron.clone(),
             memory: self.memory.clone(),
             discord: self.discord.clone(),
             wechat: self.wechat.clone(),
@@ -906,22 +720,6 @@ impl Agent {
 
         let payload = match parsed {
             SlashCommand::Switch(command) => self.run_switch_command(command),
-            SlashCommand::Heartbeat(command) => match run_heartbeat_command(command, &ctx).await {
-                CommandOutcome::Completed => return Ok(()),
-                CommandOutcome::Feedback(msg) => OutboundPayload::Notice(msg),
-                CommandOutcome::Exit => {
-                    eprintln!("[agent] command {body:?} returned Exit at agent layer; ignoring");
-                    return Ok(());
-                }
-            },
-            SlashCommand::Cron(command) => match run_cron_command(command, &ctx).await {
-                CommandOutcome::Completed => return Ok(()),
-                CommandOutcome::Feedback(msg) => OutboundPayload::Notice(msg),
-                CommandOutcome::Exit => {
-                    eprintln!("[agent] command {body:?} returned Exit at agent layer; ignoring");
-                    return Ok(());
-                }
-            },
             SlashCommand::Memory(command) => match run_memory_command(command, &ctx).await {
                 CommandOutcome::Completed => return Ok(()),
                 CommandOutcome::Feedback(msg) => OutboundPayload::Notice(msg),
@@ -1060,6 +858,13 @@ impl Agent {
         self.model.read().expect("model lock poisoned").clone()
     }
 
+    fn session_manager(&self, iter: &Iteration) -> &session::Manager {
+        match iter.scope {
+            SessionScope::Foreground => self.sessions.as_ref(),
+            SessionScope::Cron => self.cron_sessions.as_ref(),
+        }
+    }
+
     /// Auto-compact gate. Called by [`Self::iteration`] just before
     /// each LLM call. Returns the (possibly compacted) message list
     /// the call should use. Auto compaction is silent on success per
@@ -1111,7 +916,7 @@ impl Agent {
         .await
         {
             Ok((compacted, _report)) => {
-                self.sessions
+                self.session_manager(iter)
                     .append_compaction(&iter.session, compacted.clone())
                     .await?;
                 // Compaction rewrites the conversation prefix, so any
@@ -1153,7 +958,8 @@ impl Agent {
         session: SessionID,
         focus: Option<String>,
     ) -> Result<()> {
-        let messages = self.load_history(&session).await?;
+        let records = self.sessions.load(&session).await?;
+        let messages: Vec<Message> = records.into_iter().map(|r| r.message).collect();
         let summary_system = self.prompt.compact_summary_system(focus.as_deref());
         let _ = self
             .hook
@@ -1215,6 +1021,9 @@ impl Agent {
     /// continue, and there is nothing useful to do with the error
     /// at this granularity.
     async fn send_notice(&self, iter: &Iteration, text: &str) {
+        if !iter.is_visible() {
+            return;
+        }
         let msg = OutboundMessage::new(
             iter.channel.clone(),
             iter.session.clone(),
@@ -1224,6 +1033,9 @@ impl Agent {
     }
 
     async fn send_turn_end(&self, iter: &Iteration) -> Result<()> {
+        if !iter.is_visible() {
+            return Ok(());
+        }
         let msg = OutboundMessage::new(
             iter.channel.clone(),
             iter.session.clone(),
@@ -1261,7 +1073,7 @@ impl Agent {
         }
 
         let memory_snapshot = self.ensure_session(iter, &user_text).await?;
-        self.sessions
+        self.session_manager(iter)
             .append(&iter.session, Message::User { content: user_text })
             .await?;
 
@@ -1273,7 +1085,7 @@ impl Agent {
                 return Err(Error::MaxIterationsExceeded(cap));
             }
 
-            let messages = self.load_history(&iter.session).await?;
+            let messages = self.load_history(iter).await?;
             let messages = self.maybe_auto_compact(iter, messages).await?;
             // Prepend the freshly-built iteration system prompt
             // here rather than persisting it: env_info changes every
@@ -1297,7 +1109,7 @@ impl Agent {
             } else {
                 content.clone()
             };
-            self.sessions
+            self.session_manager(iter)
                 .append(
                     &iter.session,
                     Message::Assistant {
@@ -1367,7 +1179,9 @@ impl Agent {
             };
             self.record_blocked_tool_result(iter, &call.name, &blocked_msg)
                 .await;
-            self.sessions.append(&iter.session, blocked_msg).await?;
+            self.session_manager(iter)
+                .append(&iter.session, blocked_msg)
+                .await?;
             return Ok(());
         }
 
@@ -1404,7 +1218,9 @@ impl Agent {
             eprintln!("[exec] failed to record tool result: {err}");
         }
         for msg in messages {
-            self.sessions.append(&iter.session, msg).await?;
+            self.session_manager(iter)
+                .append(&iter.session, msg)
+                .await?;
         }
 
         let post_payload = serde_json::json!({
@@ -1693,8 +1509,7 @@ impl Agent {
 
     /// Render the iteration system prompt and prepend it to
     /// `messages`. Called from [`Self::iteration`] only — the title
-    /// and heartbeat-decide call paths use their own specialized
-    /// prompts and must not see the iteration system block.
+    /// prompt and must not see the iteration system block.
     fn prepend_iteration_system(&self, mut messages: Vec<Message>) -> Vec<Message> {
         let model = self.model_snapshot();
         let ctx = PromptContext {
@@ -1747,22 +1562,26 @@ impl Agent {
 
             if let Some(delta) = chunk.thinking_delta {
                 thinking.push_str(&delta);
-                let msg = OutboundMessage::new(
-                    iter.channel.clone(),
-                    iter.session.clone(),
-                    OutboundPayload::ThinkingDelta { stream_id, delta },
-                );
-                self.out.send(msg).await?;
+                if iter.is_visible() {
+                    let msg = OutboundMessage::new(
+                        iter.channel.clone(),
+                        iter.session.clone(),
+                        OutboundPayload::ThinkingDelta { stream_id, delta },
+                    );
+                    self.out.send(msg).await?;
+                }
             }
 
             if let Some(delta) = chunk.content_delta {
                 content.push_str(&delta);
-                let msg = OutboundMessage::new(
-                    iter.channel.clone(),
-                    iter.session.clone(),
-                    OutboundPayload::ReplyDelta { stream_id, delta },
-                );
-                self.out.send(msg).await?;
+                if iter.is_visible() {
+                    let msg = OutboundMessage::new(
+                        iter.channel.clone(),
+                        iter.session.clone(),
+                        OutboundPayload::ReplyDelta { stream_id, delta },
+                    );
+                    self.out.send(msg).await?;
+                }
             }
 
             if let Some(deltas) = chunk.tool_call_deltas {
@@ -1788,12 +1607,14 @@ impl Agent {
             }
         }
 
-        let end = OutboundMessage::new(
-            iter.channel.clone(),
-            iter.session.clone(),
-            OutboundPayload::ReplyEnd { stream_id },
-        );
-        self.out.send(end).await?;
+        if iter.is_visible() {
+            let end = OutboundMessage::new(
+                iter.channel.clone(),
+                iter.session.clone(),
+                OutboundPayload::ReplyEnd { stream_id },
+            );
+            self.out.send(end).await?;
+        }
 
         Ok(CallOutcome {
             content,
@@ -1808,12 +1629,13 @@ impl Agent {
     /// from the user's opening message. If title generation fails or
     /// returns empty, falls back to a truncated prefix of the input.
     async fn ensure_session(&self, iter: &Iteration, first_text: &str) -> Result<String> {
-        if let Some(metadata) = self.sessions.metadata(&iter.session).await? {
+        let sessions = self.session_manager(iter);
+        if let Some(metadata) = sessions.metadata(&iter.session).await? {
             if let Some(snapshot) = metadata.memory_snapshot {
                 return Ok(snapshot);
             }
             if let Some(snapshot) = self.capture_memory_snapshot(iter).await {
-                self.sessions
+                sessions
                     .set_memory_snapshot(&iter.session, Some(snapshot.clone()))
                     .await?;
                 return Ok(snapshot);
@@ -1825,7 +1647,7 @@ impl Agent {
             _ => fallback_title(first_text),
         };
         let memory_snapshot = self.capture_memory_snapshot(iter).await;
-        self.sessions
+        sessions
             .create_with_memory_snapshot(
                 &iter.session,
                 title,
@@ -1876,8 +1698,8 @@ impl Agent {
 
     /// Project the session's record stream into the flat
     /// [`Message`] sequence the LLM request consumes.
-    async fn load_history(&self, session: &SessionID) -> Result<Vec<Message>> {
-        let records = self.sessions.load(session).await?;
+    async fn load_history(&self, iter: &Iteration) -> Result<Vec<Message>> {
+        let records = self.session_manager(iter).load(&iter.session).await?;
         Ok(records.into_iter().map(|r| r.message).collect())
     }
 
@@ -1966,6 +1788,18 @@ fn serialize_json(value: &serde_json::Value) -> String {
     serde_json::to_string(value).expect("serde_json::Value always serializes")
 }
 
+fn with_timer_context(input: String, timer_id: Option<&str>) -> String {
+    let Some(timer_id) = timer_id else {
+        return input;
+    };
+    format!("# Background timer run\n\nTimer ID: {timer_id}\n\n{input}")
+}
+
+fn should_notify_background(output: &str) -> bool {
+    let trimmed = output.trim();
+    !trimmed.is_empty() && !trimmed.to_ascii_uppercase().contains(SILENT_MARKER)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2010,6 +1844,14 @@ mod tests {
             panic!("expected system message");
         };
         assert_eq!(content, "system");
+    }
+
+    #[test]
+    fn background_notification_respects_silent_marker() {
+        assert!(!should_notify_background(""));
+        assert!(!should_notify_background("  [SILENT]  "));
+        assert!(!should_notify_background("done\n\n[silent]"));
+        assert!(should_notify_background("Review the blocked timer."));
     }
 }
 
@@ -2059,15 +1901,4 @@ fn fallback_title(text: &str) -> String {
     } else {
         truncated
     }
-}
-
-/// Outcome of heartbeat phase-1.
-enum HeartbeatDecision {
-    /// Model said "nothing to do" (or returned a malformed answer
-    /// that the agent folds into the same branch — better silent
-    /// than wrong).
-    Skip,
-    /// Model said "run" and produced a `tasks` summary; that summary
-    /// becomes the phase-2 user message.
-    Run { prompt: String },
 }

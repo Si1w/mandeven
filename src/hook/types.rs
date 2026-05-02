@@ -7,14 +7,11 @@ use serde::{Deserialize, Serialize};
 
 /// Lifecycle events that can fire hooks.
 ///
-/// 9 events for v1 — pared down from Claude Code's 28 to the subset
+/// 7 events for v1 — pared down from Claude Code's 28 to the subset
 /// mandeven actually produces today (no permission system, no
 /// subagents, no IDE integration). Adding more events as features
 /// land is a matter of inserting a variant here and a `fire` call at
 /// the new trigger point.
-///
-/// `HeartbeatTick` and `CronTick` are mandeven-specific (Claude Code
-/// has neither).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize, Serialize)]
 pub enum HookEvent {
     /// Fires when the agent receives a user message but before the
@@ -39,12 +36,6 @@ pub enum HookEvent {
     /// Fires after a successful compact pass. Same payload shape as
     /// `PreCompact`.
     PostCompact,
-    /// Fires for every heartbeat tick that produces a phase-2
-    /// iteration. Payload includes `tick_at` (RFC3339 timestamp).
-    HeartbeatTick,
-    /// Fires for every cron job tick. Payload includes `job_id` and
-    /// `job_name`. `target = job_name` for matcher purposes.
-    CronTick,
 }
 
 /// One shell-command hook definition.
@@ -76,7 +67,6 @@ pub struct CommandHook {
 /// `matcher` is a regex tested against the event's "target" field:
 ///
 /// - `PreToolUse` / `PostToolUse` → tool name
-/// - `CronTick` → job name
 /// - other events → no target; matcher is ignored (treat as
 ///   "always match")
 ///

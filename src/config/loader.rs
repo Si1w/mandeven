@@ -144,9 +144,8 @@ impl AppConfig {
     /// 2. `llm.default` parses as `"provider/model"` with exactly one `/`
     ///    and non-empty sides.
     /// 3. The referenced provider and model both exist in `providers`.
-    /// 4. `agent.heartbeat.interval_secs` is greater than zero.
-    /// 5. `agent.memory.snapshot_limit` is greater than zero.
-    /// 6. `agent.dream.schedule` parses and Dream budgets/limits are non-zero.
+    /// 4. `agent.memory.snapshot_limit` is greater than zero.
+    /// 5. `agent.dream.schedule` parses and Dream budgets/limits are non-zero.
     fn validate(&self) -> Result<()> {
         if self.llm.providers.is_empty() {
             return Err(ConfigError::Invalid {
@@ -173,13 +172,6 @@ impl AppConfig {
             });
         }
 
-        if self.agent.heartbeat.interval_secs == 0 {
-            return Err(ConfigError::Invalid {
-                field: "agent.heartbeat.interval_secs",
-                reason: "must be greater than zero".into(),
-            });
-        }
-
         if self.agent.memory.snapshot_limit == 0 {
             return Err(ConfigError::Invalid {
                 field: "agent.memory.snapshot_limit",
@@ -187,7 +179,7 @@ impl AppConfig {
             });
         }
 
-        crate::cron::Schedule::cron(&self.agent.dream.schedule).map_err(|err| {
+        crate::timer::Schedule::cron(&self.agent.dream.schedule).map_err(|err| {
             ConfigError::Invalid {
                 field: "agent.dream.schedule",
                 reason: err.to_string(),
@@ -366,28 +358,6 @@ mod tests {
         let parsed: AppConfig = toml::from_str(text).expect("deserialize");
 
         assert!(!parsed.tui.show_thinking);
-    }
-
-    #[test]
-    fn from_file_rejects_zero_heartbeat_interval() {
-        let path = std::env::temp_dir().join(format!("mandeven-config-{}.toml", Uuid::now_v7()));
-        let text = r#"
-            [llm]
-            default = "acme/my-profile"
-
-            [llm.acme.my-profile]
-            model_name = "upstream-model"
-            max_context_window = 128000
-
-            [agent.heartbeat]
-            interval_secs = 0
-        "#;
-        std::fs::write(&path, text).unwrap();
-
-        let err = AppConfig::from_file(&path).unwrap_err().to_string();
-
-        assert!(err.contains("agent.heartbeat.interval_secs"));
-        let _ = std::fs::remove_file(path);
     }
 
     #[test]

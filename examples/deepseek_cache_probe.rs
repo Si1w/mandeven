@@ -4,12 +4,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use mandeven::config::{self, AppConfig, LLMProfile};
-use mandeven::cron::CronEngine;
 use mandeven::llm::{Message, Request, Thinking};
 use mandeven::prompt::{PromptContext, PromptEngine};
 use mandeven::security::SandboxPolicy;
 use mandeven::skill::{self, SkillIndex};
 use mandeven::task;
+use mandeven::timer;
 use mandeven::tools;
 use mandeven::utils::workspace;
 
@@ -31,17 +31,18 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     SandboxPolicy::init(cfg.sandbox.policy);
 
     let skills = Arc::new(load_skills(&cfg)?);
+    if cfg.agent.skill.enabled {
+        timer::sync_skill_timers(&cfg.data_dir(), &skills).await?;
+    }
     let prompts = PromptEngine::load(&cfg.data_dir(), &skills)?;
     let mut registry = tools::Registry::new();
+    let project_bucket = config::project_bucket(&cwd);
     tools::register_builtins(&mut registry);
-    tools::task::register(
+    tools::task::register(&mut registry, Arc::new(task::Manager::new(&project_bucket)));
+    tools::timer::register(
         &mut registry,
-        Arc::new(task::Manager::new(&config::project_bucket(&cwd))),
+        Arc::new(timer::Manager::new(&project_bucket)),
     );
-    if cfg.agent.cron.enabled {
-        let (engine, _rx) = CronEngine::new(&cfg.agent.cron, &cfg.data_dir()).await?;
-        tools::cron::register(&mut registry, Arc::new(engine));
-    }
     if !skills.is_empty() {
         registry.register(Arc::new(tools::skill::SkillTool::new(skills.clone())));
     }
@@ -139,6 +140,7 @@ fn default_profile(
 
 fn load_skills(cfg: &AppConfig) -> Result<SkillIndex, Box<dyn Error + Send + Sync>> {
     if cfg.agent.skill.enabled {
+        skill::seed_builtins(&cfg.data_dir())?;
         Ok(skill::load(&cfg.data_dir().join(skill::SKILLS_SUBDIR))?)
     } else {
         Ok(SkillIndex::new())

@@ -1,9 +1,8 @@
 //! Persistence for the Discord adapter's allowlist.
 //!
-//! Lives at `<data_dir>/discord/allowlist.json`. Same naming
-//! convention as `cron/jobs.json` — runtime-mutable state goes into
-//! a JSON sidecar so users can change it via slash commands without
-//! editing `mandeven.toml`.
+//! Lives at `<data_dir>/discord/allowlist.json`. Runtime-mutable
+//! state goes into a JSON sidecar so users can change it via slash
+//! commands without editing `mandeven.toml`.
 //!
 //! Writes are atomic: payload is staged in a `<file>.tmp` sibling
 //! and `rename`d into place, so a crash mid-write never leaves the
@@ -18,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use tokio::fs;
 
 /// Subdirectory of the data dir holding Discord-specific runtime
-/// state. Lives next to `cron/`, `projects/`, etc.
+/// state. Lives next to `projects/`, etc.
 pub const DISCORD_SUBDIR: &str = "discord";
 
 /// Filename inside [`DISCORD_SUBDIR`] holding the user-id allowlist.

@@ -1,5 +1,5 @@
-//! Channels — adapters between external sources (terminal, cron,
-//! heartbeat, future IM platforms) and the internal [`crate::bus`].
+//! Channels — adapters between external sources (terminal, future IM
+//! platforms) and the internal [`crate::bus`].
 //!
 //! Each concrete channel implements [`Channel`]:
 //!
@@ -14,8 +14,8 @@
 //!
 //! Layout convention:
 //!
-//! - **Terminal / local adapters** (`tui/`, `cron/`, `heartbeat/`)
-//!   live at the crate root and implement [`Channel`] directly.
+//! - **Terminal / local adapters** (`tui/`) live at the crate root and
+//!   implement [`Channel`] directly.
 //! - **External / network adapters** (future: `discord/`, `slack/`,
 //!   `telegram/`, …) live as subdirectories of this module.
 //

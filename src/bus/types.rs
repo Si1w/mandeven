@@ -43,7 +43,7 @@ impl Default for SessionID {
 }
 
 /// Human-readable identifier for a channel (for example `"cli"`,
-/// `"tui"`, `"cron"`).
+/// `"tui"`, `"discord"`).
 ///
 /// `#[serde(transparent)]` so session-metadata JSONL stores the
 /// channel as a bare string (`"channel": "tui"`) rather than a

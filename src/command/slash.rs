@@ -27,10 +27,6 @@ pub enum SlashCommand {
     Switch(SwitchCommand),
     /// `/compact [focus...]`
     Compact { focus: Option<String> },
-    /// `/heartbeat ...`
-    Heartbeat(HeartbeatCommand),
-    /// `/cron ...`
-    Cron(CronCommand),
     /// `/memory ...`
     Memory(MemoryCommand),
     /// `/discord ...`
@@ -53,36 +49,6 @@ pub enum SwitchCommand {
     ShowDefault,
     /// `/switch default <provider/profile>`
     SetDefault { profile_id: String },
-}
-
-/// Parsed `/heartbeat` command.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum HeartbeatCommand {
-    /// `/heartbeat`
-    Status,
-    /// `/heartbeat pause`
-    Pause,
-    /// `/heartbeat resume`
-    Resume,
-    /// `/heartbeat trigger`
-    Trigger,
-    /// `/heartbeat interval <seconds>`
-    Interval { seconds: u64 },
-}
-
-/// Parsed `/cron` command.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum CronCommand {
-    /// `/cron` or `/cron list`
-    List,
-    /// `/cron trigger <id>`
-    Trigger { id: String },
-    /// `/cron enable <id>`
-    Enable { id: String },
-    /// `/cron disable <id>`
-    Disable { id: String },
-    /// `/cron remove <id>`
-    Remove { id: String },
 }
 
 /// Parsed `/memory` command.
@@ -183,8 +149,6 @@ enum RawCommand {
     },
     Switch(SwitchArgs),
     Compact(CompactArgs),
-    Heartbeat(HeartbeatArgs),
-    Cron(CronArgs),
     Memory(MemoryArgs),
     Discord(DiscordArgs),
     Wechat(WechatArgs),
@@ -216,50 +180,6 @@ enum SwitchSubcommand {
     },
     #[command(external_subcommand)]
     Runtime(Vec<String>),
-}
-
-#[derive(Debug, Args)]
-struct HeartbeatArgs {
-    #[command(subcommand)]
-    command: Option<HeartbeatSubcommand>,
-}
-
-#[derive(Debug, Subcommand)]
-enum HeartbeatSubcommand {
-    Pause,
-    Resume,
-    Trigger,
-    Interval {
-        #[arg(value_name = "seconds")]
-        seconds: u64,
-    },
-}
-
-#[derive(Debug, Args)]
-struct CronArgs {
-    #[command(subcommand)]
-    command: Option<CronSubcommand>,
-}
-
-#[derive(Debug, Subcommand)]
-enum CronSubcommand {
-    List,
-    Trigger {
-        #[arg(value_name = "id")]
-        id: String,
-    },
-    Enable {
-        #[arg(value_name = "id")]
-        id: String,
-    },
-    Disable {
-        #[arg(value_name = "id")]
-        id: String,
-    },
-    Remove {
-        #[arg(value_name = "id")]
-        id: String,
-    },
 }
 
 #[derive(Debug, Args)]
@@ -372,8 +292,6 @@ impl TryFrom<RawCommand> for SlashCommand {
             RawCommand::Compact(args) => Ok(Self::Compact {
                 focus: non_empty_join(&args.focus),
             }),
-            RawCommand::Heartbeat(args) => Ok(Self::Heartbeat(args.into())),
-            RawCommand::Cron(args) => Ok(Self::Cron(args.into())),
             RawCommand::Memory(args) => args.try_into().map(Self::Memory),
             RawCommand::Discord(args) => Ok(Self::Discord(args.into())),
             RawCommand::Wechat(args) => Ok(Self::Wechat(args.into())),
@@ -402,30 +320,6 @@ impl TryFrom<SwitchArgs> for SwitchCommand {
                     Err("usage: /switch <provider/profile>".to_string())
                 }
             }
-        }
-    }
-}
-
-impl From<HeartbeatArgs> for HeartbeatCommand {
-    fn from(value: HeartbeatArgs) -> Self {
-        match value.command {
-            None => Self::Status,
-            Some(HeartbeatSubcommand::Pause) => Self::Pause,
-            Some(HeartbeatSubcommand::Resume) => Self::Resume,
-            Some(HeartbeatSubcommand::Trigger) => Self::Trigger,
-            Some(HeartbeatSubcommand::Interval { seconds }) => Self::Interval { seconds },
-        }
-    }
-}
-
-impl From<CronArgs> for CronCommand {
-    fn from(value: CronArgs) -> Self {
-        match value.command {
-            None | Some(CronSubcommand::List) => Self::List,
-            Some(CronSubcommand::Trigger { id }) => Self::Trigger { id },
-            Some(CronSubcommand::Enable { id }) => Self::Enable { id },
-            Some(CronSubcommand::Disable { id }) => Self::Disable { id },
-            Some(CronSubcommand::Remove { id }) => Self::Remove { id },
         }
     }
 }
@@ -575,16 +469,6 @@ mod tests {
             }
         );
         assert_eq!(
-            parse("heartbeat interval 30").unwrap(),
-            SlashCommand::Heartbeat(HeartbeatCommand::Interval { seconds: 30 })
-        );
-        assert_eq!(
-            parse("cron trigger job-1").unwrap(),
-            SlashCommand::Cron(CronCommand::Trigger {
-                id: "job-1".to_string(),
-            })
-        );
-        assert_eq!(
             parse("memory").unwrap(),
             SlashCommand::Memory(MemoryCommand::List)
         );
@@ -691,6 +575,20 @@ mod tests {
             SlashCommand::External {
                 name: "draft".to_string(),
                 args: vec!["arg1".to_string(), "arg2".to_string()],
+            }
+        );
+        assert_eq!(
+            parse("cron trigger job-1").unwrap(),
+            SlashCommand::External {
+                name: "cron".to_string(),
+                args: vec!["trigger".to_string(), "job-1".to_string()],
+            }
+        );
+        assert_eq!(
+            parse("heartbeat interval 30").unwrap(),
+            SlashCommand::External {
+                name: "heartbeat".to_string(),
+                args: vec!["interval".to_string(), "30".to_string()],
             }
         );
     }

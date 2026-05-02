@@ -11,12 +11,14 @@
 //! ~/.mandeven/                            ← override with $MANDEVEN_HOME
 //!   mandeven.toml                         ← global config
 //!   AGENTS.md                             ← global agent instructions
-//!   HEARTBEAT.md                          ← global heartbeat checklist
-//!   cron/jobs.json                        ← global cron jobs
-//!   projects/                             ← per-project session/task/memory bucket
+//!   timers.json                           ← global skill timers
+//!   skills/                               ← editable skill definitions
+//!   projects/                             ← per-project session/task/memory/timer bucket
+//!     cron/                               ← background timer/task sessions
 //!     -Users-foo-projectA/
 //!       <session-uuid>.jsonl
 //!       tasks/
+//!       timers/
 //!       memory/
 //! ```
 //!
@@ -42,6 +44,9 @@ pub const CONFIG_FILENAME: &str = "mandeven.toml";
 
 /// Subdirectory of [`HOME_SUBDIR`] holding per-project session/task/memory buckets.
 pub const PROJECTS_SUBDIR: &str = "projects";
+
+/// Fixed project bucket name for background timer/task sessions.
+pub const CRON_BUCKET_NAME: &str = "cron";
 
 /// Reserved name for future project-local overrides. Not consumed yet
 /// — see the module-level docstring.
@@ -92,6 +97,12 @@ pub fn projects_dir() -> PathBuf {
 #[must_use]
 pub fn project_bucket(cwd: &Path) -> PathBuf {
     projects_dir().join(sanitize_path(&cwd.to_string_lossy()))
+}
+
+/// Fixed bucket for background work kicked off by timers.
+#[must_use]
+pub fn cron_bucket() -> PathBuf {
+    projects_dir().join(CRON_BUCKET_NAME)
 }
 
 /// Sanitize a path so it survives as a single filesystem component on

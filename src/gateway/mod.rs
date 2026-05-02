@@ -80,10 +80,9 @@ pub fn dispatch_channel() -> (DispatchSender, DispatchReceiver) {
 
 /// Bindings from a channel to its currently active storage session.
 /// Owned by the gateway as the binding authority but cloned out to
-/// other subsystems (e.g. [`crate::heartbeat`], so a heartbeat tick
-/// can run inside the user's main session rather than spinning up an
-/// isolated one). `/new` and `/load` mutate the map; readers see the
-/// switch automatically through the shared `Arc`.
+/// other subsystems (for example background timer notifications).
+/// `/new` and `/load` mutate the map; readers see the switch
+/// automatically through the shared `Arc`.
 pub type ActiveSessions = Arc<Mutex<HashMap<ChannelID, SessionID>>>;
 
 /// Gateway — owns the inbound routing loop plus the session

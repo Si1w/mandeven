@@ -5,9 +5,8 @@
 //! `agent-examples/claude-code-analysis/src/utils/hooks.ts` and
 //! `src/types/hooks.ts`), pared down to what mandeven needs today:
 //!
-//! - 9 events ([`HookEvent`]) — `UserPromptSubmit`, `Pre/PostToolUse`,
-//!   `SessionStart`, `Stop`, `Pre/PostCompact`, plus mandeven-specific
-//!   `HeartbeatTick` / `CronTick`.
+//! - 7 events ([`HookEvent`]) — `UserPromptSubmit`, `Pre/PostToolUse`,
+//!   `SessionStart`, `Stop`, and `Pre/PostCompact`.
 //! - 1 hook type — shell `command`. Claude Code also has `prompt`,
 //!   `agent`, `http`; v1 doesn't. Future use cases can wrap a shell
 //!   command around `curl` etc.
@@ -41,8 +40,7 @@
 //! ```
 //!
 //! Hook definitions live in `~/.mandeven/hooks.json` so they can be
-//! added or removed at runtime without editing the toml — same shape
-//! as `cron/jobs.json`.
+//! added or removed at runtime without editing the toml.
 
 pub mod engine;
 pub mod error;
@@ -55,7 +53,7 @@ pub use types::{CommandHook, HookEvent, HookFile, HookMatcher};
 use serde::{Deserialize, Serialize};
 
 /// Filename inside [`crate::config::home_dir`] holding hook
-/// definitions. Same naming convention as `cron/jobs.json`.
+/// definitions.
 pub const HOOKS_FILENAME: &str = "hooks.json";
 
 /// Default per-hook timeout when the user doesn't specify one. 30s
@@ -66,7 +64,7 @@ pub const HOOK_TIMEOUT_SECS_DEFAULT: u64 = 30;
 ///
 /// `enabled = false` skips loading `hooks.json` and bypasses every
 /// `fire()` call (returns an empty result). Same shape as
-/// `[agent.cron]` / `[agent.skill]`.
+/// `[agent.skill]`.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct HookConfig {
     /// When `false`, the engine constructs as a no-op: no scan, no

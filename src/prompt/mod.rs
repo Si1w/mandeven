@@ -13,21 +13,21 @@
 //!   section name. Stable sections go through it so the bytes the
 //!   model sees are byte-identical turn after turn, keeping
 //!   `DeepSeek`'s automatic prefix cache hot.
-//! - [`templates`] — the three v1 static sections (`intro`,
-//!   `system_rules`, `tone`).
+//! - [`static_prompt`] — the built-in static system-prompt manifest
+//!   whose prose lives in `src/prompt/static/*.md`.
 //! - [`context`] — boot-time and per-call dynamic content
 //!   (`AGENTS.md`, `env_info`).
-//! - [`specialized`] — single-purpose prompts (title generation,
-//!   heartbeat phase-1, compact summary) that do **not** share
-//!   sections with the main iteration prompt.
+//! - [`specialized`] — single-purpose prompts (title generation and
+//!   compact summary) that do **not** share sections with the main
+//!   iteration prompt.
 //!
 //! ## Static / dynamic discipline
 //!
-//! [`engine::PromptEngine::iteration_system`] always emits sections
-//! with `cache_break: false` first and `cache_break: true` last —
-//! [`section::SystemPrompt::push`] debug-asserts the rule. Once a
-//! volatile section appears, every byte after it is unstable, so
-//! placing more stable sections downstream would be a wasted slot.
+//! [`engine::PromptEngine::iteration_system`] emits built-in static
+//! Markdown sections first, then boot-time and run-stable dynamic
+//! sections. All rendered sections go through [`section::SectionCache`]
+//! so the bytes sent to the model stay stable until an explicit cache
+//! clear.
 //!
 //! ## Project-local overlay (deferred)
 //!
@@ -43,7 +43,7 @@ pub mod engine;
 pub mod error;
 pub mod section;
 pub mod specialized;
-pub mod templates;
+pub mod static_prompt;
 
 pub use context::AGENTS_FILENAME;
 pub use engine::{PromptContext, PromptEngine};

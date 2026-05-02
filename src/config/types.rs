@@ -11,9 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use super::paths;
 use crate::agent::compact::CompactConfig;
-use crate::cron::CronConfig;
 use crate::dream::DreamConfig;
-use crate::heartbeat::HeartbeatConfig;
 use crate::hook::HookConfig;
 use crate::memory::MemoryConfig;
 use crate::security::SandboxConfig;
@@ -179,13 +177,6 @@ pub struct AgentConfig {
     /// one LLM call plus any tool dispatch it triggers.
     pub max_iterations: Option<u8>,
 
-    /// Per-agent heartbeat configuration. Keeping the block on the
-    /// agent rather than at the root mirrors openclaw's
-    /// `agents.defaults.heartbeat` and leaves room for the eventual
-    /// `[agent.list.<name>.heartbeat]` per-agent overrides.
-    #[serde(default)]
-    pub heartbeat: HeartbeatConfig,
-
     /// Conversation-compaction configuration. Sets the auto-trigger
     /// thresholds, preserve-region budgets, and circuit-breaker
     /// limits used by [`crate::agent::compact`]. All fields are
@@ -194,21 +185,15 @@ pub struct AgentConfig {
     #[serde(default)]
     pub compact: CompactConfig,
 
-    /// Per-agent cron configuration. Just the on/off switch — job
-    /// definitions live in `~/.mandeven/cron/jobs.json` so they can
-    /// be added or removed at runtime without editing `mandeven.toml`.
-    #[serde(default)]
-    pub cron: CronConfig,
-
     /// Per-agent skill configuration. Just the on/off switch —
     /// skill definitions live in `~/.mandeven/skills/<name>/SKILL.md`
-    /// and are discovered at boot. Same pattern as cron.
+    /// and are discovered at boot.
     #[serde(default)]
     pub skill: SkillConfig,
 
     /// Per-agent hook configuration. Just the on/off switch — hook
     /// definitions live in `~/.mandeven/hooks.json` and are loaded
-    /// at boot. Same pattern as cron and skill.
+    /// at boot. Same pattern as skill.
     #[serde(default)]
     pub hook: HookConfig,
 
@@ -229,9 +214,9 @@ impl AppConfig {
     ///
     /// Always resolves through [`paths::home_dir`] (i.e.
     /// `$MANDEVEN_HOME` if set, else `~/.mandeven/`). All
-    /// agent-managed state — `AGENTS.md`, `HEARTBEAT.md`,
-    /// `cron/jobs.json`, and per-project `projects/<bucket>/`
-    /// session/task/memory directories — lives under this root.
+    /// agent-managed state — `AGENTS.md`, global timer state,
+    /// editable skills, and per-project `projects/<bucket>/`
+    /// session/task/memory/timer directories — lives under this root.
     ///
     /// Independent of `source_path`: the config file location is for
     /// diagnostics only. This guarantees `data_dir()` is consistent

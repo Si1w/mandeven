@@ -10,9 +10,9 @@
 //!
 //! Mirrors Claude Code's
 //! [`SkillTool`](agent-examples/claude-code-analysis/src/tools/SkillTool/SkillTool.ts)
-//! "inline" execution mode. The "fork" mode (running the skill as a
-//! subagent) is not implemented and is unlikely to be — mandeven has
-//! no subagent system today.
+//! inline execution mode. `fork: true` is only a timer-runtime hint;
+//! direct model `skill_use` calls always inject into the current
+//! conversation.
 
 use std::sync::Arc;
 
@@ -112,6 +112,10 @@ mod tests {
             frontmatter: SkillFrontmatter {
                 name: name.into(),
                 description: format!("desc for {name}"),
+                allowed_tools: Vec::new(),
+                user_invocable: true,
+                timers: None,
+                fork: false,
             },
             body: body.into(),
             source_path: PathBuf::from(format!("/tmp/{name}/SKILL.md")),

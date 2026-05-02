@@ -1,11 +1,10 @@
-//! Schedule grammar — three flavors that mirror the openclaw / nanobot /
-//! claw0 consensus: one-shot `at`, fixed-interval `every`, and a
-//! Vixie-style `cron` expression.
+//! Schedule grammar for timer-backed automation.
 //!
-//! The runtime form keeps the parsed [`cron::Schedule`] eagerly compiled
-//! so per-tick `next_after` calls are allocation-free; serde round-trips
-//! through `ScheduleSpec` (JSON shape) so the file store keeps just the
-//! expression string.
+//! Timers support one-shot `at`, fixed-interval `every`, and
+//! Vixie-style `cron` expressions. The runtime form keeps the parsed
+//! [`cron::Schedule`] eagerly compiled so per-tick `next_after` calls
+//! are allocation-free; serde round-trips through `ScheduleSpec` so
+//! the file store keeps just the raw fields.
 
 use std::str::FromStr;
 
@@ -24,53 +23,41 @@ pub enum ScheduleError {
     #[error("cron expression must not be empty")]
     EmptyCronExpression,
 
-    /// Cron expression failed [`cron::Schedule`] parsing. Holds the
-    /// original input plus the underlying parser error so users can
-    /// fix typos without diving into the cron crate's docs.
+    /// Cron expression failed [`cron::Schedule`] parsing.
     #[error("invalid cron expression {expr:?}: {source}")]
     InvalidCronExpression {
+        /// Original user input.
         expr: String,
+        /// Parser failure from the `cron` crate.
         #[source]
         source: cron::error::Error,
     },
 }
 
-/// One scheduling rule attached to a [`crate::cron::CronJob`].
+/// One scheduling rule attached to a timer.
 ///
-/// Uses `ScheduleSpec` as its serde shape so the persisted JSON only
-/// stores raw fields (no compiled cron AST). Construct via the typed
-/// helpers ([`Schedule::at`] / [`Schedule::every`] / [`Schedule::cron`])
-/// rather than building variants directly — they centralize validation.
+/// Uses `ScheduleSpec` as its serde shape so persisted state only
+/// stores raw fields. Construct via [`Schedule::at`],
+/// [`Schedule::every`], or [`Schedule::cron`] so validation stays in
+/// one place.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(try_from = "ScheduleSpec", into = "ScheduleSpec")]
 pub enum Schedule {
-    /// Fire once at an absolute UTC instant. After firing, the job's
-    /// `next_run_at` is set to `None` and the engine disables it (or
-    /// removes it, with `delete_after_run`).
+    /// Fire once at an absolute UTC instant.
     At {
-        /// Wall-clock instant at which the job should fire.
+        /// Wall-clock instant at which the timer should fire.
         at: DateTime<Utc>,
     },
 
-    /// Recurring fixed interval, anchored to a reference point so step
-    /// boundaries are predictable across restarts. The default anchor
-    /// is the job's creation instant (filled in by the engine).
+    /// Recurring fixed interval, anchored to a reference point.
     Every {
         /// Interval between consecutive fires.
         interval: Duration,
-        /// Reference point for step alignment. `next_after(now)`
-        /// rounds up `(now - anchor) / interval` to the next whole
-        /// step.
+        /// Reference point for step alignment.
         anchor: DateTime<Utc>,
     },
 
-    /// Recurring Vixie-style 5-field cron expression. Stored verbatim
-    /// for status display; the compiled form is rebuilt during
-    /// deserialization.
-    ///
-    /// `compiled` is boxed because [`cron::Schedule`] holds the parsed
-    /// per-field bitsets (≈250 bytes) — without indirection it would
-    /// dominate the enum's footprint and trigger `large_enum_variant`.
+    /// Recurring Vixie-style cron expression.
     Cron {
         /// Original user input, kept for round-tripping and status.
         expr: String,
@@ -91,8 +78,7 @@ impl Schedule {
     /// # Errors
     ///
     /// Returns [`ScheduleError::NonPositiveInterval`] when `interval`
-    /// is zero or negative — those would create a job that fires
-    /// continuously or never.
+    /// is zero or negative.
     pub fn every(interval: Duration, anchor: DateTime<Utc>) -> Result<Self, ScheduleError> {
         if interval <= Duration::zero() {
             return Err(ScheduleError::NonPositiveInterval);
@@ -100,15 +86,15 @@ impl Schedule {
         Ok(Self::Every { interval, anchor })
     }
 
-    /// Vixie-style 5-field cron expression (or 6/7 fields for advanced
-    /// users — anything `cron::Schedule` accepts after expansion).
+    /// Vixie-style 5-field cron expression, or 6/7 fields accepted by
+    /// the `cron` crate after expansion.
     ///
     /// # Errors
     ///
     /// - [`ScheduleError::EmptyCronExpression`] when the input trims
     ///   to nothing.
-    /// - [`ScheduleError::InvalidCronExpression`] when the underlying
-    ///   parser rejects the expression.
+    /// - [`ScheduleError::InvalidCronExpression`] when the parser
+    ///   rejects the expression.
     pub fn cron(expr: &str) -> Result<Self, ScheduleError> {
         let trimmed = expr.trim();
         if trimmed.is_empty() {
@@ -128,10 +114,6 @@ impl Schedule {
     }
 
     /// Compute the next firing instant strictly after `now`.
-    ///
-    /// Returns `None` when the schedule has no future fire — a one-shot
-    /// whose target instant is in the past, or a cron expression whose
-    /// iterator is exhausted.
     #[must_use]
     pub fn next_after(&self, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
         match self {
@@ -141,8 +123,7 @@ impl Schedule {
         }
     }
 
-    /// Discriminator used by status output and tests; kept stable so
-    /// downstream tooling can match on it.
+    /// Discriminator used by status output and tests.
     #[must_use]
     pub fn kind(&self) -> &'static str {
         match self {
@@ -152,9 +133,7 @@ impl Schedule {
         }
     }
 
-    /// Human-readable summary for `/cron` status — `"at 2026-04-26T..."`,
-    /// `"every 5m"`, `"cron 0 9 * * *"`. Compact enough to fit on one
-    /// status line.
+    /// Human-readable summary.
     #[must_use]
     pub fn describe(&self) -> String {
         match self {
@@ -165,15 +144,6 @@ impl Schedule {
     }
 }
 
-/// Step-aligned next-fire computation for [`Schedule::Every`].
-///
-/// `(now - anchor) / interval` floor-divides to the current step;
-/// `+ 1` rounds up to the next one. Falls back to `anchor` itself
-/// when `now` precedes the anchor (a job created with a future anchor).
-///
-/// Arithmetic stays in i64 nanoseconds so we never narrow to i32 —
-/// `Duration::checked_mul` would otherwise force that cast and lose
-/// schedules with > 68 years of elapsed time at 1-second intervals.
 fn next_every_after(
     anchor: DateTime<Utc>,
     interval: Duration,
@@ -189,10 +159,6 @@ fn next_every_after(
     anchor + Duration::nanoseconds(offset_ns)
 }
 
-/// Pad a 5-field Vixie expression up to the 7-field shape the `cron`
-/// crate expects (`sec min hour dom month dow year`). Inputs with 6
-/// or 7 fields pass through unchanged so power users can still write
-/// per-second schedules or pin a year.
 fn expand_to_seven_fields(expr: &str) -> String {
     let field_count = expr.split_whitespace().count();
     match field_count {
@@ -202,8 +168,6 @@ fn expand_to_seven_fields(expr: &str) -> String {
     }
 }
 
-/// Wire-shape mirror of [`Schedule`]. Used purely for serialization;
-/// callers always work with [`Schedule`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum ScheduleSpec {
@@ -270,9 +234,7 @@ mod tests {
     fn every_aligns_to_anchor_steps() {
         let anchor = ts("2026-04-25T00:00:00Z");
         let s = Schedule::every(Duration::minutes(5), anchor).unwrap();
-        // Exactly on the anchor → next step is anchor + interval.
         assert_eq!(s.next_after(anchor), Some(ts("2026-04-25T00:05:00Z")));
-        // 7 minutes in → next 5-minute boundary is 10 min mark.
         assert_eq!(
             s.next_after(ts("2026-04-25T00:07:00Z")),
             Some(ts("2026-04-25T00:10:00Z"))
@@ -302,7 +264,6 @@ mod tests {
     #[test]
     fn cron_five_field_expression_fires_at_expected_minute() {
         let s = Schedule::cron("0 9 * * *").unwrap();
-        // 9 AM daily — at 8:30 the next fire is today's 9:00.
         let next = s.next_after(ts("2026-04-25T08:30:00Z")).unwrap();
         assert_eq!(next, ts("2026-04-25T09:00:00Z"));
     }

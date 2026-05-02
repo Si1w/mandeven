@@ -7,13 +7,14 @@
 
 use std::path::PathBuf;
 
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 
 /// Parsed YAML frontmatter at the top of a `SKILL.md` file.
 ///
-/// v1 holds only the two fields needed for discovery and invocation
-/// — additional Claude-Code fields (`when_to_use`, `allowed_tools`,
-/// `model`, `paths`, `args`) are deferred until concrete need.
+/// Mandeven follows Claude Code's spelling for user-facing skill
+/// keys (`allowed-tools`, `user-invocable`) so skills can be ported
+/// without pointless schema churn. Only fields used by mandeven are
+/// modeled here; unknown frontmatter keys are ignored by serde.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 pub struct SkillFrontmatter {
     /// Skill identifier; must match the on-disk directory name and
@@ -23,6 +24,26 @@ pub struct SkillFrontmatter {
     /// `skills_index` and the `/skills` overlay. The model uses this
     /// to decide whether to suggest or invoke the skill.
     pub description: String,
+    /// Claude Code-compatible tool allowlist hint. Mandeven treats it
+    /// as metadata today; a later permission layer can enforce it.
+    #[serde(
+        default,
+        rename = "allowed-tools",
+        deserialize_with = "deserialize_string_list"
+    )]
+    pub allowed_tools: Vec<String>,
+    /// Whether the user can invoke this skill as `/<name>`.
+    #[serde(default = "default_user_invocable", rename = "user-invocable")]
+    pub user_invocable: bool,
+    /// Optional global cron expression. When present, the global
+    /// timer store materializes a `skill:<name>` timer for this skill.
+    #[serde(default)]
+    pub timers: Option<String>,
+    /// When true, timer-triggered invocations run in a background
+    /// session under the fixed cron bucket instead of the active UI
+    /// session. Manual `/<name>` invocation remains foreground.
+    #[serde(default)]
+    pub fork: bool,
 }
 
 /// One loaded skill — frontmatter plus body plus diagnostic source path.
@@ -98,6 +119,48 @@ impl SkillIndex {
             )
         })
     }
+
+    /// Iterate full skill records in load order. Used by runtime
+    /// subsystems that consume optional skill metadata such as
+    /// timer declarations.
+    pub fn skills(&self) -> impl Iterator<Item = &Skill> {
+        self.skills.iter()
+    }
+}
+
+fn default_user_invocable() -> bool {
+    true
+}
+
+fn deserialize_string_list<'de, D>(deserializer: D) -> std::result::Result<Vec<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Option::<serde_yaml::Value>::deserialize(deserializer)?;
+    let Some(value) = value else {
+        return Ok(Vec::new());
+    };
+    match value {
+        serde_yaml::Value::String(s) => Ok(s
+            .split_whitespace()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(ToString::to_string)
+            .collect()),
+        serde_yaml::Value::Sequence(items) => Ok(items
+            .into_iter()
+            .filter_map(|item| match item {
+                serde_yaml::Value::String(s) => Some(s),
+                _ => None,
+            })
+            .flat_map(|s| {
+                s.split_whitespace()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+            })
+            .collect()),
+        _ => Ok(Vec::new()),
+    }
 }
 
 #[cfg(test)]
@@ -109,6 +172,10 @@ mod tests {
             frontmatter: SkillFrontmatter {
                 name: name.into(),
                 description: desc.into(),
+                allowed_tools: Vec::new(),
+                user_invocable: true,
+                timers: None,
+                fork: false,
             },
             body: String::new(),
             source_path: PathBuf::from(format!("/tmp/{name}/SKILL.md")),

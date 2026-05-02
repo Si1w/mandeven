@@ -1,6 +1,6 @@
 //! Dream scheduler.
 //!
-//! This is the cron-coupled timing half of Dream: it emits quiet
+//! This is the timer-coupled timing half of Dream: it emits quiet
 //! background ticks on an internal schedule. The semantic review work
 //! happens in [`super::run_once`], which the agent calls when a tick
 //! arrives.
@@ -18,7 +18,7 @@ use tokio::time::sleep;
 use super::error::Result;
 use super::store::Store;
 use super::{DreamConfig, DreamTick, DreamTickReason};
-use crate::cron::Schedule;
+use crate::timer::Schedule;
 
 /// Capacity of the Dream engine tick queue.
 const TICK_QUEUE_CAPACITY: usize = 4;

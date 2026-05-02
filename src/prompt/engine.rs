@@ -8,16 +8,13 @@
 //!   [`PromptEngine::iteration_system`] is byte-identical from one call to
 //!   the next, keeping `DeepSeek`'s prefix cache hot.
 //!
-//! Specialized prompts (`title`, `heartbeat_decide`,
-//! `compact_summary`) are exposed as thin delegates to the
-//! [`super::specialized`] free functions — the engine method is the
-//! one stable address the agent imports against, so future per-task
-//! caching or per-profile overrides can land without touching every
-//! call site.
+//! Specialized prompts (`title`, `compact_summary`) are exposed as
+//! thin delegates to the [`super::specialized`] free functions — the
+//! engine method is the one stable address the agent imports against,
+//! so future per-task caching or per-profile overrides can land
+//! without touching every call site.
 
 use std::path::Path;
-
-use chrono::{DateTime, Utc};
 
 use crate::llm::Message;
 use crate::skill::SkillIndex;
@@ -29,10 +26,7 @@ use super::context::{
 use super::error::Result;
 use super::section::{Section, SectionCache, SystemPrompt};
 use super::specialized;
-use super::templates::{
-    ACTIONS, ACTIONS_NAME, DOING_TASKS, DOING_TASKS_NAME, INTRO, INTRO_NAME, SYSTEM_RULES,
-    SYSTEM_RULES_NAME, TONE, TONE_NAME, USING_TOOLS, USING_TOOLS_NAME,
-};
+use super::static_prompt::{STATIC_SYSTEM_SECTIONS, trim_static};
 
 /// Per-call inputs threaded into [`PromptEngine::iteration_system`].
 ///
@@ -52,8 +46,7 @@ pub struct PromptContext<'a> {
 
 /// Owns loaded-once content + the section cache. Constructed once at
 /// boot by `main.rs` and shared via `Arc<PromptEngine>` so every
-/// call-site (`Agent::iteration`, the heartbeat path, command
-/// handlers) sees the same cache state.
+/// call-site sees the same cache state.
 pub struct PromptEngine {
     /// `AGENTS.md` body, `None` when the file is absent.
     agents_md: Option<String>,
@@ -129,12 +122,9 @@ impl PromptEngine {
     pub fn iteration_system(&self, ctx: &PromptContext<'_>) -> SystemPrompt {
         let mut prompt = SystemPrompt::new();
 
-        prompt.push(self.cached(INTRO_NAME, || INTRO.to_string()));
-        prompt.push(self.cached(SYSTEM_RULES_NAME, || SYSTEM_RULES.to_string()));
-        prompt.push(self.cached(DOING_TASKS_NAME, || DOING_TASKS.to_string()));
-        prompt.push(self.cached(ACTIONS_NAME, || ACTIONS.to_string()));
-        prompt.push(self.cached(USING_TOOLS_NAME, || USING_TOOLS.to_string()));
-        prompt.push(self.cached(TONE_NAME, || TONE.to_string()));
+        for section in STATIC_SYSTEM_SECTIONS {
+            prompt.push(self.cached(section.name, || trim_static(section.content)));
+        }
 
         if !self.skill_entries.is_empty() {
             let entries = self.skill_entries.clone();
@@ -164,13 +154,6 @@ impl PromptEngine {
     #[must_use]
     pub fn title_messages(&self, user_input: &str) -> Vec<Message> {
         specialized::title_messages(user_input)
-    }
-
-    /// Heartbeat phase-1 message envelope. See
-    /// [`specialized::heartbeat_decide_messages`].
-    #[must_use]
-    pub fn heartbeat_decide_messages(&self, content: &str, now: DateTime<Utc>) -> Vec<Message> {
-        specialized::heartbeat_decide_messages(content, now)
     }
 
     /// Compact-summary system text, optionally extended with a focus
@@ -233,6 +216,10 @@ mod tests {
                 frontmatter: SkillFrontmatter {
                     name: n.into(),
                     description: d.into(),
+                    allowed_tools: Vec::new(),
+                    user_invocable: true,
+                    timers: None,
+                    fork: false,
                 },
                 body: String::new(),
                 source_path: PathBuf::from(format!("/tmp/{n}/SKILL.md")),

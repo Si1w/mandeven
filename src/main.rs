@@ -16,20 +16,16 @@ use std::sync::Arc;
 
 use tokio::sync::Mutex;
 
-use mandeven::agent::{
-    Agent, CronWiring, DiscordWiring, DreamWiring, HeartbeatWiring, TimerWiring, WechatWiring,
-};
+use mandeven::agent::{Agent, DiscordWiring, DreamWiring, TimerWiring, WechatWiring};
 use mandeven::bus::{Bus, ChannelID};
 use mandeven::channels::Manager;
 use mandeven::channels::discord::{self, DiscordChannel};
 use mandeven::channels::wechat::{self, WechatChannel};
 use mandeven::cli::CliChannel;
 use mandeven::config::{self, AppConfig};
-use mandeven::cron::CronEngine;
 use mandeven::dream::DreamEngine;
 use mandeven::exec;
 use mandeven::gateway::{Gateway, dispatch_channel};
-use mandeven::heartbeat::HeartbeatEngine;
 use mandeven::hook::HookEngine;
 use mandeven::memory;
 use mandeven::prompt::PromptEngine;
@@ -73,15 +69,21 @@ async fn main() -> Result<(), DynError> {
     let project_bucket = config::project_bucket(&cwd);
 
     let sessions = Arc::new(session::Manager::new(project_bucket.clone()).await?);
+    let cron_sessions = Arc::new(session::Manager::new(config::cron_bucket()).await?);
 
     // Skill index reads ~/.mandeven/skills/<name>/SKILL.md once at
     // boot. Disabled => empty index, no SkillTool registration, no
     // skills_index section in the prompt.
-    let skill_index = Arc::new(if cfg.agent.skill.enabled {
+    let skill_index = if cfg.agent.skill.enabled {
+        skill::seed_builtins(&cfg.data_dir())?;
         skill::load(&cfg.data_dir().join(skill::SKILLS_SUBDIR))?
     } else {
         SkillIndex::new()
-    });
+    };
+    if cfg.agent.skill.enabled {
+        timer::sync_skill_timers(&cfg.data_dir(), &skill_index).await?;
+    }
+    let skill_index = Arc::new(skill_index);
 
     // Prompt engine reads ~/.mandeven/AGENTS.md once at boot and
     // borrows the skill index for the skills_index section. The
@@ -105,31 +107,11 @@ async fn main() -> Result<(), DynError> {
     let (dispatch_tx, dispatch_rx) = dispatch_channel();
 
     // Shared per-channel session map: gateway is the writer, the
-    // agent reads it (heartbeat tick path) so heartbeat ticks land in
-    // the user's main session rather than spinning up an isolated one.
+    // agent reads it when a background timer needs to notify the
+    // currently active TUI session.
     let active_sessions = Arc::new(Mutex::new(HashMap::new()));
 
-    let heartbeat_wiring = if cfg.agent.heartbeat.enabled {
-        let data_dir = cfg.data_dir();
-        let (engine, rx) = HeartbeatEngine::new(&cfg.agent.heartbeat, &data_dir);
-        let engine = Arc::new(engine);
-        engine.start();
-        Some(HeartbeatWiring { engine, rx })
-    } else {
-        None
-    };
-
-    let cron_wiring = if cfg.agent.cron.enabled {
-        let data_dir = cfg.data_dir();
-        let (engine, rx) = CronEngine::new(&cfg.agent.cron, &data_dir).await?;
-        let engine = Arc::new(engine);
-        engine.start().await;
-        Some(CronWiring { engine, rx })
-    } else {
-        None
-    };
-
-    let (engine, rx) = timer::TimerEngine::new(&project_bucket).await?;
+    let (engine, rx) = timer::TimerEngine::new(&project_bucket, &cfg.data_dir()).await?;
     let engine = Arc::new(engine);
     engine.start().await;
     let timer_wiring = Some(TimerWiring { engine, rx });
@@ -147,12 +129,7 @@ async fn main() -> Result<(), DynError> {
         None
     };
 
-    let tool_registry = build_tool_registry(
-        &project_bucket,
-        cron_wiring.as_ref(),
-        &skill_index,
-        task_manager.clone(),
-    );
+    let tool_registry = build_tool_registry(&project_bucket, &skill_index, task_manager.clone());
 
     let (discord_channel, discord_wiring) = build_discord(&cfg).await?;
     let discord_active_rx = discord_wiring
@@ -164,16 +141,16 @@ async fn main() -> Result<(), DynError> {
     let agent = Agent::new(
         &cfg,
         sessions.clone(),
+        cron_sessions,
         tool_registry,
         dispatch_rx,
         outbound_tx.clone(),
         active_sessions.clone(),
-        heartbeat_wiring,
-        cron_wiring,
         timer_wiring,
         dream_wiring,
         memory_manager,
         task_manager,
+        skill_index.clone(),
         exec_manager,
         discord_wiring,
         wechat_wiring,
@@ -217,7 +194,6 @@ async fn main() -> Result<(), DynError> {
 
 fn build_tool_registry(
     project_bucket: &Path,
-    _cron_wiring: Option<&CronWiring>,
     skill_index: &Arc<SkillIndex>,
     task_manager: Arc<task::Manager>,
 ) -> tools::Registry {
@@ -225,8 +201,6 @@ fn build_tool_registry(
     tools::register_builtins(&mut registry);
     tools::task::register(&mut registry, task_manager);
     tools::timer::register(&mut registry, Arc::new(timer::Manager::new(project_bucket)));
-    // Cron remains a runtime/slash-command compatibility layer. The
-    // model-facing scheduling primitive is task + timer.
     if !skill_index.is_empty() {
         registry.register(Arc::new(tools::skill::SkillTool::new(skill_index.clone())));
     }

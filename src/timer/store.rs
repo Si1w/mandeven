@@ -11,8 +11,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use super::error::{Error, Result};
-use super::{TIMER_SUBDIR, Timer};
-use crate::cron::Schedule;
+use super::{Schedule, TIMER_SUBDIR, Timer};
 
 /// In-memory timer store shape.
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]

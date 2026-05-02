@@ -36,7 +36,7 @@ pub enum Error {
 
     /// Schedule validation failed.
     #[error("invalid timer schedule: {0}")]
-    Schedule(#[from] crate::cron::ScheduleError),
+    Schedule(#[from] crate::timer::ScheduleError),
 
     /// Disk I/O failed reading or writing the store file.
     #[error("timer store I/O failed: {0}")]

@@ -1,8 +1,8 @@
 //! Single-purpose prompts that bypass the
 //! [`crate::prompt::SystemPrompt`] assembly pipeline.
 //!
-//! Title generation, the heartbeat phase-1 decide call, and the
-//! compact-summary call each pin the model to one structured task.
+//! Title generation and the compact-summary call each pin the model
+//! to one structured task.
 //! Folding them into the main iteration system prompt would only
 //! confuse a long-running session — they're physically separate so
 //! the agent can wire them in at exactly one call site each.
@@ -13,8 +13,6 @@
 //! §9): a per-task protocol prompt that happens not to share *any*
 //! sections with the main system prompt.
 
-use chrono::{DateTime, Utc};
-
 use crate::llm::Message;
 
 /// System prompt that asks the model for a short, descriptive
@@ -22,15 +20,6 @@ use crate::llm::Message;
 pub const TITLE_SYSTEM: &str = "Generate a short, descriptive title (max 8 words) for a conversation \
      starting with the following user message. Reply with only the title, \
      no quotes or punctuation.";
-
-/// System prompt for heartbeat phase-1 — constrains the model to a
-/// single `heartbeat_decide` tool call so the answer is structured
-/// rather than free text.
-pub const HEARTBEAT_DECIDE_SYSTEM: &str = "You are the heartbeat decision step. \
-    Read the heartbeat checklist provided and call the heartbeat_decide tool exactly once. \
-    Use action=\"skip\" when nothing in the checklist needs attention right now. \
-    Use action=\"run\" with a concise one-or-two-sentence summary in `tasks` when at \
-    least one item should be acted on now.";
 
 /// Base instructions for the conversation-compaction summarizer.
 /// Tuned for "preserve what later turns will need" rather than "make
@@ -54,21 +43,6 @@ pub fn title_messages(user_input: &str) -> Vec<Message> {
         },
         Message::User {
             content: user_input.into(),
-        },
-    ]
-}
-
-/// Build the heartbeat phase-1 message envelope. The user message
-/// includes the current time and the resolved `HEARTBEAT.md` body so
-/// the model has both the schedule context and the task list.
-#[must_use]
-pub fn heartbeat_decide_messages(content: &str, now: DateTime<Utc>) -> Vec<Message> {
-    vec![
-        Message::System {
-            content: HEARTBEAT_DECIDE_SYSTEM.into(),
-        },
-        Message::User {
-            content: format!("Current time: {now}\n\nHEARTBEAT.md contents:\n\n{content}"),
         },
     ]
 }
@@ -106,19 +80,6 @@ mod tests {
             Message::User { content } => assert_eq!(content, "first message body"),
             _ => panic!("expected user"),
         }
-    }
-
-    #[test]
-    fn heartbeat_decide_messages_embed_time_and_content() {
-        let now = DateTime::parse_from_rfc3339("2026-04-26T08:00:00Z")
-            .unwrap()
-            .with_timezone(&Utc);
-        let msgs = heartbeat_decide_messages("- check inbox", now);
-        let Message::User { content } = &msgs[1] else {
-            panic!("expected user");
-        };
-        assert!(content.contains("2026-04-26 08:00:00"));
-        assert!(content.contains("- check inbox"));
     }
 
     #[test]

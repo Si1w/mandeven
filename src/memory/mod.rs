@@ -1,11 +1,11 @@
 //! Durable curated memory and a lightweight derived user profile.
 //!
-//! Memory is distinct from session history, task state, cron schedules, and
+//! Memory is distinct from session history, task state, timer schedules, and
 //! `AGENTS.md` instructions:
 //!
 //! - session history is the transcript;
 //! - task state is current work coordination;
-//! - cron state is future autonomous triggers;
+//! - timer state is future autonomous triggers;
 //! - `AGENTS.md` is user-authored stable instruction;
 //! - memory stores compact facts, preferences, feedback, and reference pointers
 //!   that remain useful across sessions and are not easily re-derived.

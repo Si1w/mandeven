@@ -174,7 +174,7 @@ impl BaseTool for MemoryRemember {
             description: "Save or update durable memory that should survive across \
                 sessions. Use only for stable user preferences, corrections, project \
                 context not derivable from code/git, external reference pointers, or \
-                durable feedback. Do not save task progress, cron state, raw logs, \
+                durable feedback. Do not save task progress, timer state, raw logs, \
                 secrets, large code/data, facts already documented in AGENTS.md, or \
                 current conversation state. /memory is the user-facing governance surface."
                 .into(),

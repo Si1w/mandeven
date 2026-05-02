@@ -83,8 +83,7 @@ impl BindingTable {
     /// top-to-bottom; first match wins.
     ///
     /// Inputs are `Option<&str>` because not every channel carries
-    /// every identity dimension (cron has no peer, the CLI has no
-    /// guild/account, etc.).
+    /// every identity dimension (the CLI has no guild/account, etc.).
     #[must_use]
     pub fn dispatch(
         &self,

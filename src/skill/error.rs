@@ -59,6 +59,15 @@ pub enum Error {
         /// Directory name (also the slash-command name).
         dir: String,
     },
+
+    /// Built-in skill seeding failed.
+    #[error("failed to seed built-in skill at {}: {source}", path.display())]
+    BuiltinSeed {
+        /// Target path that could not be written.
+        path: PathBuf,
+        /// Underlying I/O error.
+        source: io::Error,
+    },
 }
 
 /// Result alias for the `skill` module.

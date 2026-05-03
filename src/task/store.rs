@@ -14,6 +14,7 @@ use serde_json::Value;
 
 use super::error::{Error, Result};
 use super::{STORE_VERSION, TASK_SUBDIR, Task, TaskStatus};
+use crate::utils::atomic::{AtomicWriteScope, atomic_write_text};
 
 /// In-memory view of the Markdown task store.
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -246,13 +247,7 @@ async fn read_task(path: &Path) -> Result<Option<Task>> {
 
 async fn write_task(path: &Path, task: &Task) -> Result<()> {
     let content = render_task(task)?;
-    let filename = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("task.md");
-    let tmp_path = path.with_file_name(format!(".{filename}.tmp"));
-    tokio::fs::write(&tmp_path, content).await?;
-    tokio::fs::rename(&tmp_path, path).await?;
+    atomic_write_text(path, &content, AtomicWriteScope::ProjectBucket).await?;
     Ok(())
 }
 
@@ -390,7 +385,7 @@ mod tests {
     fn sample_task(subject: &str) -> Task {
         let now = Utc::now();
         Task {
-            id: uuid::Uuid::now_v7().to_string(),
+            id: crate::utils::ids::new_task_id(),
             path: None,
             subject: subject.to_string(),
             description: format!("Do {subject}"),

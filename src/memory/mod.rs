@@ -14,6 +14,8 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::utils::atomic::{AtomicWriteScope, atomic_write_text};
+
 /// Filename of the global user memory file under `~/.mandeven/`.
 pub const MEMORY_FILENAME: &str = "MEMORY.md";
 
@@ -96,10 +98,7 @@ impl Manager {
         if tokio::fs::try_exists(&self.path).await? {
             return Ok(());
         }
-        if let Some(parent) = self.path.parent() {
-            tokio::fs::create_dir_all(parent).await?;
-        }
-        tokio::fs::write(&self.path, EMPTY_MEMORY).await?;
+        atomic_write_text(&self.path, EMPTY_MEMORY, AtomicWriteScope::GlobalDataDir).await?;
         Ok(())
     }
 

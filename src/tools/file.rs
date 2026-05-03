@@ -27,13 +27,13 @@ use async_trait::async_trait;
 use schemars::{JsonSchema, schema_for};
 use serde::Deserialize;
 use serde_json::{Value, json};
-use uuid::Uuid;
 
 use super::error::{Error, Result};
 use super::{BaseTool, MAX_TOOL_RESULT_BYTES, ToolOutcome};
 use crate::llm::Tool;
 use crate::memory;
 use crate::security::{SandboxPolicy, ensure_writable_now};
+use crate::utils::atomic::{AtomicWriteScope, atomic_write_text};
 use crate::utils::workspace;
 
 /// Default number of lines returned by `file_read` when `limit` is
@@ -514,33 +514,14 @@ async fn edit_managed_memory(p: EditParams, path: &Path) -> Result<ToolOutcome> 
 
 async fn write_managed_memory_atomic(path: &Path, content: &str) -> Result<()> {
     memory::validate_memory_markdown(content).map_err(|err| exec("file_edit", err.to_string()))?;
-    let parent = path
-        .parent()
-        .filter(|p| !p.as_os_str().is_empty())
-        .ok_or_else(|| {
-            exec(
-                "file_edit",
-                format!("{} has no parent directory", path.display()),
-            )
-        })?;
-    tokio::fs::create_dir_all(parent).await.map_err(|e| {
-        exec(
-            "file_edit",
-            format!("create parents of {}: {e}", path.display()),
-        )
-    })?;
-    let tmp = parent.join(format!(".MEMORY.md.{}.tmp", Uuid::now_v7()));
-    tokio::fs::write(&tmp, content)
+    let scope = if memory::is_managed_memory_path(path) {
+        AtomicWriteScope::ManagedMemory
+    } else {
+        AtomicWriteScope::GlobalDataDir
+    };
+    atomic_write_text(path, content, scope)
         .await
-        .map_err(|e| exec("file_edit", format!("write {}: {e}", tmp.display())))?;
-    if let Err(err) = tokio::fs::rename(&tmp, path).await {
-        let _ = tokio::fs::remove_file(&tmp).await;
-        return Err(exec(
-            "file_edit",
-            format!("rename {} to {}: {err}", tmp.display(), path.display()),
-        ));
-    }
-    Ok(())
+        .map_err(|err| exec("file_edit", format!("{}: {err}", path.display())))
 }
 
 /// Exact substring search. Matches are non-overlapping.
@@ -638,38 +619,9 @@ fn exec(tool: &'static str, message: impl Into<String>) -> Error {
 }
 
 async fn write_file_atomic(tool: &'static str, path: &Path, content: &str) -> Result<()> {
-    let parent = path
-        .parent()
-        .filter(|p| !p.as_os_str().is_empty())
-        .ok_or_else(|| exec(tool, format!("{} has no parent directory", path.display())))?;
-    tokio::fs::create_dir_all(parent)
+    atomic_write_text(path, content, AtomicWriteScope::Workspace)
         .await
-        .map_err(|e| exec(tool, format!("create parents of {}: {e}", path.display())))?;
-
-    let root = workspace::root();
-    let parent_canonical = tokio::fs::canonicalize(parent)
-        .await
-        .map_err(|e| exec(tool, format!("canonicalize {}: {e}", parent.display())))?;
-    if !parent_canonical.starts_with(&root) {
-        return Err(exec(
-            tool,
-            format!(
-                "{} resolves outside workspace {}",
-                parent.display(),
-                root.display()
-            ),
-        ));
-    }
-
-    let tmp = parent.join(format!(".mandeven-write-{}.tmp", Uuid::now_v7()));
-    tokio::fs::write(&tmp, content)
-        .await
-        .map_err(|e| exec(tool, format!("{}: {e}", tmp.display())))?;
-    if let Err(err) = tokio::fs::rename(&tmp, path).await {
-        let _ = tokio::fs::remove_file(&tmp).await;
-        return Err(exec(tool, format!("{}: {err}", path.display())));
-    }
-    Ok(())
+        .map_err(|err| exec(tool, format!("{}: {err}", path.display())))
 }
 
 /// Returns true when `path` references a device file we refuse to
@@ -686,6 +638,7 @@ mod tests {
 
     use super::*;
     use serde_json::json;
+    use uuid::Uuid;
 
     fn workspace_tmp_path(name: &str) -> PathBuf {
         PathBuf::from("target")

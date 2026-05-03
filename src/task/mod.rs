@@ -20,7 +20,8 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::Mutex;
-use uuid::Uuid;
+
+use crate::utils::ids;
 
 /// Subdirectory under a project bucket holding the task store.
 pub const TASK_SUBDIR: &str = "tasks";
@@ -44,8 +45,7 @@ pub enum TaskStatus {
 /// One project-local task.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Task {
-    /// UUID v7 stable machine id, represented as a string so tools can
-    /// refer to ids uniformly in JSON.
+    /// Stable short model-facing id.
     pub id: String,
     /// User-readable Markdown path relative to the project bucket.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -176,7 +176,7 @@ impl Manager {
         let mut file = self.store.load().await?;
         let now = Utc::now();
         let task = Task {
-            id: Uuid::now_v7().to_string(),
+            id: ids::new_task_id(),
             path: None,
             subject: draft.subject,
             description: draft.description,
@@ -496,14 +496,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn create_assigns_uuid_ids_and_writes_markdown() {
+    async fn create_assigns_short_ids_and_writes_markdown() {
         let dir = tempdir();
         let manager = Manager::new(&dir);
         let first = manager.create(draft("first")).await.unwrap();
         let second = manager.create(draft("second")).await.unwrap();
 
         assert_ne!(first.id, second.id);
-        assert!(uuid::Uuid::parse_str(&first.id).is_ok());
+        assert!(ids::is_task_id(&first.id));
         assert_eq!(first.path.as_deref(), Some("tasks/first.md"));
         assert!(dir.join("tasks").join("first.md").exists());
         assert_eq!(manager.list().await.unwrap().len(), 2);

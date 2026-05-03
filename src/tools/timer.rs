@@ -19,23 +19,23 @@ use crate::timer::{self, Schedule, TimerDraft, TimerUpdate};
 
 /// Register all model-facing timer tools.
 pub fn register(registry: &mut Registry, timers: Arc<timer::Manager>) {
-    registry.register(Arc::new(TimerCreate {
+    registry.register(Arc::new(TimerWrite {
         timers: timers.clone(),
     }));
-    registry.register(Arc::new(TimerList {
+    registry.register(Arc::new(TimerRead {
         timers: timers.clone(),
     }));
-    registry.register(Arc::new(TimerUpdateTool {
+    registry.register(Arc::new(TimerEdit {
         timers: timers.clone(),
     }));
     registry.register(Arc::new(TimerDelete {
         timers: timers.clone(),
     }));
-    registry.register(Arc::new(TimerFireNow { timers }));
+    registry.register(Arc::new(TimerFire { timers }));
 }
 
 #[derive(Deserialize, JsonSchema)]
-struct TimerCreateParams {
+struct TimerWriteParams {
     /// Existing task id this timer should fire.
     task_id: String,
     /// Structured schedule.
@@ -43,40 +43,43 @@ struct TimerCreateParams {
 }
 
 /// Create a timer for an existing task.
-pub struct TimerCreate {
+pub struct TimerWrite {
     timers: Arc<timer::Manager>,
 }
 
 #[async_trait]
-impl BaseTool for TimerCreate {
+impl BaseTool for TimerWrite {
     fn schema(&self) -> Tool {
         Tool {
-            name: "timer_create".into(),
-            description: "Create validated timer JSON state for an existing task. \
-                Use this for delayed, recurring, or calendar-based work after task_create \
+            name: "timer_write".into(),
+            description: "Write validated timer state for an existing task. \
+                Use this for delayed, recurring, or calendar-based work after task_write \
                 has produced the task. This replaces model-facing cron creation."
                 .into(),
-            parameters: serde_json::to_value(schema_for!(TimerCreateParams))
+            parameters: serde_json::to_value(schema_for!(TimerWriteParams))
                 .expect("JsonSchema derive always serializes"),
         }
     }
 
     async fn call(&self, args: Value) -> Result<ToolOutcome> {
-        let params: TimerCreateParams = parse_params("timer_create", args)?;
+        let params: TimerWriteParams = parse_params("timer_write", args)?;
         let timer = self
             .timers
             .create(TimerDraft {
                 task_id: params.task_id,
-                schedule: params.schedule.into_schedule("timer_create")?,
+                schedule: params.schedule.into_schedule("timer_write")?,
             })
             .await
-            .map_err(|err| exec("timer_create", &err))?;
+            .map_err(|err| exec("timer_write", &err))?;
         Ok(state_observation("timer", &timer, "Timer created").into())
     }
 }
 
 #[derive(Deserialize, JsonSchema)]
-struct TimerListParams {
+struct TimerReadParams {
+    /// Optional timer id to retrieve one timer. Omit to list timers.
+    #[serde(default)]
+    timer_id: Option<String>,
     /// Optional task id filter.
     #[serde(default)]
     task_id: Option<String>,
@@ -86,30 +89,51 @@ struct TimerListParams {
 }
 
 /// List timers.
-pub struct TimerList {
+pub struct TimerRead {
     timers: Arc<timer::Manager>,
 }
 
 #[async_trait]
-impl BaseTool for TimerList {
+impl BaseTool for TimerRead {
     fn schema(&self) -> Tool {
         Tool {
-            name: "timer_list".into(),
-            description: "List current-project task timers. Use this before creating a schedule \
-                to avoid duplicates, and when the user asks what automated work is active."
+            name: "timer_read".into(),
+            description: "Read current-project task timers. Pass timer_id to retrieve one timer, \
+                or omit timer_id to list timers with optional task_id/include_disabled filters. \
+                Use before creating a schedule to avoid duplicates."
                 .into(),
-            parameters: serde_json::to_value(schema_for!(TimerListParams))
+            parameters: serde_json::to_value(schema_for!(TimerReadParams))
                 .expect("JsonSchema derive always serializes"),
         }
     }
 
     async fn call(&self, args: Value) -> Result<ToolOutcome> {
-        let params: TimerListParams = parse_params("timer_list", args)?;
+        let params: TimerReadParams = parse_params("timer_read", args)?;
+        if let Some(timer_id) = params.timer_id.as_deref() {
+            let timer = self
+                .timers
+                .get(timer_id)
+                .await
+                .map_err(|err| exec("timer_read", &err))?;
+            let Some(timer) = timer else {
+                return Ok(json!({
+                    "ok": false,
+                    "observation_type": "state",
+                    "object": "timer",
+                    "id": timer_id,
+                    "validated": false,
+                    "diagnostics": ["Timer not found"],
+                    "timer": null,
+                })
+                .into());
+            };
+            return Ok(state_observation("timer", &timer, "Timer retrieved").into());
+        }
         let timers = self
             .timers
             .list()
             .await
-            .map_err(|err| exec("timer_list", &err))?;
+            .map_err(|err| exec("timer_read", &err))?;
         let filtered: Vec<Value> = timers
             .iter()
             .filter(|timer| should_include_timer(timer, &params))
@@ -129,7 +153,7 @@ impl BaseTool for TimerList {
 }
 
 #[derive(Deserialize, JsonSchema)]
-struct TimerUpdateParams {
+struct TimerEditParams {
     /// Timer id to update.
     timer_id: String,
     /// Replacement task id.
@@ -144,29 +168,29 @@ struct TimerUpdateParams {
 }
 
 /// Update timer state.
-pub struct TimerUpdateTool {
+pub struct TimerEdit {
     timers: Arc<timer::Manager>,
 }
 
 #[async_trait]
-impl BaseTool for TimerUpdateTool {
+impl BaseTool for TimerEdit {
     fn schema(&self) -> Tool {
         Tool {
-            name: "timer_update".into(),
+            name: "timer_edit".into(),
             description: "Update a timer's referenced task, enabled flag, or schedule. \
                 This edits validated JSON state and recomputes next_fire_at \
                 when the schedule or enabled flag changes."
                 .into(),
-            parameters: serde_json::to_value(schema_for!(TimerUpdateParams))
+            parameters: serde_json::to_value(schema_for!(TimerEditParams))
                 .expect("JsonSchema derive always serializes"),
         }
     }
 
     async fn call(&self, args: Value) -> Result<ToolOutcome> {
-        let params: TimerUpdateParams = parse_params("timer_update", args)?;
+        let params: TimerEditParams = parse_params("timer_edit", args)?;
         let schedule = params
             .schedule
-            .map(|schedule| schedule.into_schedule("timer_update"))
+            .map(|schedule| schedule.into_schedule("timer_edit"))
             .transpose()?;
         let outcome = self
             .timers
@@ -179,7 +203,7 @@ impl BaseTool for TimerUpdateTool {
                 },
             )
             .await
-            .map_err(|err| exec("timer_update", &err))?;
+            .map_err(|err| exec("timer_edit", &err))?;
         let Some(outcome) = outcome else {
             return Ok(json!({
                 "ok": false,
@@ -240,37 +264,37 @@ impl BaseTool for TimerDelete {
 }
 
 #[derive(Deserialize, JsonSchema)]
-struct TimerFireNowParams {
+struct TimerFireParams {
     /// Timer id to mark fired.
     timer_id: String,
 }
 
 /// Mark a timer as fired now and expose the task to run.
-pub struct TimerFireNow {
+pub struct TimerFire {
     timers: Arc<timer::Manager>,
 }
 
 #[async_trait]
-impl BaseTool for TimerFireNow {
+impl BaseTool for TimerFire {
     fn schema(&self) -> Tool {
         Tool {
-            name: "timer_fire_now".into(),
+            name: "timer_fire".into(),
             description: "Validate and mark a timer as fired now, then return the \
                 referenced task as the next execution target. This state primitive does \
                 not run the agent loop itself."
                 .into(),
-            parameters: serde_json::to_value(schema_for!(TimerFireNowParams))
+            parameters: serde_json::to_value(schema_for!(TimerFireParams))
                 .expect("JsonSchema derive always serializes"),
         }
     }
 
     async fn call(&self, args: Value) -> Result<ToolOutcome> {
-        let params: TimerFireNowParams = parse_params("timer_fire_now", args)?;
+        let params: TimerFireParams = parse_params("timer_fire", args)?;
         let outcome = self
             .timers
             .fire_now(&params.timer_id)
             .await
-            .map_err(|err| exec("timer_fire_now", &err))?;
+            .map_err(|err| exec("timer_fire", &err))?;
         let Some(outcome) = outcome else {
             return Ok(json!({
                 "ok": false,
@@ -346,7 +370,7 @@ impl ScheduleParam {
     }
 }
 
-fn should_include_timer(timer: &timer::Timer, params: &TimerListParams) -> bool {
+fn should_include_timer(timer: &timer::Timer, params: &TimerReadParams) -> bool {
     if params.include_disabled == Some(false) && !timer.enabled {
         return false;
     }
@@ -450,23 +474,23 @@ mod tests {
         let tasks = task::Manager::new(&dir);
         let task = tasks.create(task_draft("Run tests")).await.unwrap();
         let manager = Arc::new(timer::Manager::new(&dir, &dir));
-        let create = TimerCreate {
+        let write = TimerWrite {
             timers: manager.clone(),
         };
-        let list = TimerList {
+        let read = TimerRead {
             timers: manager.clone(),
         };
-        let update = TimerUpdateTool {
+        let edit = TimerEdit {
             timers: manager.clone(),
         };
-        let fire = TimerFireNow {
+        let fire = TimerFire {
             timers: manager.clone(),
         };
         let delete = TimerDelete {
             timers: manager.clone(),
         };
 
-        let result = create
+        let result = write
             .call(json!({
                 "task_id": task.id,
                 "schedule": { "kind": "cron", "expr": "0 9 * * *" }
@@ -474,30 +498,29 @@ mod tests {
             .await
             .unwrap();
         let ToolOutcome::Result(value) = result else {
-            panic!("timer_create should return plain result");
+            panic!("timer_write should return plain result");
         };
         let timer_id = value["id"].as_str().unwrap().to_string();
-        assert!(uuid::Uuid::parse_str(&timer_id).is_ok());
+        assert!(crate::utils::ids::is_timer_id(&timer_id));
 
-        let result = list
+        let result = read
             .call(json!({ "include_disabled": false }))
             .await
             .unwrap();
         let ToolOutcome::Result(value) = result else {
-            panic!("timer_list should return plain result");
+            panic!("timer_read should return plain result");
         };
         assert_eq!(value["count"], 1);
 
-        update
-            .call(json!({
-                "timer_id": timer_id,
-                "enabled": false
-            }))
-            .await
-            .unwrap();
+        edit.call(json!({
+            "timer_id": timer_id,
+            "enabled": false
+        }))
+        .await
+        .unwrap();
         let result = fire.call(json!({ "timer_id": timer_id })).await.unwrap();
         let ToolOutcome::Result(value) = result else {
-            panic!("timer_fire_now should return plain result");
+            panic!("timer_fire should return plain result");
         };
         assert_eq!(value["task"]["subject"], "Run tests");
 

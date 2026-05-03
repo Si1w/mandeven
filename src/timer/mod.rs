@@ -22,15 +22,15 @@ use std::path::Path;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
-use uuid::Uuid;
 
 use crate::skill::SkillIndex;
 use crate::task;
+use crate::utils::ids;
 
 /// Timer lifecycle state and schedule binding.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Timer {
-    /// UUID v7 stable machine id.
+    /// Stable short model-facing id.
     pub id: String,
     /// Small reference to the thing fired by this timer.
     pub target: TimerTargetRef,
@@ -167,7 +167,7 @@ impl Manager {
         let mut file = self.store.load().await?;
         let now = Utc::now();
         let timer = Timer {
-            id: Uuid::now_v7().to_string(),
+            id: ids::new_timer_id(),
             target: TimerTargetRef::Task {
                 project: self.project.clone(),
                 task_id: draft.task_id,
@@ -316,7 +316,7 @@ impl Manager {
 /// Sync skill-declared timers into the global timer store.
 ///
 /// The declaration is intentionally tiny: `timers: "0 9 * * *"`.
-/// Discovery upserts by skill name while preserving UUID timer ids.
+/// Discovery upserts by skill name while preserving timer ids.
 ///
 /// # Errors
 ///
@@ -362,7 +362,7 @@ pub async fn sync_skill_timers(data_dir: &Path, skills: &SkillIndex) -> Result<(
         }
 
         file.timers.push(Timer {
-            id: Uuid::now_v7().to_string(),
+            id: ids::new_timer_id(),
             target: TimerTargetRef::Skill { skill: skill_name },
             enabled: true,
             schedule,
@@ -539,7 +539,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(Uuid::parse_str(&timer.id).is_ok());
+        assert!(ids::is_timer_id(&timer.id));
         assert_eq!(timer.target.task_id(), Some(task.id.as_str()));
         assert!(dir.join(GLOBAL_TIMER_FILENAME).exists());
         assert!(!dir.join("timers").exists());
@@ -569,14 +569,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sync_skill_timers_upserts_uuid_json() {
+    async fn sync_skill_timers_upserts_short_id_json() {
         let dir = tempdir("global-timer");
         let skills = SkillIndex::from_skills(vec![skill("cron", Some("0 9 * * *"))]);
         sync_skill_timers(&dir, &skills).await.unwrap();
 
         let file = Store::new(&dir).load().await.unwrap();
         assert_eq!(file.timers.len(), 1);
-        assert!(Uuid::parse_str(&file.timers[0].id).is_ok());
+        assert!(ids::is_timer_id(&file.timers[0].id));
         assert_eq!(file.timers[0].target.skill_name(), Some("cron"));
         assert!(cron_expr_matches(&file.timers[0].schedule, "0 9 * * *"));
 

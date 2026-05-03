@@ -26,21 +26,21 @@ pub const TASK_RUN_TOOL_NAME: &str = "task_run";
 
 /// Register all model-facing task tools.
 pub fn register(registry: &mut Registry, tasks: Arc<task::Manager>) {
-    registry.register(Arc::new(TaskCreate {
+    registry.register(Arc::new(TaskWrite {
         tasks: tasks.clone(),
     }));
-    registry.register(Arc::new(TaskGet {
+    registry.register(Arc::new(TaskRead {
         tasks: tasks.clone(),
     }));
-    registry.register(Arc::new(TaskList {
+    registry.register(Arc::new(TaskEdit {
         tasks: tasks.clone(),
     }));
-    registry.register(Arc::new(TaskUpdateTool { tasks }));
+    registry.register(Arc::new(TaskDelete { tasks }));
     registry.register(Arc::new(TaskRunTool));
 }
 
 #[derive(Deserialize, JsonSchema)]
-struct TaskCreateParams {
+struct TaskWriteParams {
     /// Brief actionable title in imperative form.
     subject: String,
     /// Full description of what needs to be done.
@@ -57,27 +57,28 @@ struct TaskCreateParams {
 }
 
 /// Create a new task.
-pub struct TaskCreate {
+pub struct TaskWrite {
     tasks: Arc<task::Manager>,
 }
 
 #[async_trait]
-impl BaseTool for TaskCreate {
+impl BaseTool for TaskWrite {
     fn schema(&self) -> Tool {
         Tool {
-            name: "task_create".into(),
-            description: "Create a project-local task for complex work. Use proactively \
+            name: "task_write".into(),
+            description:
+                "Write a new validated project-local task for complex work. Use proactively \
                 for multi-step requests, after receiving several requirements, or when \
                 discovering follow-up work. Created tasks start as pending. This is \
                 model-facing state, not a user slash command."
-                .into(),
-            parameters: serde_json::to_value(schema_for!(TaskCreateParams))
+                    .into(),
+            parameters: serde_json::to_value(schema_for!(TaskWriteParams))
                 .expect("JsonSchema derive always serializes"),
         }
     }
 
     async fn call(&self, args: Value) -> Result<ToolOutcome> {
-        let params: TaskCreateParams = parse_params("task_create", args)?;
+        let params: TaskWriteParams = parse_params("task_write", args)?;
         let task = self
             .tasks
             .create(TaskDraft {
@@ -88,65 +89,16 @@ impl BaseTool for TaskCreate {
                 metadata: params.metadata.unwrap_or_default(),
             })
             .await
-            .map_err(|err| exec("task_create", &err))?;
+            .map_err(|err| exec("task_write", &err))?;
         Ok(task_state_observation(&task, &[], "Task created").into())
     }
 }
 
 #[derive(Deserialize, JsonSchema)]
-struct TaskGetParams {
-    /// Task id to retrieve.
-    task_id: String,
-}
-
-/// Retrieve one task.
-pub struct TaskGet {
-    tasks: Arc<task::Manager>,
-}
-
-#[async_trait]
-impl BaseTool for TaskGet {
-    fn schema(&self) -> Tool {
-        Tool {
-            name: "task_get".into(),
-            description: "Retrieve a task by id before updating it or when more detail \
-                is needed than task_list provides."
-                .into(),
-            parameters: serde_json::to_value(schema_for!(TaskGetParams))
-                .expect("JsonSchema derive always serializes"),
-        }
-    }
-
-    async fn call(&self, args: Value) -> Result<ToolOutcome> {
-        let params: TaskGetParams = parse_params("task_get", args)?;
-        let task = self
-            .tasks
-            .get(&params.task_id)
-            .await
-            .map_err(|err| exec("task_get", &err))?;
-        let Some(task) = task else {
-            return Ok(json!({
-                "ok": false,
-                "observation_type": "state",
-                "object": "task",
-                "id": params.task_id,
-                "validated": false,
-                "diagnostics": ["Task not found"],
-                "task": null,
-            })
-            .into());
-        };
-        let tasks = self
-            .tasks
-            .list()
-            .await
-            .map_err(|err| exec("task_get", &err))?;
-        Ok(task_state_observation(&task, &tasks, "Task retrieved").into())
-    }
-}
-
-#[derive(Deserialize, JsonSchema)]
-struct TaskListParams {
+struct TaskReadParams {
+    /// Optional task id to retrieve one task. Omit to list tasks.
+    #[serde(default)]
+    task_id: Option<String>,
     /// Optional status filter.
     #[serde(default)]
     status: Option<TaskStatusParam>,
@@ -159,32 +111,48 @@ struct TaskListParams {
     include_completed: Option<bool>,
 }
 
-/// List tasks.
-pub struct TaskList {
+/// Read one task or list tasks.
+pub struct TaskRead {
     tasks: Arc<task::Manager>,
 }
 
 #[async_trait]
-impl BaseTool for TaskList {
+impl BaseTool for TaskRead {
     fn schema(&self) -> Tool {
         Tool {
-            name: "task_list".into(),
-            description: "List project-local tasks. Shows status, owner, and unresolved \
-                blockers. Call this before creating duplicate tasks, when resuming work, \
-                or after completing a task to find what remains."
+            name: "task_read".into(),
+            description: "Read project-local task state. Pass task_id to retrieve one task \
+                with full detail, or omit task_id to list tasks with optional status/owner \
+                filters. Use before creating duplicate tasks, editing dependencies, or \
+                resuming work."
                 .into(),
-            parameters: serde_json::to_value(schema_for!(TaskListParams))
+            parameters: serde_json::to_value(schema_for!(TaskReadParams))
                 .expect("JsonSchema derive always serializes"),
         }
     }
 
     async fn call(&self, args: Value) -> Result<ToolOutcome> {
-        let params: TaskListParams = parse_params("task_list", args)?;
+        let params: TaskReadParams = parse_params("task_read", args)?;
         let tasks = self
             .tasks
             .list()
             .await
-            .map_err(|err| exec("task_list", &err))?;
+            .map_err(|err| exec("task_read", &err))?;
+        if let Some(task_id) = params.task_id.as_deref() {
+            let Some(task) = tasks.iter().find(|task| task.id == task_id) else {
+                return Ok(json!({
+                    "ok": false,
+                    "observation_type": "state",
+                    "object": "task",
+                    "id": task_id,
+                    "validated": false,
+                    "diagnostics": ["Task not found"],
+                    "task": null,
+                })
+                .into());
+            };
+            return Ok(task_state_observation(task, &tasks, "Task retrieved").into());
+        }
         let filtered: Vec<Value> = tasks
             .iter()
             .filter(|task| should_include_task(task, &tasks, &params))
@@ -204,7 +172,7 @@ impl BaseTool for TaskList {
 }
 
 #[derive(Deserialize, JsonSchema)]
-struct TaskUpdateParams {
+struct TaskEditParams {
     /// Task id to update.
     task_id: String,
     /// Replacement title.
@@ -225,9 +193,9 @@ struct TaskUpdateParams {
     /// Clear owner when true.
     #[serde(default)]
     clear_owner: Option<bool>,
-    /// New status. Use deleted to remove the task entirely.
+    /// New status.
     #[serde(default)]
-    status: Option<TaskUpdateStatus>,
+    status: Option<TaskEditStatus>,
     /// Task ids that this task blocks.
     #[serde(default)]
     add_blocks: Vec<String>,
@@ -239,32 +207,27 @@ struct TaskUpdateParams {
     metadata: Option<BTreeMap<String, Value>>,
 }
 
-/// Update or delete a task.
-pub struct TaskUpdateTool {
+/// Edit a task.
+pub struct TaskEdit {
     tasks: Arc<task::Manager>,
 }
 
 #[async_trait]
-impl BaseTool for TaskUpdateTool {
+impl BaseTool for TaskEdit {
     fn schema(&self) -> Tool {
         Tool {
-            name: "task_update".into(),
+            name: "task_edit".into(),
             description: "Update a task's status, owner, details, metadata, or \
                 dependencies. Mark a task in_progress before starting it and completed \
-                only after the work is fully done. Use status=deleted only for tasks \
-                created in error or no longer relevant."
+                only after the work is fully done. Use task_delete to remove a task."
                 .into(),
-            parameters: serde_json::to_value(schema_for!(TaskUpdateParams))
+            parameters: serde_json::to_value(schema_for!(TaskEditParams))
                 .expect("JsonSchema derive always serializes"),
         }
     }
 
     async fn call(&self, args: Value) -> Result<ToolOutcome> {
-        let params: TaskUpdateParams = parse_params("task_update", args)?;
-        if params.status == Some(TaskUpdateStatus::Deleted) {
-            return self.delete_task(&params.task_id).await;
-        }
-
+        let params: TaskEditParams = parse_params("task_edit", args)?;
         let status = params.status.map(TaskStatus::from);
         let active_form = optional_field(params.active_form, params.clear_active_form);
         let owner = optional_field(params.owner, params.clear_owner);
@@ -284,7 +247,7 @@ impl BaseTool for TaskUpdateTool {
                 },
             )
             .await
-            .map_err(|err| exec("task_update", &err))?;
+            .map_err(|err| exec("task_edit", &err))?;
         let Some(outcome) = outcome else {
             return Ok(json!({
                 "ok": false,
@@ -300,7 +263,7 @@ impl BaseTool for TaskUpdateTool {
             .tasks
             .list()
             .await
-            .map_err(|err| exec("task_update", &err))?;
+            .map_err(|err| exec("task_edit", &err))?;
         Ok(json!({
             "ok": true,
             "observation_type": "state",
@@ -351,18 +314,42 @@ impl BaseTool for TaskRunTool {
     }
 }
 
-impl TaskUpdateTool {
-    async fn delete_task(&self, task_id: &str) -> Result<ToolOutcome> {
+#[derive(Deserialize, JsonSchema)]
+struct TaskDeleteParams {
+    /// Task id to delete.
+    task_id: String,
+}
+
+/// Delete a task.
+pub struct TaskDelete {
+    tasks: Arc<task::Manager>,
+}
+
+#[async_trait]
+impl BaseTool for TaskDelete {
+    fn schema(&self) -> Tool {
+        Tool {
+            name: "task_delete".into(),
+            description: "Delete a project-local task and remove dependency references to it. \
+                Use only for tasks created in error or no longer relevant."
+                .into(),
+            parameters: serde_json::to_value(schema_for!(TaskDeleteParams))
+                .expect("JsonSchema derive always serializes"),
+        }
+    }
+
+    async fn call(&self, args: Value) -> Result<ToolOutcome> {
+        let params: TaskDeleteParams = parse_params("task_delete", args)?;
         let deleted = self
             .tasks
-            .delete(task_id)
+            .delete(&params.task_id)
             .await
-            .map_err(|err| exec("task_update", &err))?;
+            .map_err(|err| exec("task_delete", &err))?;
         Ok(json!({
             "ok": deleted,
             "observation_type": "state",
             "object": "task",
-            "id": task_id,
+            "id": params.task_id,
             "validated": deleted,
             "diagnostics": if deleted { Vec::<&str>::new() } else { vec!["Task not found"] },
             "updated_fields": if deleted { vec!["deleted"] } else { Vec::<&str>::new() },
@@ -383,20 +370,18 @@ enum TaskStatusParam {
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq)]
 #[serde(rename_all = "snake_case")]
-enum TaskUpdateStatus {
+enum TaskEditStatus {
     Pending,
     InProgress,
     Completed,
-    Deleted,
 }
 
-impl From<TaskUpdateStatus> for TaskStatus {
-    fn from(value: TaskUpdateStatus) -> Self {
+impl From<TaskEditStatus> for TaskStatus {
+    fn from(value: TaskEditStatus) -> Self {
         match value {
-            TaskUpdateStatus::Pending => Self::Pending,
-            TaskUpdateStatus::InProgress => Self::InProgress,
-            TaskUpdateStatus::Completed => Self::Completed,
-            TaskUpdateStatus::Deleted => unreachable!("deleted is handled before conversion"),
+            TaskEditStatus::Pending => Self::Pending,
+            TaskEditStatus::InProgress => Self::InProgress,
+            TaskEditStatus::Completed => Self::Completed,
         }
     }
 }
@@ -404,7 +389,7 @@ impl From<TaskUpdateStatus> for TaskStatus {
 fn should_include_task(
     task: &task::Task,
     all_tasks: &[task::Task],
-    params: &TaskListParams,
+    params: &TaskReadParams,
 ) -> bool {
     if params.include_completed == Some(false) && task.status == TaskStatus::Completed {
         return false;
@@ -519,17 +504,17 @@ mod tests {
     async fn task_tools_create_update_and_list() {
         let dir = tempdir();
         let manager = Arc::new(task::Manager::new(&dir));
-        let create = TaskCreate {
+        let write = TaskWrite {
             tasks: manager.clone(),
         };
-        let update = TaskUpdateTool {
+        let edit = TaskEdit {
             tasks: manager.clone(),
         };
-        let list = TaskList {
+        let read = TaskRead {
             tasks: manager.clone(),
         };
 
-        let result = create
+        let result = write
             .call(json!({
                 "subject": "Run tests",
                 "description": "Run the Rust test suite",
@@ -538,23 +523,22 @@ mod tests {
             .await
             .unwrap();
         let ToolOutcome::Result(value) = result else {
-            panic!("task_create should return plain result");
+            panic!("task_write should return plain result");
         };
         let task_id = value["task"]["id"].as_str().unwrap().to_string();
-        update
-            .call(json!({
-                "task_id": task_id,
-                "status": "in_progress",
-                "owner": "main"
-            }))
-            .await
-            .unwrap();
-        let result = list
+        edit.call(json!({
+            "task_id": task_id,
+            "status": "in_progress",
+            "owner": "main"
+        }))
+        .await
+        .unwrap();
+        let result = read
             .call(json!({ "include_completed": false }))
             .await
             .unwrap();
         let ToolOutcome::Result(value) = result else {
-            panic!("task_list should return plain result");
+            panic!("task_read should return plain result");
         };
         assert_eq!(value["count"], 1);
         assert_eq!(value["tasks"][0]["status"], "in_progress");

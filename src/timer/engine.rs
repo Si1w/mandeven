@@ -326,7 +326,7 @@ mod tests {
         let mut file = StoreFile::default();
         let now = Utc::now();
         file.timers.push(Timer {
-            id: uuid::Uuid::now_v7().to_string(),
+            id: crate::utils::ids::new_timer_id(),
             target: TimerTargetRef::Task {
                 project: dir.to_string_lossy().into_owned(),
                 task_id: task.id.clone(),
@@ -363,7 +363,7 @@ mod tests {
     fn recompute_disables_expired_one_shot() {
         let now = Utc::now();
         let mut timers = vec![Timer {
-            id: uuid::Uuid::now_v7().to_string(),
+            id: crate::utils::ids::new_timer_id(),
             target: TimerTargetRef::Skill {
                 skill: "heartbeat".to_string(),
             },

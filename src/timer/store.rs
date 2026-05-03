@@ -9,10 +9,11 @@ use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
 
 use super::error::{Error, Result};
 use super::{Schedule, Timer, TimerTargetRef};
+use crate::utils::atomic::{AtomicWriteScope, atomic_write_text};
+use crate::utils::ids;
 
 /// Global timer store filename under `~/.mandeven/`.
 pub const GLOBAL_TIMER_FILENAME: &str = "timers.json";
@@ -76,18 +77,12 @@ impl Store {
             tokio::fs::create_dir_all(parent).await?;
         }
         let raw = serde_json::to_string_pretty(file)?;
-        let parent = self.path.parent().unwrap_or_else(|| Path::new("."));
-        let filename = self
-            .path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or(GLOBAL_TIMER_FILENAME);
-        let tmp = parent.join(format!(".{filename}.{}.tmp", Uuid::now_v7()));
-        tokio::fs::write(&tmp, format!("{raw}\n")).await?;
-        if let Err(err) = tokio::fs::rename(&tmp, &self.path).await {
-            let _ = tokio::fs::remove_file(&tmp).await;
-            return Err(err.into());
-        }
+        atomic_write_text(
+            &self.path,
+            &format!("{raw}\n"),
+            AtomicWriteScope::GlobalDataDir,
+        )
+        .await?;
         Ok(())
     }
 }
@@ -107,9 +102,9 @@ fn decode_store_file(raw: &str) -> Result<(StoreFile, bool)> {
 
 fn validate_store_file(file: &StoreFile) -> Result<()> {
     for timer in &file.timers {
-        if Uuid::parse_str(&timer.id).is_err() {
+        if !ids::is_timer_id(&timer.id) {
             return Err(Error::InvalidStore(format!(
-                "timer id must be a UUID: {}",
+                "timer id must be a short timer id: {}",
                 timer.id
             )));
         }
@@ -157,7 +152,7 @@ impl LegacySkillTimer {
             )));
         }
         Ok(Timer {
-            id: Uuid::now_v7().to_string(),
+            id: ids::new_timer_id(),
             target: TimerTargetRef::Skill { skill: self.skill },
             enabled: self.enabled,
             schedule: Schedule::cron(&self.expr)?,
@@ -194,10 +189,10 @@ mod tests {
     fn sample_timer() -> Timer {
         let now = Utc::now();
         Timer {
-            id: uuid::Uuid::now_v7().to_string(),
+            id: ids::new_timer_id(),
             target: TimerTargetRef::Task {
                 project: "project-a".to_string(),
-                task_id: uuid::Uuid::now_v7().to_string(),
+                task_id: crate::utils::ids::new_task_id(),
             },
             enabled: true,
             schedule: Schedule::every(Duration::minutes(15), now).unwrap(),
@@ -230,7 +225,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn load_migrates_legacy_skill_timer_ids_to_uuid() {
+    async fn load_migrates_legacy_skill_timer_ids_to_short_ids() {
         let dir = tempdir();
         let store = Store::new(&dir);
         tokio::fs::write(
@@ -255,7 +250,7 @@ mod tests {
 
         let loaded = store.load().await.unwrap();
         assert_eq!(loaded.timers.len(), 1);
-        assert!(Uuid::parse_str(&loaded.timers[0].id).is_ok());
+        assert!(ids::is_timer_id(&loaded.timers[0].id));
         assert_eq!(loaded.timers[0].target.skill_name(), Some("cron"));
 
         let persisted = tokio::fs::read_to_string(store.path()).await.unwrap();

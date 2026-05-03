@@ -7,4 +7,6 @@
 //! state), promote it to a top-level crate module instead of letting
 //! `utils` swell into a catchall.
 
+pub mod atomic;
+pub mod ids;
 pub mod workspace;

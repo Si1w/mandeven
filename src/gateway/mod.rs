@@ -11,8 +11,9 @@
 //!    changed) and the message does **not** reach the agent.
 //! 2. Otherwise (or when the command belongs to a later layer), looks up
 //!    — or creates —
-//!    the [`crate::bus::SessionID`] bound to the message's channel,
-//!    and forwards the message to the agent as an
+//!    the [`crate::bus::SessionID`] bound to the message's
+//!    `(channel, account, guild, peer)` identity, and forwards the
+//!    message to the agent as an
 //!    [`InboundDispatch`].
 //!
 //! The design follows `agent-examples/claw0`'s Gateway +
@@ -36,7 +37,7 @@ use crate::bus::{
 };
 use crate::command::CommandOutcome;
 use crate::command::slash::{self, SlashCommand};
-use crate::session;
+use crate::session::{self, Metadata};
 
 use self::commands::GatewayCommandCtx;
 
@@ -58,6 +59,8 @@ pub struct InboundDispatch {
     pub channel: ChannelID,
     /// Session the gateway attached to this message.
     pub session: SessionID,
+    /// Identity key used to select the session.
+    pub session_key: SessionKey,
     /// Payload propagated from the inbound message.
     pub payload: InboundPayload,
 }
@@ -78,21 +81,72 @@ pub fn dispatch_channel() -> (DispatchSender, DispatchReceiver) {
     (Sender::from_raw(tx), Receiver::from_raw(rx))
 }
 
-/// Bindings from a channel to its currently active storage session.
+/// Identity used by the gateway to bind inbound messages to an
+/// active storage session.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SessionKey {
+    /// Originating channel.
+    pub channel: ChannelID,
+    /// Bot / workspace / account identity.
+    pub account_id: Option<String>,
+    /// Guild / server identity.
+    pub guild_id: Option<String>,
+    /// Platform-specific user identity.
+    pub peer_id: Option<String>,
+}
+
+impl SessionKey {
+    /// Build a key from an inbound message's identity fields.
+    #[must_use]
+    pub fn from_inbound(msg: &InboundMessage) -> Self {
+        Self {
+            channel: msg.channel.clone(),
+            account_id: msg.account_id.clone(),
+            guild_id: msg.guild_id.clone(),
+            peer_id: msg.peer_id.clone(),
+        }
+    }
+
+    /// Build a channel-only key. Used for internal lookups that only
+    /// know the channel dimension, such as background TUI notices.
+    #[must_use]
+    pub fn channel_only(channel: ChannelID) -> Self {
+        Self {
+            channel,
+            account_id: None,
+            guild_id: None,
+            peer_id: None,
+        }
+    }
+
+    /// True when metadata belongs to this key. Identity fields match
+    /// strictly; session files created before identity metadata was
+    /// recorded are intentionally not mixed into scoped `/list`
+    /// output.
+    #[must_use]
+    pub fn matches_metadata(&self, meta: &Metadata) -> bool {
+        meta.channel == self.channel
+            && meta.account_id == self.account_id
+            && meta.guild_id == self.guild_id
+            && meta.peer_id == self.peer_id
+    }
+}
+
+/// Bindings from an inbound identity key to its currently active storage session.
 /// Owned by the gateway as the binding authority but cloned out to
 /// other subsystems (for example background timer notifications).
 /// `/new` and `/load` mutate the map; readers see the switch
 /// automatically through the shared `Arc`.
-pub type ActiveSessions = Arc<Mutex<HashMap<ChannelID, SessionID>>>;
+pub type ActiveSessions = Arc<Mutex<HashMap<SessionKey, SessionID>>>;
 
 /// Gateway — owns the inbound routing loop plus the session
 /// binding table.
 pub struct Gateway {
     /// See [`ActiveSessions`].
     active_sessions: ActiveSessions,
-    /// Per-channel snapshot of the most recent `/list` output, used
+    /// Per-identity snapshot of the most recent `/list` output, used
     /// by `/load <n>` to map a numeric index to a `SessionID`.
-    last_listed: Arc<Mutex<HashMap<ChannelID, Vec<SessionID>>>>,
+    last_listed: Arc<Mutex<HashMap<SessionKey, Vec<SessionID>>>>,
     /// Session store handle; the gateway reads metadata for `/list`
     /// and the channel reads message history when reacting to a
     /// `SessionSwitched` notice.
@@ -149,12 +203,14 @@ impl Gateway {
                 continue;
             }
 
-            let session = self.session_for(&msg).await;
+            let session_key = SessionKey::from_inbound(&msg);
+            let session = self.session_for(&session_key).await;
             let dispatch = InboundDispatch {
                 id: msg.id,
                 timestamp: msg.timestamp,
                 channel: msg.channel,
                 session,
+                session_key,
                 payload: msg.payload,
             };
             self.forward.send(dispatch).await?;
@@ -200,9 +256,11 @@ impl Gateway {
             return Ok(false);
         }
 
-        let before = self.bound_session(&msg.channel).await;
+        let session_key = SessionKey::from_inbound(msg);
+        let before = self.bound_session(&session_key).await;
         let ctx = GatewayCommandCtx {
             channel: msg.channel.clone(),
+            session_key: session_key.clone(),
             active_sessions: self.active_sessions.clone(),
             last_listed: self.last_listed.clone(),
             sessions: self.sessions.clone(),
@@ -213,7 +271,7 @@ impl Gateway {
             SlashCommand::Load { index } => ctx.load_session(index).await,
             _ => unreachable!("gateway command prechecked"),
         };
-        let after = self.bound_session(&msg.channel).await;
+        let after = self.bound_session(&session_key).await;
 
         if before != after
             && let Some(new_id) = after
@@ -233,18 +291,18 @@ impl Gateway {
         Ok(true)
     }
 
-    /// Snapshot the channel's currently bound session, if any.
-    async fn bound_session(&self, channel: &ChannelID) -> Option<SessionID> {
-        self.active_sessions.lock().await.get(channel).cloned()
+    /// Snapshot the identity key's currently bound session, if any.
+    async fn bound_session(&self, key: &SessionKey) -> Option<SessionID> {
+        self.active_sessions.lock().await.get(key).cloned()
     }
 
     /// Look up — or lazily create — the session bound to this
-    /// message's channel. Used by the forward path; gateway
+    /// identity key. Used by the forward path; gateway
     /// commands mutate the same map but go through
     /// [`GatewayCommandCtx`] helpers.
-    async fn session_for(&self, msg: &InboundMessage) -> SessionID {
+    async fn session_for(&self, key: &SessionKey) -> SessionID {
         let mut map = self.active_sessions.lock().await;
-        map.entry(msg.channel.clone())
+        map.entry(key.clone())
             .or_insert_with(SessionID::new)
             .clone()
     }
@@ -276,4 +334,95 @@ fn command_outcome_to_outbound(
         SessionID::new(),
         payload,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Utc;
+
+    fn metadata(
+        channel: &str,
+        account_id: Option<&str>,
+        guild_id: Option<&str>,
+        peer_id: Option<&str>,
+    ) -> Metadata {
+        let now = Utc::now();
+        Metadata {
+            title: "session".to_string(),
+            channel: ChannelID::new(channel),
+            account_id: account_id.map(ToString::to_string),
+            guild_id: guild_id.map(ToString::to_string),
+            peer_id: peer_id.map(ToString::to_string),
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    #[test]
+    fn session_key_uses_channel_account_guild_and_peer() {
+        let mut msg = InboundMessage::with_peer(
+            ChannelID::new("wechat"),
+            "peer-1",
+            InboundPayload::UserInput("hello".to_string()),
+        );
+        msg.account_id = Some("account-1".to_string());
+        msg.guild_id = Some("guild-1".to_string());
+
+        let key = SessionKey::from_inbound(&msg);
+
+        assert_eq!(key.channel, ChannelID::new("wechat"));
+        assert_eq!(key.account_id.as_deref(), Some("account-1"));
+        assert_eq!(key.guild_id.as_deref(), Some("guild-1"));
+        assert_eq!(key.peer_id.as_deref(), Some("peer-1"));
+    }
+
+    #[test]
+    fn session_key_matches_exact_metadata_identity() {
+        let key = SessionKey {
+            channel: ChannelID::new("discord"),
+            account_id: Some("account-1".to_string()),
+            guild_id: Some("guild-1".to_string()),
+            peer_id: Some("peer-1".to_string()),
+        };
+        let meta = metadata(
+            "discord",
+            Some("account-1"),
+            Some("guild-1"),
+            Some("peer-1"),
+        );
+
+        assert!(key.matches_metadata(&meta));
+    }
+
+    #[test]
+    fn session_key_rejects_metadata_with_missing_identity() {
+        let key = SessionKey {
+            channel: ChannelID::new("discord"),
+            account_id: Some("account-1".to_string()),
+            guild_id: Some("guild-1".to_string()),
+            peer_id: Some("peer-1".to_string()),
+        };
+        let missing = metadata("discord", None, None, None);
+
+        assert!(!key.matches_metadata(&missing));
+    }
+
+    #[test]
+    fn session_key_rejects_metadata_for_different_peer() {
+        let key = SessionKey {
+            channel: ChannelID::new("discord"),
+            account_id: Some("account-1".to_string()),
+            guild_id: Some("guild-1".to_string()),
+            peer_id: Some("peer-1".to_string()),
+        };
+        let other = metadata(
+            "discord",
+            Some("account-1"),
+            Some("guild-1"),
+            Some("peer-2"),
+        );
+
+        assert!(!key.matches_metadata(&other));
+    }
 }

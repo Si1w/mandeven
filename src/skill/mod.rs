@@ -21,7 +21,7 @@
 //!                       reference them via path expressions
 //! ```
 //!
-//! ## Two invocation paths
+//! ## Invocation paths
 //!
 //! 1. **User typed `/<name>`**: the CLI's slash-command parser falls
 //!    through to [`SkillIndex::get`], retrieves the body, and emits
@@ -35,11 +35,13 @@
 //!    timer engine invokes the body either in the foreground session
 //!    or, when `fork: true`, in a background cron-bucket session.
 //!
-//! Both paths share the same source of truth: a single
-//! [`SkillIndex`] loaded once at boot from
-//! `<data_dir>/skills/`. Built-in skills are seeded into that same
-//! directory when missing, so users can edit them like any other
-//! skill.
+//! All paths share the same source of truth: a single
+//! [`SkillIndex`] rooted at `<data_dir>/skills/`. Built-in skills
+//! are seeded into that same directory when missing, so users can
+//! edit them like any other skill. The index keeps a boot snapshot
+//! for fallback diagnostics but re-reads the directory on access,
+//! so runtime `SKILL.md` edits affect `/skills`, `/<name>`,
+//! `skill_use`, and skill timer execution without restarting.
 //!
 //! ## What v1 deliberately does not do
 //!
@@ -82,7 +84,7 @@ pub const SKILLS_SUBDIR: &str = "skills";
 pub struct SkillConfig {
     /// When `false`, the boot-time scan is skipped entirely:
     /// [`SkillIndex`] is empty, the `skills_index` prompt section is
-    /// omitted, and the `SkillTool` refuses every invocation. Default
+    /// omitted, and `skill_use` cannot resolve skill names. Default
     /// `true` so dropping a SKILL.md into the directory works without
     /// editing config.
     #[serde(default = "default_enabled")]

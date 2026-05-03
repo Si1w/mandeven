@@ -2,8 +2,9 @@
 //!
 //! A [`Skill`] is a [`SkillFrontmatter`] (parsed YAML metadata) plus
 //! the markdown body that follows it on disk. The [`SkillIndex`] is a
-//! flat ordered list, loaded once at boot, indexed by skill name for
-//! `O(n)` lookup — small `n` makes a `HashMap` unnecessary.
+//! flat ordered list plus an optional source directory. When a source
+//! directory is known, lookups re-read the directory so runtime edits
+//! to `SKILL.md` files take effect without restarting.
 
 use std::path::PathBuf;
 
@@ -57,11 +58,13 @@ pub struct Skill {
     pub source_path: PathBuf,
 }
 
-/// Read-only view of every loaded skill.
+/// Read-through view of every loaded skill.
 ///
 /// Constructed once by [`crate::skill::load`] at boot and shared via
 /// `Arc<SkillIndex>` between the prompt engine, the `SkillTool`, and
-/// the CLI's slash-command fallback.
+/// the CLI's slash-command fallback. When `source_dir` is present,
+/// accessors re-read the directory and fall back to the boot
+/// snapshot only if the scan itself fails.
 #[derive(Clone, Debug, Default)]
 pub struct SkillIndex {
     /// Insertion-ordered for stable rendering in the `/skills` overlay
@@ -69,6 +72,9 @@ pub struct SkillIndex {
     /// order at load time, which on most filesystems means
     /// alphabetical.
     skills: Vec<Skill>,
+    /// Source directory for hot reload. `None` for test-built indexes
+    /// and disabled skill support.
+    source_dir: Option<PathBuf>,
 }
 
 impl SkillIndex {
@@ -79,49 +85,77 @@ impl SkillIndex {
         Self::default()
     }
 
-    /// Construct from a pre-built `Vec<Skill>`. The loader uses this
-    /// after sorting; tests build small indexes directly.
+    /// Construct from a pre-built `Vec<Skill>`. Tests build small
+    /// indexes directly; runtime code uses [`Self::from_source`]
+    /// when skills are enabled.
     #[must_use]
     pub fn from_skills(skills: Vec<Skill>) -> Self {
-        Self { skills }
+        Self {
+            skills,
+            source_dir: None,
+        }
+    }
+
+    /// Construct a reloadable index rooted at `source_dir`.
+    #[must_use]
+    pub fn from_source(skills: Vec<Skill>, source_dir: PathBuf) -> Self {
+        Self {
+            skills,
+            source_dir: Some(source_dir),
+        }
     }
 
     /// Look up a skill by `name`. Linear scan — skill counts are in
     /// the dozens at most.
     #[must_use]
-    pub fn get(&self, name: &str) -> Option<&Skill> {
-        self.skills.iter().find(|s| s.frontmatter.name == name)
+    pub fn get(&self, name: &str) -> Option<Skill> {
+        self.current_skills()
+            .into_iter()
+            .find(|s| s.frontmatter.name == name)
     }
 
     /// `true` when no skills are loaded.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.skills.is_empty()
+        self.current_skills().is_empty()
     }
 
     /// Number of loaded skills.
     #[must_use]
     pub fn len(&self) -> usize {
-        self.skills.len()
+        self.current_skills().len()
     }
 
     /// Iterate `(name, description)` pairs in load order. The prompt
     /// engine and the `/skills` overlay both consume this view rather
     /// than touching `Skill` directly.
-    pub fn entries(&self) -> impl Iterator<Item = (&str, &str)> {
-        self.skills.iter().map(|s| {
-            (
-                s.frontmatter.name.as_str(),
-                s.frontmatter.description.as_str(),
-            )
-        })
+    pub fn entries(&self) -> impl Iterator<Item = (String, String)> {
+        self.current_skills()
+            .into_iter()
+            .map(|s| (s.frontmatter.name, s.frontmatter.description))
     }
 
     /// Iterate full skill records in load order. Used by runtime
     /// subsystems that consume optional skill metadata such as
     /// timer declarations.
-    pub fn skills(&self) -> impl Iterator<Item = &Skill> {
-        self.skills.iter()
+    pub fn skills(&self) -> impl Iterator<Item = Skill> {
+        self.current_skills().into_iter()
+    }
+
+    fn current_skills(&self) -> Vec<Skill> {
+        let Some(source_dir) = &self.source_dir else {
+            return self.skills.clone();
+        };
+        match crate::skill::loader::load_static(source_dir) {
+            Ok(skills) => skills,
+            Err(err) => {
+                eprintln!(
+                    "[skill] hot reload failed from {}: {err}; using boot snapshot",
+                    source_dir.display()
+                );
+                self.skills.clone()
+            }
+        }
     }
 }
 
@@ -185,7 +219,7 @@ mod tests {
     #[test]
     fn entries_preserves_insertion_order() {
         let idx = SkillIndex::from_skills(vec![skill("zulu", "z"), skill("alpha", "a")]);
-        let names: Vec<&str> = idx.entries().map(|(n, _)| n).collect();
+        let names: Vec<String> = idx.entries().map(|(n, _)| n).collect();
         assert_eq!(names, vec!["zulu", "alpha"]);
     }
 

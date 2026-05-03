@@ -66,8 +66,8 @@ impl EventHandler for Handler {
         }
 
         // Remember where to reply. Single-user MS0 model: latest
-        // writer wins; multi-user replies require gateway changes —
-        // see the multi-session TODO in `crate::channels`.
+        // allowed writer wins. Full multi-user support also needs
+        // per-peer outbound routing state in this adapter.
         *self.state.dm_channel.lock().await = Some(msg.channel_id);
 
         let payload = if let Some(body) = msg.content.strip_prefix('/') {

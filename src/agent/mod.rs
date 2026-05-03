@@ -109,8 +109,8 @@ pub struct Agent {
     /// Project-local task manager used by explicit `task_run`
     /// execution.
     tasks: Arc<task::Manager>,
-    /// Skill index used by global skill timers to expand timer ticks
-    /// into the same body the `/name` slash fallback would send.
+    /// Live skill index used by global skill timers to expand timer
+    /// ticks into the same body the `/name` slash fallback would send.
     skills: Arc<SkillIndex>,
     /// Machine-readable execution history writer. Timer-triggered
     /// tasks append JSONL events here.
@@ -122,7 +122,7 @@ pub struct Agent {
     /// `WeChat` adapter control handle, present iff the channel was
     /// registered.
     wechat: Option<crate::channels::wechat::WechatControl>,
-    /// Live view of the gateway's per-channel session bindings.
+    /// Live view of the gateway's per-identity session bindings.
     /// Background timer runs read this to send a final ambient
     /// notice to the user's current TUI session when there is one.
     /// Written only by the gateway.
@@ -136,15 +136,16 @@ pub struct Agent {
     /// ([`Agent::iteration`]) and the manual `/compact` command
     /// (`dispatch_command`) bump it from `&self` async contexts.
     compact_state: Arc<AsyncMutex<CompactState>>,
-    /// Prompt assembly engine. Owns `AGENTS.md` plus the section
-    /// cache; every call site goes through it so future per-task
-    /// prompt changes only touch one module.
+    /// Prompt assembly engine. Owns `AGENTS.md`, the live skill
+    /// index handle, and the section cache; every call site goes
+    /// through it so future per-task prompt changes only touch one
+    /// module.
     prompt: Arc<PromptEngine>,
     /// Hook engine. Fired at every lifecycle event (`UserPromptSubmit`,
-    /// `Pre/PostToolUse`, `SessionStart`, `Stop`, `Pre/PostCompact`,
+    /// `Pre/PostToolUse`, `SessionStart`, `Stop`, `Pre/PostCompact`).
     /// When `enabled = false` or no `hooks.json` exists, every fire
-    /// becomes a no-op so the
-    /// orchestration adds zero overhead.
+    /// becomes a no-op. When the file changes, the engine reloads it
+    /// on the next fire.
     hook: Arc<HookEngine>,
     /// Process launch directory captured once in `main`. Surfaces in
     /// the per-call `PromptContext.cwd` for `iteration_system` and
@@ -379,12 +380,20 @@ impl Agent {
         let InboundDispatch {
             channel,
             session,
+            session_key,
             payload,
             ..
         } = msg;
         match payload {
             InboundPayload::UserInput(text) => {
-                let iter = Iteration::visible(session.clone(), channel.clone(), None);
+                let iter = Iteration::visible_with_identity(
+                    session.clone(),
+                    channel.clone(),
+                    session_key.peer_id,
+                    session_key.account_id,
+                    session_key.guild_id,
+                    None,
+                );
                 if let Err(err) = self.iteration(&iter, text).await {
                     let reply = OutboundMessage::new(
                         channel.clone(),
@@ -513,7 +522,13 @@ impl Agent {
         let channel = ChannelID::new(DEFAULT_NOTIFY_CHANNEL);
         let session = {
             let map = self.active_sessions.lock().await;
-            map.get(&channel).cloned()
+            map.get(&crate::gateway::SessionKey::channel_only(channel.clone()))
+                .cloned()
+                .or_else(|| {
+                    map.iter()
+                        .find(|(key, _)| key.channel == channel)
+                        .map(|(_, session)| session.clone())
+                })
         }?;
         Some((channel, session))
     }
@@ -1544,7 +1559,14 @@ impl Agent {
             _ => fallback_title(first_text),
         };
         sessions
-            .create(&iter.session, title, iter.channel.clone())
+            .create_with_identity(
+                &iter.session,
+                title,
+                iter.channel.clone(),
+                iter.peer_id.clone(),
+                iter.account_id.clone(),
+                iter.guild_id.clone(),
+            )
             .await?;
         // SessionStart hook fires once per fresh session — never on
         // resume, never per iteration. `source: startup` distinguishes

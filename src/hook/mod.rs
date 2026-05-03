@@ -40,8 +40,9 @@
 //! ```
 //!
 //! Hook definitions live in `~/.mandeven/hooks.json` so they can be
-//! changed without editing the toml. The v1 engine snapshots the file
-//! at boot; hot reload needs an explicit reload path or file watcher.
+//! changed without editing the toml. The engine reloads the file on
+//! the next hook event after its modification time changes; parse
+//! failures keep the previous valid hook set active.
 
 pub mod engine;
 pub mod error;

@@ -35,6 +35,12 @@ pub struct Iteration {
     pub session: SessionID,
     /// Channel that produced the user input and will receive the reply.
     pub channel: ChannelID,
+    /// Platform-specific user identity, when available.
+    pub peer_id: Option<String>,
+    /// Bot / workspace / account identity, when available.
+    pub account_id: Option<String>,
+    /// Guild / server identity, when available.
+    pub guild_id: Option<String>,
     /// Session store that owns this iteration's transcript.
     pub scope: SessionScope,
     /// Output delivery behavior.
@@ -49,9 +55,26 @@ impl Iteration {
     /// project bucket.
     #[must_use]
     pub fn visible(session: SessionID, channel: ChannelID, exec_id: Option<ExecId>) -> Self {
+        Self::visible_with_identity(session, channel, None, None, None, exec_id)
+    }
+
+    /// Construct a normal user-visible iteration with full inbound
+    /// identity metadata.
+    #[must_use]
+    pub fn visible_with_identity(
+        session: SessionID,
+        channel: ChannelID,
+        peer_id: Option<String>,
+        account_id: Option<String>,
+        guild_id: Option<String>,
+        exec_id: Option<ExecId>,
+    ) -> Self {
         Self {
             session,
             channel,
+            peer_id,
+            account_id,
+            guild_id,
             scope: SessionScope::Foreground,
             delivery: DeliveryMode::Visible,
             exec_id,
@@ -64,6 +87,9 @@ impl Iteration {
         Self {
             session,
             channel,
+            peer_id: None,
+            account_id: None,
+            guild_id: None,
             scope: SessionScope::Cron,
             delivery: DeliveryMode::Silent,
             exec_id,

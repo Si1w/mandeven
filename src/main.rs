@@ -70,9 +70,10 @@ async fn main() -> Result<(), DynError> {
     let sessions = Arc::new(session::Manager::new(project_bucket.clone()).await?);
     let cron_sessions = Arc::new(session::Manager::new(config::cron_bucket()).await?);
 
-    // Skill index reads ~/.mandeven/skills/<name>/SKILL.md once at
-    // boot. Disabled => empty index, no SkillTool registration, no
-    // skills_index section in the prompt.
+    // Skill index roots at ~/.mandeven/skills/<name>/SKILL.md and
+    // re-reads on access. Disabled => empty index and no
+    // skills_index section in the prompt; SkillTool remains
+    // registered but cannot resolve names.
     let skill_index = if cfg.agent.skill.enabled {
         skill::seed_builtins(&cfg.data_dir())?;
         skill::load(&cfg.data_dir().join(skill::SKILLS_SUBDIR))?
@@ -86,15 +87,19 @@ async fn main() -> Result<(), DynError> {
 
     // Prompt engine reads global ~/.mandeven/AGENTS.md plus
     // project-local AGENTS.md files discovered from the launch CWD
-    // upward. It borrows the skill index for the skills_index
+    // upward. It shares the live skill index for the skills_index
     // section. The section cache fills lazily as iteration_system is
     // called.
-    let prompts = Arc::new(PromptEngine::load(&cfg.data_dir(), &cwd, &skill_index)?);
+    let prompts = Arc::new(PromptEngine::load(
+        &cfg.data_dir(),
+        &cwd,
+        skill_index.clone(),
+    )?);
 
-    // Hook engine reads ~/.mandeven/hooks.json once at boot. When
-    // the file is absent or `[agent.hook] enabled = false`, the
-    // engine becomes a no-op — every fire() returns immediately
-    // without spawning anything.
+    // Hook engine reads ~/.mandeven/hooks.json at boot and reloads
+    // it on the next hook event after the file changes. When the
+    // file is absent or `[agent.hook] enabled = false`, the engine
+    // becomes a no-op.
     let hooks = Arc::new(HookEngine::load(cfg.agent.hook.enabled, &cfg.data_dir())?);
 
     // Three queues:
@@ -107,7 +112,7 @@ async fn main() -> Result<(), DynError> {
     drop(bus);
     let (dispatch_tx, dispatch_rx) = dispatch_channel();
 
-    // Shared per-channel session map: gateway is the writer, the
+    // Shared per-identity session map: gateway is the writer, the
     // agent reads it when a background timer needs to notify the
     // currently active TUI session.
     let active_sessions = Arc::new(Mutex::new(HashMap::new()));
@@ -202,9 +207,7 @@ fn build_tool_registry(
         &mut registry,
         Arc::new(timer::Manager::new(data_dir, project_bucket)),
     );
-    if !skill_index.is_empty() {
-        registry.register(Arc::new(tools::skill::SkillTool::new(skill_index.clone())));
-    }
+    registry.register(Arc::new(tools::skill::SkillTool::new(skill_index.clone())));
     registry
 }
 

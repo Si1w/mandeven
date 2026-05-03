@@ -1,14 +1,17 @@
 //! Boot-time and per-call content that fills the dynamic tail of an
 //! assembled [`crate::prompt::SystemPrompt`].
 //!
-//! Two distinct flavors of "context" — kept in one module because
+//! Three distinct flavors of "context" — kept in one module because
 //! they share the same architectural slot (everything in here is
 //! emitted AFTER the static template block):
 //!
 //! 1. **Boot-time** — global and project-local `AGENTS.md` files,
 //!    read once by [`crate::prompt::PromptEngine::load`] and kept in
 //!    memory for the lifetime of the engine.
-//! 2. **Run-stable** — `env_info` (model id, cwd). Computed each call
+//! 2. **Live** — `skills_index`, rebuilt from the shared
+//!    [`crate::skill::SkillIndex`] so runtime skill edits can appear
+//!    on the next iteration.
+//! 3. **Run-stable** — `env_info` (model id, cwd). Computed each call
 //!    from arguments, but the inputs do not change for a given run,
 //!    so the rendered bytes go through [`crate::prompt::SectionCache`]
 //!    and are byte-stable.

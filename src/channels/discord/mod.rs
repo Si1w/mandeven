@@ -23,11 +23,9 @@
 //! the `/discord` toggle command) opens or closes the gateway
 //! connection without restarting the process.
 //!
-//! Multi-user routing is intentionally not yet supported: the gateway
-//! today binds one [`crate::bus::SessionID`] per [`crate::bus::ChannelID`],
-//! so two Discord users would share a session. Single-user installs
-//! are correct; multi-user requires the gateway change tracked by the
-//! multi-session TODO in `crate::channels`.
+//! Session routing keys include channel + peer identity, but this
+//! adapter remains MS0 single-user because the allowlist and outbound
+//! DM target are single-peer state.
 
 mod bridge;
 mod control;

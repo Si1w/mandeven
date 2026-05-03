@@ -3,8 +3,8 @@
 //! Scope (MS0):
 //!
 //! - Personal `WeChat`/iLink route, not `WeCom`.
-//! - Direct messages only. Group chats are dropped because the current
-//!   gateway binds one active session per channel.
+//! - Direct messages only. Group chats are dropped in this MS0 adapter
+//!   because outbound reply state is single-peer.
 //! - Runtime-mutable single-user allowlist, persisted under
 //!   `<data_dir>/channels/wechat/allowlist.json`.
 //! - QR login persists account credentials under

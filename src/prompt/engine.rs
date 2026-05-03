@@ -5,6 +5,8 @@
 //!
 //! - The boot-time global/project `AGENTS.md` string (read once at
 //!   [`PromptEngine::load`]).
+//! - A shared [`SkillIndex`], which can re-read `skills/` on access
+//!   so the `skills_index` section reflects runtime skill edits.
 //! - A [`SectionCache`] keyed by section name so every section of
 //!   [`PromptEngine::iteration_system`] is byte-identical from one call to
 //!   the next, keeping `DeepSeek`'s prefix cache hot.
@@ -20,13 +22,14 @@
 //! without touching every call site.
 
 use std::path::Path;
+use std::sync::Arc;
 
 use crate::llm::Message;
 use crate::skill::SkillIndex;
 
 use super::context::{
-    AGENTS_MD_NAME, ENV_INFO_NAME, SKILLS_INDEX_NAME, agents_md_section, env_info_section,
-    load_agents_md, skills_index_section,
+    AGENTS_MD_NAME, ENV_INFO_NAME, agents_md_section, env_info_section, load_agents_md,
+    skills_index_section,
 };
 use super::error::Result;
 use super::section::{Section, SectionCache, SystemPrompt};
@@ -55,38 +58,32 @@ pub struct PromptContext<'a> {
 pub struct PromptEngine {
     /// `AGENTS.md` body, `None` when the file is absent.
     agents_md: Option<String>,
-    /// Snapshot of skill `(name, description)` pairs, captured once
-    /// at construction so the cached `skills_index` section is built
-    /// from a stable input. Empty when no skills are loaded.
-    skill_entries: Vec<(String, String)>,
+    /// Skill catalog. The index reloads from disk on access, so
+    /// changes under `skills/` appear in the prompt on the next
+    /// iteration.
+    skills: Arc<SkillIndex>,
     cache: SectionCache,
 }
 
 impl PromptEngine {
     /// Construct an engine from the per-user data directory
-    /// ([`crate::config::home_dir`]), launch CWD, and boot-time
+    /// ([`crate::config::home_dir`]), launch CWD, and shared
     /// [`SkillIndex`].
     ///
-    /// Reads global + project `AGENTS.md` files once and snapshots
-    /// the skill catalog into a `Vec<(name, description)>` — the
-    /// engine doesn't keep an `Arc<SkillIndex>` because the only
-    /// piece of skill state it needs is the index for the prompt
-    /// section. The rest of the agent reaches the index through its
-    /// own `Arc`.
+    /// Reads global + project `AGENTS.md` files once. Skill entries
+    /// are resolved later while building each iteration prompt so
+    /// runtime edits to `SKILL.md` can update `skills_index` without
+    /// restarting.
     ///
     /// # Errors
     ///
     /// - [`super::error::Error::AgentsMdRead`] when `AGENTS.md`
     ///   exists but the read fails.
-    pub fn load(data_dir: &Path, cwd: &Path, skills: &SkillIndex) -> Result<Self> {
+    pub fn load(data_dir: &Path, cwd: &Path, skills: Arc<SkillIndex>) -> Result<Self> {
         let agents_md = load_agents_md(data_dir, cwd)?;
-        let skill_entries: Vec<(String, String)> = skills
-            .entries()
-            .map(|(n, d)| (n.to_string(), d.to_string()))
-            .collect();
         Ok(Self {
             agents_md,
-            skill_entries,
+            skills,
             cache: SectionCache::new(),
         })
     }
@@ -103,7 +100,7 @@ impl PromptEngine {
     /// actions                   ← static, cached
     /// using_tools               ← static, cached
     /// tone                      ← static, cached
-    /// skills_index (optional)   ← cached, omitted when no skills
+    /// skills_index (optional)   ← live skill index, omitted when no skills
     /// agents_md (optional)      ← cached
     /// env_info                  ← cached
     /// ```
@@ -113,12 +110,15 @@ impl PromptEngine {
     /// model needs to know what skills exist before reading the
     /// project-specific instructions.
     ///
-    /// Every section flows through [`SectionCache`] so the rendered
-    /// bytes are stable for the lifetime of the engine — the
-    /// load-bearing invariant for `DeepSeek`'s automatic prefix
-    /// cache. [`Self::clear_cache`] is the one explicit invalidation
-    /// path, called from `/compact` after the conversation prefix
-    /// has been rewritten or from `/switch` when model metadata changes.
+    /// Static, `AGENTS.md`, and environment sections flow through
+    /// [`SectionCache`] so their rendered bytes are stable for the
+    /// lifetime of the engine — the load-bearing invariant for
+    /// `DeepSeek`'s automatic prefix cache. `skills_index` is the
+    /// deliberate exception: it is rebuilt from the live skill index
+    /// so runtime skill edits take effect on the next iteration.
+    /// [`Self::clear_cache`] is the one explicit invalidation path,
+    /// called from `/compact` after the conversation prefix has been
+    /// rewritten or from `/switch` when model metadata changes.
     ///
     /// # Panics
     ///
@@ -132,15 +132,9 @@ impl PromptEngine {
             prompt.push(self.cached(section.name, || trim_static(section.content)));
         }
 
-        if !self.skill_entries.is_empty() {
-            let entries = self.skill_entries.clone();
-            prompt.push(self.cached(SKILLS_INDEX_NAME, move || {
-                // `skills_index_section` returns Some when entries
-                // is non-empty; we already gated on that above.
-                skills_index_section(&entries)
-                    .expect("non-empty entries produce Some")
-                    .content
-            }));
+        let entries: Vec<(String, String)> = self.skills.entries().collect();
+        if let Some(section) = skills_index_section(&entries) {
+            prompt.push(section);
         }
 
         if let Some(content) = &self.agents_md {
@@ -212,7 +206,7 @@ mod tests {
     }
 
     fn engine_no_skills(data_dir: &Path) -> PromptEngine {
-        PromptEngine::load(data_dir, data_dir, &SkillIndex::new()).unwrap()
+        PromptEngine::load(data_dir, data_dir, Arc::new(SkillIndex::new())).unwrap()
     }
 
     fn engine_with_skills(data_dir: &Path, skills: Vec<(&str, &str)>) -> PromptEngine {
@@ -230,7 +224,12 @@ mod tests {
                 source_path: PathBuf::from(format!("/tmp/{n}/SKILL.md")),
             })
             .collect();
-        PromptEngine::load(data_dir, data_dir, &SkillIndex::from_skills(skills)).unwrap()
+        PromptEngine::load(
+            data_dir,
+            data_dir,
+            Arc::new(SkillIndex::from_skills(skills)),
+        )
+        .unwrap()
     }
 
     #[test]

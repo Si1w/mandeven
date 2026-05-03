@@ -1,5 +1,5 @@
-//! [`HookEngine`] — loads `hooks.json` once at boot, then fires
-//! matching hooks at lifecycle events.
+//! [`HookEngine`] — loads `hooks.json` at boot, reloads it when the
+//! file changes, then fires matching hooks at lifecycle events.
 //!
 //! Thread model: each `fire()` call runs every matching hook
 //! sequentially within the call. Hooks of the same event from
@@ -12,7 +12,8 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::time::Duration;
+use std::sync::Mutex;
+use std::time::{Duration, SystemTime};
 
 use regex::Regex;
 use serde::Deserialize;
@@ -71,16 +72,25 @@ impl HookFireResult {
     }
 }
 
-/// Hook engine. Loaded once at boot, shared via `Arc<HookEngine>`.
+#[derive(Debug, Clone)]
+struct HookSnapshot {
+    file: HookFile,
+    matchers: HashMap<(HookEvent, usize), Regex>,
+}
+
+#[derive(Debug, Clone)]
+struct HookState {
+    snapshot: HookSnapshot,
+    modified: Option<SystemTime>,
+}
+
+/// Hook engine. Loaded at boot, shared via `Arc<HookEngine>`, and
+/// reloaded on demand when `hooks.json` changes.
 #[derive(Debug)]
 pub struct HookEngine {
     enabled: bool,
-    file: HookFile,
-    /// Pre-compiled regexes keyed by `(event, matcher_index)`. Built
-    /// at [`Self::load`] so per-fire cost is `O(matched matchers)`.
-    /// Matchers without a `matcher` field are absent here and
-    /// "always match" downstream.
-    matchers: HashMap<(HookEvent, usize), Regex>,
+    path: PathBuf,
+    state: Mutex<HookState>,
     /// Resolved `~/.mandeven/` (or `$MANDEVEN_HOME`). Surfaces as
     /// `MANDEVEN_PROJECT_DIR` env var to every hook.
     data_dir: PathBuf,
@@ -105,39 +115,19 @@ impl HookEngine {
         if !enabled {
             return Ok(Self {
                 enabled: false,
-                file: HookFile::default(),
-                matchers: HashMap::new(),
+                path: data_dir.join(HOOKS_FILENAME),
+                state: Mutex::new(HookState::empty()),
                 data_dir: data_dir.to_path_buf(),
             });
         }
 
         let path = data_dir.join(HOOKS_FILENAME);
-        let raw = match std::fs::read_to_string(&path) {
-            Ok(s) => s,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(Self {
-                    enabled: true,
-                    file: HookFile::default(),
-                    matchers: HashMap::new(),
-                    data_dir: data_dir.to_path_buf(),
-                });
-            }
-            Err(source) => {
-                return Err(Error::FileRead { path, source });
-            }
-        };
-
-        let file: HookFile = serde_json::from_str(&raw).map_err(|source| Error::Parse {
-            path: path.clone(),
-            source,
-        })?;
-
-        let matchers = compile_matchers(&file)?;
+        let state = load_state(&path)?;
 
         Ok(Self {
             enabled: true,
-            file,
-            matchers,
+            path,
+            state: Mutex::new(state),
             data_dir: data_dir.to_path_buf(),
         })
     }
@@ -159,7 +149,11 @@ impl HookEngine {
         session_id: &str,
         cwd: &Path,
     ) -> HookFireResult {
-        if !self.enabled || self.file.is_empty() {
+        if !self.enabled {
+            return HookFireResult::default();
+        }
+        let snapshot = self.snapshot();
+        if snapshot.file.is_empty() {
             return HookFireResult::default();
         }
 
@@ -184,8 +178,8 @@ impl HookEngine {
         };
 
         let mut outcomes = Vec::new();
-        for (idx, matcher_block) in self.file.matchers(event).iter().enumerate() {
-            if !self.matcher_matches(event, idx, matcher_block, target) {
+        for (idx, matcher_block) in snapshot.file.matchers(event).iter().enumerate() {
+            if !matcher_matches(&snapshot.matchers, event, idx, matcher_block, target) {
                 continue;
             }
             for hook in &matcher_block.hooks {
@@ -199,27 +193,30 @@ impl HookEngine {
         HookFireResult { outcomes }
     }
 
-    /// Test whether `matcher_block` applies to the current target.
-    /// `None` matcher = "match everything"; events without a target
-    /// also "match everything" (matcher field is documentation only
-    /// for those events).
-    fn matcher_matches(
-        &self,
-        event: HookEvent,
-        idx: usize,
-        block: &HookMatcher,
-        target: Option<&str>,
-    ) -> bool {
-        let Some(_) = block.matcher.as_ref() else {
-            return true;
-        };
-        let Some(target) = target else {
-            return true;
-        };
-        let Some(re) = self.matchers.get(&(event, idx)) else {
-            return true;
-        };
-        re.is_match(target)
+    fn snapshot(&self) -> HookSnapshot {
+        let current_modified = file_modified(&self.path).unwrap_or_else(|err| {
+            eprintln!(
+                "[hook] failed to stat {} for reload: {err}",
+                self.path.display()
+            );
+            None
+        });
+
+        let mut state = self.state.lock().expect("hook state lock poisoned");
+        if current_modified != state.modified {
+            match load_state(&self.path) {
+                Ok(next) => {
+                    *state = next;
+                }
+                Err(err) => {
+                    eprintln!(
+                        "[hook] failed to reload {}; keeping previous hooks: {err}",
+                        self.path.display()
+                    );
+                }
+            }
+        }
+        state.snapshot.clone()
     }
 
     /// Spawn one hook, write the stdin payload, await the result
@@ -371,6 +368,72 @@ fn parse_decision(stdout: &str) -> Option<Decision> {
     }
 }
 
+impl HookState {
+    fn empty() -> Self {
+        Self {
+            snapshot: HookSnapshot {
+                file: HookFile::default(),
+                matchers: HashMap::new(),
+            },
+            modified: None,
+        }
+    }
+}
+
+fn load_state(path: &Path) -> Result<HookState> {
+    let raw = match std::fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(HookState::empty()),
+        Err(source) => {
+            return Err(Error::FileRead {
+                path: path.to_path_buf(),
+                source,
+            });
+        }
+    };
+
+    let file: HookFile = serde_json::from_str(&raw).map_err(|source| Error::Parse {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    let matchers = compile_matchers(&file)?;
+    Ok(HookState {
+        snapshot: HookSnapshot { file, matchers },
+        modified: file_modified(path).unwrap_or(None),
+    })
+}
+
+fn file_modified(path: &Path) -> std::io::Result<Option<SystemTime>> {
+    match std::fs::metadata(path) {
+        Ok(meta) => meta.modified().map(Some),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(err),
+    }
+}
+
+/// Test whether `matcher_block` applies to the current target.
+/// `None` matcher = "match everything"; events without a target
+/// also "match everything" (matcher field is documentation only
+/// for those events).
+fn matcher_matches(
+    matchers: &HashMap<(HookEvent, usize), Regex>,
+    event: HookEvent,
+    idx: usize,
+    block: &HookMatcher,
+    target: Option<&str>,
+) -> bool {
+    let Some(_) = block.matcher.as_ref() else {
+        return true;
+    };
+    let Some(target) = target else {
+        return true;
+    };
+    let Some(re) = matchers.get(&(event, idx)) else {
+        return true;
+    };
+    re.is_match(target)
+}
+
 /// Pre-compile every matcher regex. Indexed by
 /// `(event, matcher_block_index)` so the runtime lookup is `O(1)`.
 fn compile_matchers(file: &HookFile) -> Result<HashMap<(HookEvent, usize), Regex>> {
@@ -426,6 +489,26 @@ mod tests {
             .fire(HookEvent::Stop, None, json!({}), "sess", &dir)
             .await;
         assert!(result.outcomes.is_empty());
+    }
+
+    #[tokio::test]
+    async fn engine_reloads_hooks_when_file_appears() {
+        let dir = tempdir();
+        let engine = HookEngine::load(true, &dir).unwrap();
+        let result = engine
+            .fire(HookEvent::Stop, None, json!({}), "sess", &dir)
+            .await;
+        assert!(result.outcomes.is_empty());
+
+        write_hooks(
+            &dir,
+            r#"{"Stop":[{"hooks":[{"command":"echo reloaded"}]}]}"#,
+        );
+        let result = engine
+            .fire(HookEvent::Stop, None, json!({}), "sess", &dir)
+            .await;
+        assert_eq!(result.outcomes.len(), 1);
+        assert!(result.outcomes[0].stdout.contains("reloaded"));
     }
 
     #[tokio::test]

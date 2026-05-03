@@ -8,7 +8,7 @@
 //!
 //! ```text
 //! <base_dir>/<uuid>.jsonl:
-//!   {"_type":"metadata","title":"...","created_at":"...","updated_at":"..."}
+//!   {"_type":"metadata","title":"...","channel":"tui","peer_id":"...","created_at":"...","updated_at":"..."}
 //!   {"seq":1,"timestamp":"...","_type":"message","role":"user","content":"hi"}
 //!   {"seq":2,"timestamp":"...","_type":"message","role":"assistant","content":"hello"}
 //!   {"seq":3,"timestamp":"...","_type":"compact","summary":"...","messages":[...]}
@@ -51,12 +51,11 @@ const METADATA_MARKER: &str = "metadata";
 ///
 /// Schema note: the `channel` field is non-optional — every session
 /// must record which channel produced it, so `/list`-style commands
-/// can filter accurately once multiple channels coexist. Session
-/// files written before this field was introduced will fail to
-/// parse; callers are expected to delete them (the project bucket is
-/// gitignored and holds only local state).
+/// can filter accurately once multiple channels coexist. Optional
+/// account/guild/peer fields refine that scope for multi-user
+/// channels; the gateway matches them strictly when listing or
+/// loading sessions.
 //
-// TODO(multi-peer):   peer_id:  Option<String>
 // TODO(multi-agent):  agent_id: Option<String>
 // TODO(tagging):      tags:     Vec<String>
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -67,6 +66,16 @@ pub struct Metadata {
     /// Channel that produced this session. Used by the gateway's
     /// `/list` to scope output to a single channel's sessions.
     pub channel: ChannelID,
+    /// Platform-specific user identity, when the channel provides
+    /// one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peer_id: Option<String>,
+    /// Bot / workspace / account identity, when relevant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_id: Option<String>,
+    /// Guild / server identity, when relevant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guild_id: Option<String>,
     /// When the session was first created.
     pub created_at: DateTime<Utc>,
     /// When the session was last modified. Appends do not rewrite the
@@ -186,6 +195,25 @@ impl Manager {
     /// Returns [`Error::Io`] or [`Error::Json`] on filesystem or
     /// serialization failure.
     pub async fn create(&self, id: &SessionID, title: String, channel: ChannelID) -> Result<()> {
+        self.create_with_identity(id, title, channel, None, None, None)
+            .await
+    }
+
+    /// Write a fresh session file with an explicit inbound identity.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Io`] or [`Error::Json`] on filesystem or
+    /// serialization failure.
+    pub async fn create_with_identity(
+        &self,
+        id: &SessionID,
+        title: String,
+        channel: ChannelID,
+        peer_id: Option<String>,
+        account_id: Option<String>,
+        guild_id: Option<String>,
+    ) -> Result<()> {
         let lock = self.lock_for(id).await;
         let _guard = lock.lock().await;
 
@@ -195,6 +223,9 @@ impl Manager {
             metadata: Metadata {
                 title,
                 channel,
+                peer_id,
+                account_id,
+                guild_id,
                 created_at: now,
                 updated_at: now,
             },
@@ -641,6 +672,31 @@ mod tests {
         let metadata = manager.metadata(&id).await.unwrap().unwrap();
 
         assert_eq!(metadata.updated_at, records[0].timestamp);
+        let _ = tokio::fs::remove_dir_all(dir).await;
+    }
+
+    #[tokio::test]
+    async fn create_with_identity_persists_peer_account_and_guild() {
+        let dir = temp_session_dir();
+        let manager = Manager::new(dir.clone()).await.unwrap();
+        let id = SessionID::new();
+        manager
+            .create_with_identity(
+                &id,
+                "test".to_string(),
+                ChannelID::new("discord"),
+                Some("peer-1".to_string()),
+                Some("account-1".to_string()),
+                Some("guild-1".to_string()),
+            )
+            .await
+            .unwrap();
+
+        let metadata = manager.metadata(&id).await.unwrap().unwrap();
+        assert_eq!(metadata.peer_id.as_deref(), Some("peer-1"));
+        assert_eq!(metadata.account_id.as_deref(), Some("account-1"));
+        assert_eq!(metadata.guild_id.as_deref(), Some("guild-1"));
+
         let _ = tokio::fs::remove_dir_all(dir).await;
     }
 

@@ -148,11 +148,9 @@ pub struct CliState {
     /// always shows the bottom of the transcript (auto-follow). Set
     /// back to `true` when the user pages down to the bottom.
     pub follow_bottom: bool,
-    /// Snapshot of `(name, description)` pairs from the boot-time
-    /// [`crate::skill::SkillIndex`]. Empty when no skills are
-    /// loaded; used by [`Overlay::Skills`] rendering only — the
-    /// `/<name>` fallback hits the live `Arc<SkillIndex>` on
-    /// [`CliChannel`] directly.
+    /// Snapshot of `(name, description)` pairs for
+    /// [`Overlay::Skills`] rendering. Refreshed from the live
+    /// [`crate::skill::SkillIndex`] each time `/skills` is opened.
     pub skills: Vec<(String, String)>,
     /// Watch receiver for the Discord adapter's `active` flag, when
     /// the channel is configured. The TUI top bar reads `*rx.borrow()`
@@ -315,10 +313,7 @@ impl CliChannel {
         discord_active: Option<tokio::sync::watch::Receiver<bool>>,
         wechat_active: Option<tokio::sync::watch::Receiver<bool>>,
     ) -> Self {
-        let skill_snapshot: Vec<(String, String)> = skills
-            .entries()
-            .map(|(n, d)| (n.to_string(), d.to_string()))
-            .collect();
+        let skill_snapshot: Vec<(String, String)> = skills.entries().collect();
         let state = CliState {
             skills: skill_snapshot,
             show_thinking,
@@ -749,7 +744,10 @@ impl CliChannel {
                 true
             }
             SlashCommand::Skills => {
-                self.state.lock().unwrap().open_overlay(Overlay::Skills);
+                let skill_snapshot: Vec<(String, String)> = self.skills.entries().collect();
+                let mut state = self.state.lock().unwrap();
+                state.skills = skill_snapshot;
+                state.open_overlay(Overlay::Skills);
                 self.redraw.notify_one();
                 true
             }

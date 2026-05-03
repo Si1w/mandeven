@@ -34,7 +34,7 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     if cfg.agent.skill.enabled {
         timer::sync_skill_timers(&cfg.data_dir(), &skills).await?;
     }
-    let prompts = PromptEngine::load(&cfg.data_dir(), &cwd, &skills)?;
+    let prompts = PromptEngine::load(&cfg.data_dir(), &cwd, skills.clone())?;
     let mut registry = tools::Registry::new();
     let project_bucket = config::project_bucket(&cwd);
     tools::register_builtins(&mut registry);
@@ -43,9 +43,7 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         &mut registry,
         Arc::new(timer::Manager::new(&cfg.data_dir(), &project_bucket)),
     );
-    if !skills.is_empty() {
-        registry.register(Arc::new(tools::skill::SkillTool::new(skills.clone())));
-    }
+    registry.register(Arc::new(tools::skill::SkillTool::new(skills.clone())));
 
     let system = prompts
         .iteration_system(&PromptContext {

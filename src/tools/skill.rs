@@ -40,18 +40,18 @@ struct SkillParams {
 /// Tool the model calls to invoke a SKILL.md workflow by name.
 ///
 /// Holds an `Arc<SkillIndex>` so it can resolve names against the
-/// boot-time catalog. The same `SkillIndex` is shared with the
-/// prompt engine (for the `skills_index` section) and the CLI
-/// fallback (for `/<name>` user invocation), so all three views see
-/// the same set of skills.
+/// live catalog. The same `SkillIndex` is shared with the prompt
+/// engine (for the `skills_index` section) and the CLI fallback
+/// (for `/<name>` user invocation), so all three views see the same
+/// set of skills.
 pub struct SkillTool {
     index: Arc<SkillIndex>,
 }
 
 impl SkillTool {
-    /// Construct a tool bound to `index`. The index is loaded once
-    /// at boot and never mutated for the run, so the `Arc` is purely
-    /// for sharing.
+    /// Construct a tool bound to `index`. The index may re-read its
+    /// source directory on access; the `Arc` gives every caller the
+    /// same live view.
     #[must_use]
     pub fn new(index: Arc<SkillIndex>) -> Self {
         Self { index }

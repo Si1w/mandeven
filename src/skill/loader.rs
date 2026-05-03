@@ -1,8 +1,8 @@
 //! Skill discovery and frontmatter parsing.
 //!
-//! Scans `<data_dir>/skills/<name>/SKILL.md` once at boot — same
-//! shape Claude Code uses for `~/.claude/skills/<name>/SKILL.md` (see
-//! `agent-examples/claude-code-analysis/src/skills/loadSkillsDir.ts`).
+//! Scans `<data_dir>/skills/<name>/SKILL.md` into a reloadable index
+//! with the same shape Claude Code uses for
+//! `~/.claude/skills/<name>/SKILL.md`.
 //!
 //! Frontmatter parsing uses `serde_yaml` because mandeven supports
 //! Claude Code-compatible fields such as `allowed-tools`, plus
@@ -34,10 +34,19 @@ pub const SKILL_FILENAME: &str = "SKILL.md";
 ///
 /// - [`Error::DirRead`] when the directory exists but is unreadable.
 pub fn load(skills_dir: &Path) -> Result<SkillIndex> {
+    Ok(SkillIndex::from_source(
+        load_static(skills_dir)?,
+        skills_dir.to_path_buf(),
+    ))
+}
+
+/// Discover and parse every skill under `skills_dir` without
+/// attaching reload metadata. Used by [`SkillIndex`] hot reload.
+pub(crate) fn load_static(skills_dir: &Path) -> Result<Vec<Skill>> {
     let entries = match fs::read_dir(skills_dir) {
         Ok(it) => it,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(SkillIndex::new());
+            return Ok(Vec::new());
         }
         Err(source) => {
             return Err(Error::DirRead {
@@ -75,7 +84,7 @@ pub fn load(skills_dir: &Path) -> Result<SkillIndex> {
         }
     }
 
-    Ok(SkillIndex::from_skills(skills))
+    Ok(skills)
 }
 
 /// Load one SKILL.md file and verify its frontmatter is consistent
@@ -277,7 +286,20 @@ mod tests {
         write_skill(&dir, "zulu", "name: zulu\ndescription: z", "");
         write_skill(&dir, "alpha", "name: alpha\ndescription: a", "");
         let idx = load(&dir).unwrap();
-        let names: Vec<&str> = idx.entries().map(|(n, _)| n).collect();
-        assert_eq!(names, vec!["alpha", "zulu"]);
+        let names: Vec<String> = idx.entries().map(|(n, _)| n).collect();
+        assert_eq!(names, vec!["alpha".to_string(), "zulu".to_string()]);
+    }
+
+    #[test]
+    fn reloadable_index_sees_runtime_skill_additions() {
+        let dir = tempdir();
+        write_skill(&dir, "alpha", "name: alpha\ndescription: a", "old");
+
+        let idx = load(&dir).unwrap();
+        assert!(idx.get("bravo").is_none());
+
+        write_skill(&dir, "bravo", "name: bravo\ndescription: b", "new");
+
+        assert_eq!(idx.get("bravo").unwrap().body, "new");
     }
 }

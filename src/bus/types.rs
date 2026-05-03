@@ -69,7 +69,7 @@ impl ChannelID {
 ///
 /// Carries only **identity** fields — no `SessionID`. The gateway is
 /// the session authority: it derives or looks up the binding between
-/// `(channel, peer, account, guild)` and a concrete `SessionID`
+/// `(channel, account, guild, peer)` and a concrete `SessionID`
 /// before forwarding the message into the agent loop as an
 /// [`crate::gateway::InboundDispatch`]. This mirrors the
 /// routing model used in `agent-examples/claw0` — channels know

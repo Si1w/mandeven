@@ -1,18 +1,18 @@
 //! Gateway-level slash commands.
 //!
 //! These commands operate on the gateway's binding state (which
-//! storage [`SessionID`] is currently bound to a given channel) and
-//! on the session store. They run after channel-local commands miss
+//! storage [`SessionID`] is currently bound to a given inbound
+//! identity) and on the session store. They run after channel-local commands miss
 //! and before falling through to the agent router; channels reach
 //! them by forwarding [`crate::bus::InboundPayload::Command`] over
 //! the bus.
 //!
 //! Currently handled:
 //!
-//! - `/new` — bind the channel to a fresh session id
-//! - `/list` — list this channel's known sessions, snapshot for
+//! - `/new` — bind the inbound identity to a fresh session id
+//! - `/list` — list this identity's known sessions, snapshot for
 //!   subsequent `/load <n>`
-//! - `/load <n>` — bind the channel to the n-th session in the
+//! - `/load <n>` — bind the identity to the n-th session in the
 //!   most recent `/list` snapshot
 
 use std::collections::HashMap;
@@ -24,6 +24,7 @@ use tokio::sync::Mutex;
 
 use crate::bus::{ChannelID, SessionID};
 use crate::command::CommandOutcome;
+use crate::gateway::SessionKey;
 use crate::session;
 
 /// How session timestamps are formatted in `/list` output.
@@ -41,15 +42,17 @@ const LIST_TITLE_MAX_CHARS: usize = 60;
 /// `Arc` clone of each field is cheap so this is not a hot path.
 pub struct GatewayCommandCtx {
     /// Channel originating this command — used as the key into
-    /// [`Self::active_sessions`] and [`Self::last_listed`].
+    /// outbound replies.
     pub channel: ChannelID,
-    /// Bindings from a channel to the currently bound storage
-    /// session. `/new` and `/load` mutate the entry for `channel`.
-    pub active_sessions: Arc<Mutex<HashMap<ChannelID, SessionID>>>,
-    /// Per-channel snapshot of the most recent `/list` output, used
+    /// Full inbound identity key used for session binding.
+    pub session_key: SessionKey,
+    /// Bindings from identity key to the currently bound storage
+    /// session. `/new` and `/load` mutate the entry for `session_key`.
+    pub active_sessions: Arc<Mutex<HashMap<SessionKey, SessionID>>>,
+    /// Per-identity snapshot of the most recent `/list` output, used
     /// by `/load <n>` to resolve a numeric index back to a concrete
     /// `SessionID` without re-listing.
-    pub last_listed: Arc<Mutex<HashMap<ChannelID, Vec<SessionID>>>>,
+    pub last_listed: Arc<Mutex<HashMap<SessionKey, Vec<SessionID>>>>,
     /// Session store handle.
     pub sessions: Arc<session::Manager>,
 }
@@ -59,19 +62,19 @@ impl GatewayCommandCtx {
         self.active_sessions
             .lock()
             .await
-            .insert(self.channel.clone(), id);
+            .insert(self.session_key.clone(), id);
     }
 
     async fn set_last_listed(&self, ids: Vec<SessionID>) {
         self.last_listed
             .lock()
             .await
-            .insert(self.channel.clone(), ids);
+            .insert(self.session_key.clone(), ids);
     }
 
     async fn lookup_listed(&self, idx: usize) -> Option<SessionID> {
         let map = self.last_listed.lock().await;
-        map.get(&self.channel).and_then(|v| v.get(idx).cloned())
+        map.get(&self.session_key).and_then(|v| v.get(idx).cloned())
     }
 
     pub(crate) async fn new_session(&self) -> CommandOutcome {
@@ -93,7 +96,7 @@ impl GatewayCommandCtx {
             // from showing the rest. Corruption surfaces loudly via
             // the load path instead.
             if let Ok(Some(meta)) = self.sessions.metadata(&id).await
-                && meta.channel == self.channel
+                && self.session_key.matches_metadata(&meta)
             {
                 entries.push((id, meta.title, meta.updated_at));
             }

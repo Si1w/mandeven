@@ -21,11 +21,10 @@
 //
 // Session routing today is owned by `gateway`: channels emit
 // identity-only `InboundMessage`s, and the gateway attaches the
-// concrete `SessionID` before dispatching to the agent. The current
-// active-session key is still `ChannelID`, which is sufficient for
-// the TUI and MS0 single-user external adapters. Multi-user routing
-// should extend that key to include account/guild/peer identity while
-// keeping session choice out of individual channel implementations.
+// concrete `SessionID` before dispatching to the agent. The active
+// session key includes channel/account/guild/peer identity; channel
+// implementations should keep publishing identity and leave session
+// choice out of individual adapters.
 
 pub mod common;
 pub mod discord;

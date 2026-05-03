@@ -1,6 +1,6 @@
 //! Persistence for the Discord adapter's allowlist.
 //!
-//! Lives at `<data_dir>/discord/allowlist.json`. Runtime-mutable
+//! Lives at `<data_dir>/channels/discord/allowlist.json`. Runtime-mutable
 //! state goes into a JSON sidecar so users can change it via slash
 //! commands without editing `mandeven.toml`.
 //!
@@ -16,8 +16,11 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use tokio::fs;
 
-/// Subdirectory of the data dir holding Discord-specific runtime
-/// state. Lives next to `projects/`, etc.
+/// Shared subdirectory for external-channel runtime state.
+pub const CHANNELS_SUBDIR: &str = "channels";
+
+/// Subdirectory of [`CHANNELS_SUBDIR`] holding Discord-specific
+/// runtime state.
 pub const DISCORD_SUBDIR: &str = "discord";
 
 /// Filename inside [`DISCORD_SUBDIR`] holding the user-id allowlist.
@@ -33,7 +36,39 @@ struct AllowlistFile {
 /// Resolve the on-disk path of the Discord allowlist sidecar.
 #[must_use]
 pub fn allowlist_path(data_dir: &Path) -> PathBuf {
+    data_dir
+        .join(CHANNELS_SUBDIR)
+        .join(DISCORD_SUBDIR)
+        .join(ALLOWLIST_FILENAME)
+}
+
+/// Previous v1 location. Kept only for one-way startup migration.
+#[must_use]
+pub fn legacy_allowlist_path(data_dir: &Path) -> PathBuf {
     data_dir.join(DISCORD_SUBDIR).join(ALLOWLIST_FILENAME)
+}
+
+/// Load from the canonical path, falling back to the legacy path when
+/// needed and copying legacy data forward.
+///
+/// # Errors
+///
+/// Returns the underlying I/O error when probing for either path
+/// fails or the legacy file cannot be migrated to the canonical
+/// location.
+pub async fn load_or_migrate(data_dir: &Path) -> io::Result<(PathBuf, HashSet<u64>)> {
+    let path = allowlist_path(data_dir);
+    if fs::try_exists(&path).await? {
+        return load(&path).await.map(|ids| (path, ids));
+    }
+
+    let legacy_path = legacy_allowlist_path(data_dir);
+    if fs::try_exists(&legacy_path).await? {
+        let ids = load(&legacy_path).await?;
+        save(&path, &ids).await?;
+        return Ok((path, ids));
+    }
+    Ok((path, HashSet::new()))
 }
 
 /// Load the allow list from disk.
@@ -87,7 +122,10 @@ pub async fn save<S: BuildHasher>(path: &Path, ids: &HashSet<u64, S>) -> io::Res
 
 #[cfg(test)]
 mod tests {
-    use super::{ALLOWLIST_FILENAME, DISCORD_SUBDIR, allowlist_path, load, save};
+    use super::{
+        ALLOWLIST_FILENAME, CHANNELS_SUBDIR, DISCORD_SUBDIR, allowlist_path, legacy_allowlist_path,
+        load, load_or_migrate, save,
+    };
     use std::collections::HashSet;
     use std::path::PathBuf;
 
@@ -102,9 +140,18 @@ mod tests {
     }
 
     #[test]
-    fn allowlist_path_lives_under_discord_subdir() {
+    fn allowlist_path_lives_under_channel_discord_subdir() {
         let base = PathBuf::from("/tmp/data");
         let p = allowlist_path(&base);
+        assert!(p.ends_with(format!(
+            "{CHANNELS_SUBDIR}/{DISCORD_SUBDIR}/{ALLOWLIST_FILENAME}"
+        )));
+    }
+
+    #[test]
+    fn legacy_allowlist_path_keeps_old_location() {
+        let base = PathBuf::from("/tmp/data");
+        let p = legacy_allowlist_path(&base);
         assert!(p.ends_with(format!("{DISCORD_SUBDIR}/{ALLOWLIST_FILENAME}")));
     }
 
@@ -127,5 +174,20 @@ mod tests {
         save(&path, &ids).await.expect("save");
         let loaded = load(&path).await.expect("load");
         assert_eq!(loaded, ids);
+    }
+
+    #[tokio::test]
+    async fn load_or_migrate_copies_legacy_file_forward() {
+        let dir = tmp_dir("migrate");
+        let legacy = legacy_allowlist_path(&dir);
+        let mut ids = HashSet::new();
+        ids.insert(42u64);
+        save(&legacy, &ids).await.expect("save legacy");
+
+        let (path, loaded) = load_or_migrate(&dir).await.expect("migrate");
+
+        assert_eq!(path, allowlist_path(&dir));
+        assert_eq!(loaded, ids);
+        assert_eq!(load(&path).await.expect("load new"), ids);
     }
 }

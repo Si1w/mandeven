@@ -21,10 +21,10 @@
 //!       tasks/
 //! ```
 //!
-//! Project-local overrides (e.g. a `<project>/.agents/AGENTS.md`
-//! overlay on top of the global `AGENTS.md`) are intentionally **not**
-//! implemented yet. The convention is reserved here so future code can
-//! land it without renegotiating the layout.
+//! Project-local instruction overlays are plain `AGENTS.md` files in
+//! the workspace tree. The prompt layer reads the global
+//! `~/.mandeven/AGENTS.md` first, then `AGENTS.md` files discovered
+//! from the launch CWD upward.
 
 use std::env;
 use std::path::{Path, PathBuf};
@@ -46,10 +46,6 @@ pub const PROJECTS_SUBDIR: &str = "projects";
 
 /// Fixed project bucket name for background timer/task sessions.
 pub const CRON_BUCKET_NAME: &str = "cron";
-
-/// Reserved name for future project-local overrides. Not consumed yet
-/// — see the module-level docstring.
-pub const PROJECT_OVERRIDE_SUBDIR: &str = ".agents";
 
 /// Maximum length of a sanitized path component. APFS / ext4 / NTFS all
 /// cap individual components at 255 bytes; 200 leaves room for the

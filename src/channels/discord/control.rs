@@ -9,11 +9,11 @@
 //!
 //! 1. **Allow list** — `allow|deny|list` mutate the shared
 //!    [`AllowList`] (Arc-backed) and persist to the JSON sidecar.
-//! 2. **Connection lifecycle** — `enable|disable` flip a watch
+//! 2. **Connection lifecycle** — the `/discord` toggle flips a watch
 //!    channel that the supervisor loop in
 //!    [`super::DiscordChannel::start`] subscribes to.
-//! 3. **Token resolution** — `enable` re-reads the configured env
-//!    var so token rotation works without a process restart.
+//! 3. **Token resolution** — enabling re-reads the configured env var
+//!    so token rotation works without a process restart.
 //!
 //! Cloning the handle is cheap; every clone shares the same
 //! underlying state.

@@ -3,7 +3,8 @@
 //!
 //! The engine owns:
 //!
-//! - The boot-time `AGENTS.md` string (read once at [`PromptEngine::load`]).
+//! - The boot-time global/project `AGENTS.md` string (read once at
+//!   [`PromptEngine::load`]).
 //! - A [`SectionCache`] keyed by section name so every section of
 //!   [`PromptEngine::iteration_system`] is byte-identical from one call to
 //!   the next, keeping `DeepSeek`'s prefix cache hot.
@@ -63,21 +64,22 @@ pub struct PromptEngine {
 
 impl PromptEngine {
     /// Construct an engine from the per-user data directory
-    /// ([`crate::config::home_dir`]) plus the boot-time
+    /// ([`crate::config::home_dir`]), launch CWD, and boot-time
     /// [`SkillIndex`].
     ///
-    /// Reads `AGENTS.md` once and snapshots the skill catalog into a
-    /// `Vec<(name, description)>` — the engine doesn't keep an
-    /// `Arc<SkillIndex>` because the only piece of skill state it
-    /// needs is the index for the prompt section. The rest of the
-    /// agent reaches the index through its own `Arc`.
+    /// Reads global + project `AGENTS.md` files once and snapshots
+    /// the skill catalog into a `Vec<(name, description)>` — the
+    /// engine doesn't keep an `Arc<SkillIndex>` because the only
+    /// piece of skill state it needs is the index for the prompt
+    /// section. The rest of the agent reaches the index through its
+    /// own `Arc`.
     ///
     /// # Errors
     ///
     /// - [`super::error::Error::AgentsMdRead`] when `AGENTS.md`
     ///   exists but the read fails.
-    pub fn load(data_dir: &Path, skills: &SkillIndex) -> Result<Self> {
-        let agents_md = load_agents_md(data_dir)?;
+    pub fn load(data_dir: &Path, cwd: &Path, skills: &SkillIndex) -> Result<Self> {
+        let agents_md = load_agents_md(data_dir, cwd)?;
         let skill_entries: Vec<(String, String)> = skills
             .entries()
             .map(|(n, d)| (n.to_string(), d.to_string()))
@@ -210,7 +212,7 @@ mod tests {
     }
 
     fn engine_no_skills(data_dir: &Path) -> PromptEngine {
-        PromptEngine::load(data_dir, &SkillIndex::new()).unwrap()
+        PromptEngine::load(data_dir, data_dir, &SkillIndex::new()).unwrap()
     }
 
     fn engine_with_skills(data_dir: &Path, skills: Vec<(&str, &str)>) -> PromptEngine {
@@ -221,7 +223,6 @@ mod tests {
                     name: n.into(),
                     description: d.into(),
                     allowed_tools: Vec::new(),
-                    user_invocable: true,
                     timers: None,
                     fork: false,
                 },
@@ -229,7 +230,7 @@ mod tests {
                 source_path: PathBuf::from(format!("/tmp/{n}/SKILL.md")),
             })
             .collect();
-        PromptEngine::load(data_dir, &SkillIndex::from_skills(skills)).unwrap()
+        PromptEngine::load(data_dir, data_dir, &SkillIndex::from_skills(skills)).unwrap()
     }
 
     #[test]

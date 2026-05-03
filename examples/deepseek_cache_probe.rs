@@ -34,7 +34,7 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     if cfg.agent.skill.enabled {
         timer::sync_skill_timers(&cfg.data_dir(), &skills).await?;
     }
-    let prompts = PromptEngine::load(&cfg.data_dir(), &skills)?;
+    let prompts = PromptEngine::load(&cfg.data_dir(), &cwd, &skills)?;
     let mut registry = tools::Registry::new();
     let project_bucket = config::project_bucket(&cwd);
     tools::register_builtins(&mut registry);

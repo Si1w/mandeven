@@ -113,7 +113,6 @@ mod tests {
                 name: name.into(),
                 description: format!("desc for {name}"),
                 allowed_tools: Vec::new(),
-                user_invocable: true,
                 timers: None,
                 fork: false,
             },

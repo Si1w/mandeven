@@ -93,7 +93,7 @@ pub(super) fn interactive() -> Result<AppConfig> {
         sandbox: crate::security::SandboxConfig::default(),
         // Seed `[channels.discord]` even though the bot is off by
         // default. The section's mere presence opts the user into the
-        // adapter, so `/discord enable` works on day one without the
+        // adapter, so `/discord` works on day one without the
         // user having to hand-edit `mandeven.toml`.
         channels: ChannelsConfig {
             discord: Some(DiscordConfig {

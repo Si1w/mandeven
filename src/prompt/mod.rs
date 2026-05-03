@@ -16,7 +16,7 @@
 //! - [`static_prompt`] — the built-in static system-prompt manifest
 //!   whose prose lives in `src/prompt/static/*.md`.
 //! - [`context`] — boot-time and per-call dynamic content
-//!   (`AGENTS.md`, `env_info`).
+//!   (global/project `AGENTS.md`, `env_info`).
 //! - [`specialized`] — single-purpose prompts (title generation and
 //!   compact summary) that do **not** share sections with the main
 //!   iteration prompt.
@@ -32,14 +32,13 @@
 //! of this system message; the agent injects it as transient user
 //! context during request assembly.
 //!
-//! ## Project-local overlay (deferred)
+//! ## AGENTS.md overlay
 //!
-//! `~/.mandeven/AGENTS.md` is the per-user overlay supported in v1. A
-//! future per-project `<project>/.agents/AGENTS.md` overlay will stack
-//! on top of the global file (Claude Code's `~/.claude/CLAUDE.md` +
-//! `<project>/.claude/CLAUDE.md` model). The path constant
-//! [`crate::config::PROJECT_OVERRIDE_SUBDIR`] is reserved for that
-//! work; the actual stacking logic lives here once it lands.
+//! `~/.mandeven/AGENTS.md` is the per-user global overlay. In
+//! addition, mandeven walks from the launch CWD upward and loads any
+//! `AGENTS.md` files it finds, root-to-leaf. This keeps the runtime
+//! convention aligned with Codex-style repository instructions while
+//! still supporting a global user file.
 
 pub mod context;
 pub mod engine;

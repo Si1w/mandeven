@@ -12,9 +12,9 @@ use serde::{Deserialize, Deserializer};
 /// Parsed YAML frontmatter at the top of a `SKILL.md` file.
 ///
 /// Mandeven follows Claude Code's spelling for user-facing skill
-/// keys (`allowed-tools`, `user-invocable`) so skills can be ported
-/// without pointless schema churn. Only fields used by mandeven are
-/// modeled here; unknown frontmatter keys are ignored by serde.
+/// keys such as `allowed-tools` so skills can be ported without
+/// pointless schema churn. Only fields used by mandeven are modeled
+/// here; unknown frontmatter keys are ignored by serde.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 pub struct SkillFrontmatter {
     /// Skill identifier; must match the on-disk directory name and
@@ -32,9 +32,6 @@ pub struct SkillFrontmatter {
         deserialize_with = "deserialize_string_list"
     )]
     pub allowed_tools: Vec<String>,
-    /// Whether the user can invoke this skill as `/<name>`.
-    #[serde(default = "default_user_invocable", rename = "user-invocable")]
-    pub user_invocable: bool,
     /// Optional global cron expression. When present, the timer store
     /// materializes a UUID-backed skill timer for this skill.
     #[serde(default)]
@@ -128,10 +125,6 @@ impl SkillIndex {
     }
 }
 
-fn default_user_invocable() -> bool {
-    true
-}
-
 fn deserialize_string_list<'de, D>(deserializer: D) -> std::result::Result<Vec<String>, D::Error>
 where
     D: Deserializer<'de>,
@@ -173,7 +166,6 @@ mod tests {
                 name: name.into(),
                 description: desc.into(),
                 allowed_tools: Vec::new(),
-                user_invocable: true,
                 timers: None,
                 fork: false,
             },

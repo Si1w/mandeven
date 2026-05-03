@@ -84,10 +84,12 @@ async fn main() -> Result<(), DynError> {
     }
     let skill_index = Arc::new(skill_index);
 
-    // Prompt engine reads ~/.mandeven/AGENTS.md once at boot and
-    // borrows the skill index for the skills_index section. The
-    // section cache fills lazily as iteration_system is called.
-    let prompts = Arc::new(PromptEngine::load(&cfg.data_dir(), &skill_index)?);
+    // Prompt engine reads global ~/.mandeven/AGENTS.md plus
+    // project-local AGENTS.md files discovered from the launch CWD
+    // upward. It borrows the skill index for the skills_index
+    // section. The section cache fills lazily as iteration_system is
+    // called.
+    let prompts = Arc::new(PromptEngine::load(&cfg.data_dir(), &cwd, &skill_index)?);
 
     // Hook engine reads ~/.mandeven/hooks.json once at boot. When
     // the file is absent or `[agent.hook] enabled = false`, the
@@ -212,8 +214,8 @@ fn build_tool_registry(
 /// user has not opted into Discord at all). When the section exists
 /// the channel is **always** built — `enabled = true` only triggers
 /// an auto-enable here so the connection is open at boot. The user
-/// can flip the gateway connection at runtime via `/discord
-/// enable|disable` in either case.
+/// can flip the gateway connection at runtime via `/discord` in
+/// either case.
 ///
 /// Pulled out of `main` to keep the bootstrap sequence linear and
 /// stay under the `too_many_lines` lint threshold.
@@ -223,13 +225,14 @@ async fn build_discord(
     let Some(discord_cfg) = cfg.channels.discord.as_ref() else {
         return Ok((None, None));
     };
-    let store_path = discord::allowlist_path(&cfg.data_dir());
-    let initial_allowed = discord::store::load(&store_path).await.map_err(|err| {
-        format!(
-            "failed to load discord allowlist from {}: {err}",
-            store_path.display()
-        )
-    })?;
+    let (store_path, initial_allowed) = discord::store::load_or_migrate(&cfg.data_dir())
+        .await
+        .map_err(|err| {
+            format!(
+                "failed to load discord allowlist from {}: {err}",
+                discord::allowlist_path(&cfg.data_dir()).display()
+            )
+        })?;
     let (channel, control) = DiscordChannel::build(
         ChannelID::new(DISCORD_CHANNEL),
         discord_cfg,

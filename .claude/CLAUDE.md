@@ -1,3 +1,22 @@
+## Path Hint
+
+This file is the shared repository instruction source for Claude and Codex.
+
+- Claude reads it from `.claude/CLAUDE.md`.
+- Codex reads the repository-level `AGENTS.md`, which should be a symlink to
+  this file.
+- These rules apply to the whole repository.
+
+## Agent Operating Rules
+
+- Treat the worktree as shared. Do not revert, overwrite, or clean up changes
+  you did not make unless the user explicitly asks for that operation.
+- Keep edits focused on the user's request and follow the existing module
+  structure under `src/`.
+- Prefer `rg` and `rg --files` for searching.
+- Do not create commits unless the user asks. When asked to commit, keep commits
+  small and give them clear messages.
+
 ## Development Workflow
 
 These principles govern *how* work gets done in this project. They apply to every feature, refactor, and non-trivial bug fix.
@@ -15,7 +34,7 @@ These principles govern *how* work gets done in this project. They apply to ever
 
 ### Development Rhythm
 
-- **Small, frequent commits.** Commit each working increment with a clear message. Future you will `git bisect` and thank past you.
+- **Small, focused increments.** Keep each working increment coherent. If the user asks for commits, commit each increment with a clear message.
 - **Happy path first, then edges.** Get the main flow working before chasing every edge case or error branch.
 - **Tag `TODO` / `FIXME` consciously.** Mark temporary solutions explicitly — don't let them silently become permanent.
 

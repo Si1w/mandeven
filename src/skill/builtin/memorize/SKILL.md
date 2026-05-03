@@ -1,7 +1,6 @@
 ---
 name: memorize
 description: Update MEMORY.md when the user explicitly asks to remember, forget, or preserve a durable preference, correction, fact, or collaboration rule.
-user-invocable: true
 allowed-tools: file_read file_edit
 ---
 

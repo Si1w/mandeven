@@ -76,7 +76,18 @@ impl Store {
             tokio::fs::create_dir_all(parent).await?;
         }
         let raw = serde_json::to_string_pretty(file)?;
-        tokio::fs::write(&self.path, format!("{raw}\n")).await?;
+        let parent = self.path.parent().unwrap_or_else(|| Path::new("."));
+        let filename = self
+            .path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or(GLOBAL_TIMER_FILENAME);
+        let tmp = parent.join(format!(".{filename}.{}.tmp", Uuid::now_v7()));
+        tokio::fs::write(&tmp, format!("{raw}\n")).await?;
+        if let Err(err) = tokio::fs::rename(&tmp, &self.path).await {
+            let _ = tokio::fs::remove_file(&tmp).await;
+            return Err(err.into());
+        }
         Ok(())
     }
 }

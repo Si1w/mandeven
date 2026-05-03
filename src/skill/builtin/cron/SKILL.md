@@ -1,7 +1,6 @@
 ---
 name: cron
 description: Create, update, list, or run cron-like delayed and recurring work through task and timer state.
-user-invocable: true
 allowed-tools: task_* timer_*
 ---
 

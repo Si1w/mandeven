@@ -68,15 +68,14 @@ pub struct ChannelsConfig {
 /// Discord adapter configuration.
 ///
 /// MS0 scope: DM-only with a runtime-mutable allowlist + runtime
-/// enable/disable. Server / guild channels are not supported.
+/// toggle. Server / guild channels are not supported.
 ///
 /// Section semantics:
 /// - **Section absent** ⇒ Discord adapter is not registered at all
 ///   and `/discord ...` returns a "not configured" notice.
 /// - **Section present** ⇒ adapter is always registered; `enabled`
 ///   only chooses whether the gateway connection is opened at boot.
-///   `/discord enable|disable` toggles the connection at runtime
-///   without a restart.
+///   `/discord` toggles the connection at runtime without a restart.
 ///
 /// The allowed-user list and the resolved bot token never live here;
 /// see [`crate::channels::discord`] for where they are persisted.
@@ -84,15 +83,15 @@ pub struct ChannelsConfig {
 pub struct DiscordConfig {
     /// Auto-start the gateway connection at boot. Defaults to
     /// `false` so `[channels.discord]` (empty body) registers the
-    /// adapter without auto-connecting — the user runs `/discord
-    /// enable` when ready. Setting `true` connects on launch.
+    /// adapter without auto-connecting — the user runs `/discord`
+    /// when ready. Setting `true` connects on launch.
     #[serde(default)]
     pub enabled: bool,
 
     /// Name of the environment variable that holds the bot token.
     /// Defaults to `DISCORD_BOT_TOKEN`. The token itself never lives
     /// in `mandeven.toml` so the file stays safe to commit. Re-read
-    /// on every `/discord enable` so token rotation works without
+    /// on every `/discord` start so token rotation works without
     /// a restart.
     #[serde(default = "default_discord_token_env")]
     pub token_env: String,

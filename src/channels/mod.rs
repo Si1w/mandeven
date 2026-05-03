@@ -19,17 +19,13 @@
 //! - **External / network adapters** (future: `discord/`, `slack/`,
 //!   `telegram/`, …) live as subdirectories of this module.
 //
-// TODO(multi-session): InboundMessage today carries an explicit
-// SessionID because each channel fixes one at construction. When
-// multi-session support lands, channels should instead emit
-// (channel, chat_id, sender_id) and let the agent derive SessionID
-// via session_key = "{channel}:{chat_id}" — this is the nanobot
-// pattern (see agent-examples/nanobot/bus/events.py).
-//
-// TODO(hook-system): agent-loop lifecycle hooks (before_iteration,
-// on_stream, finalize_content, …) are orthogonal to channels but
-// worth noting here: add when a concrete driver appears (think-tag
-// stripping, tool-call auditing, per-delta metrics).
+// Session routing today is owned by `gateway`: channels emit
+// identity-only `InboundMessage`s, and the gateway attaches the
+// concrete `SessionID` before dispatching to the agent. The current
+// active-session key is still `ChannelID`, which is sufficient for
+// the TUI and MS0 single-user external adapters. Multi-user routing
+// should extend that key to include account/guild/peer identity while
+// keeping session choice out of individual channel implementations.
 
 pub mod common;
 pub mod discord;

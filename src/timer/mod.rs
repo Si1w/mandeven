@@ -516,7 +516,6 @@ mod tests {
                 name: name.to_string(),
                 description: "desc".to_string(),
                 allowed_tools: Vec::new(),
-                user_invocable: true,
                 timers: timers.map(ToString::to_string),
                 fork: false,
             },

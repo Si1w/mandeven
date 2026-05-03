@@ -10,7 +10,7 @@
 //! live here too. The supervisor loop in
 //! [`super::DiscordChannel::start`] subscribes to the active flag's
 //! `watch` channel; [`super::DiscordControl`] holds clones of the
-//! same handles and writes them when `/discord enable|disable` runs.
+//! same handles and writes them when `/discord` toggles the adapter.
 //! Every clone observes mutations through the underlying `Arc`s —
 //! no notification mechanism needed beyond the watch itself.
 

@@ -3,8 +3,7 @@
 //! The canonical store is now one Markdown document per task under
 //! `<project_bucket>/tasks/`. Each file has TOML front matter for the
 //! validated machine contract and a Markdown body for human-readable
-//! context. Existing `tasks/tasks.json` files are still readable; the
-//! next successful write materializes them as Markdown task files.
+//! context.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -14,19 +13,13 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::error::{Error, Result};
-use super::{STORE_VERSION, TASK_STORE_FILENAME, TASK_SUBDIR, Task, TaskStatus};
+use super::{STORE_VERSION, TASK_SUBDIR, Task, TaskStatus};
 
-/// On-disk compatibility shape for the legacy `tasks.json` store.
+/// In-memory view of the Markdown task store.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct StoreFile {
-    /// Schema version. Values above [`STORE_VERSION`] are rejected
-    /// when reading a legacy JSON store.
+    /// Schema version for the current Markdown-backed task model.
     pub version: u32,
-
-    /// Legacy numeric id watermark. Unused by the Markdown store but
-    /// preserved so old JSON files deserialize losslessly.
-    #[serde(default)]
-    pub high_watermark: u64,
 
     /// Tasks in insertion order.
     #[serde(default)]
@@ -39,7 +32,6 @@ impl StoreFile {
     pub fn new() -> Self {
         Self {
             version: STORE_VERSION,
-            high_watermark: 0,
             tasks: Vec::new(),
         }
     }
@@ -55,7 +47,6 @@ impl Default for StoreFile {
 #[derive(Debug)]
 pub struct Store {
     dir: PathBuf,
-    legacy_path: PathBuf,
 }
 
 impl Store {
@@ -64,7 +55,6 @@ impl Store {
     pub fn new(task_dir: &Path) -> Self {
         Self {
             dir: task_dir.to_path_buf(),
-            legacy_path: task_dir.join(TASK_STORE_FILENAME),
         }
     }
 
@@ -74,8 +64,7 @@ impl Store {
         &self.dir
     }
 
-    /// Read task Markdown files, falling back to legacy `tasks.json`
-    /// when no Markdown tasks exist yet.
+    /// Read task Markdown files.
     ///
     /// # Errors
     ///
@@ -83,15 +72,11 @@ impl Store {
     /// errors.
     pub async fn load(&self) -> Result<StoreFile> {
         let mut tasks = self.load_markdown_tasks().await?;
-        if !tasks.is_empty() {
-            sort_tasks(&mut tasks);
-            return Ok(StoreFile {
-                version: STORE_VERSION,
-                high_watermark: 0,
-                tasks,
-            });
-        }
-        self.load_legacy_json().await
+        sort_tasks(&mut tasks);
+        Ok(StoreFile {
+            version: STORE_VERSION,
+            tasks,
+        })
     }
 
     /// Replace the Markdown task set with `file`'s tasks.
@@ -158,24 +143,6 @@ impl Store {
         Ok(tasks)
     }
 
-    async fn load_legacy_json(&self) -> Result<StoreFile> {
-        let bytes = match tokio::fs::read(&self.legacy_path).await {
-            Ok(bytes) => bytes,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(StoreFile::new());
-            }
-            Err(err) => return Err(Error::Io(err)),
-        };
-        let parsed: StoreFile = serde_json::from_slice(&bytes)?;
-        if parsed.version > STORE_VERSION {
-            return Err(Error::InvalidStore(format!(
-                "store version {} is newer than this build supports ({STORE_VERSION})",
-                parsed.version
-            )));
-        }
-        Ok(parsed)
-    }
-
     fn desired_paths(&self, tasks: &[Task]) -> BTreeMap<String, PathBuf> {
         let mut paths = BTreeMap::new();
         let mut used = BTreeSet::new();
@@ -203,8 +170,6 @@ impl Store {
 struct TaskFrontMatter {
     id: String,
     kind: String,
-    #[serde(default = "default_true")]
-    enabled: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     active_form: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -226,7 +191,6 @@ impl TaskFrontMatter {
         Self {
             id: task.id.clone(),
             kind: "task".to_string(),
-            enabled: true,
             active_form: task.active_form.clone(),
             owner: task.owner.clone(),
             status: task.status,
@@ -410,10 +374,6 @@ fn sort_tasks(tasks: &mut [Task]) {
             .cmp(&right.created_at)
             .then_with(|| left.id.cmp(&right.id))
     });
-}
-
-fn default_true() -> bool {
-    true
 }
 
 #[cfg(test)]

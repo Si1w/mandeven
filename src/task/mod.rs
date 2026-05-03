@@ -25,12 +25,6 @@ use uuid::Uuid;
 /// Subdirectory under a project bucket holding the task store.
 pub const TASK_SUBDIR: &str = "tasks";
 
-/// Legacy filename inside [`TASK_SUBDIR`] holding task definitions.
-///
-/// New task stores are one Markdown file per task. The JSON file is
-/// still read so existing installs migrate on the next write.
-pub const TASK_STORE_FILENAME: &str = "tasks.json";
-
 /// Current task store schema version.
 pub const STORE_VERSION: u32 = 1;
 

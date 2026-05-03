@@ -5,9 +5,9 @@
 //! they share the same architectural slot (everything in here is
 //! emitted AFTER the static template block):
 //!
-//! 1. **Boot-time** — `AGENTS.md`, read once by
-//!    [`crate::prompt::PromptEngine::load`] and kept in memory for
-//!    the lifetime of the engine.
+//! 1. **Boot-time** — global and project-local `AGENTS.md` files,
+//!    read once by [`crate::prompt::PromptEngine::load`] and kept in
+//!    memory for the lifetime of the engine.
 //! 2. **Run-stable** — `env_info` (model id, cwd). Computed each call
 //!    from arguments, but the inputs do not change for a given run,
 //!    so the rendered bytes go through [`crate::prompt::SectionCache`]
@@ -25,16 +25,15 @@
 
 use std::fmt::Write as _;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use super::error::{Error, Result};
 use super::section::Section;
 
-/// Filename of the per-user agent instructions overlay, resolved
-/// relative to [`crate::config::home_dir`]. Mirrors Anthropic's
-/// `CLAUDE.md` convention; renamed to the cross-vendor neutral
-/// `AGENTS.md` so the file makes sense to readers outside the Claude
-/// ecosystem.
+/// Filename of agent instruction files. Mandeven reads both the
+/// per-user file under [`crate::config::home_dir`] and any matching
+/// files discovered from the launch CWD upward, mirroring Codex's
+/// repository-level convention.
 pub const AGENTS_FILENAME: &str = "AGENTS.md";
 
 /// Section name for the boot-time `AGENTS.md` overlay.
@@ -49,24 +48,100 @@ pub const ENV_INFO_NAME: &str = "env_info";
 /// instructions (which may reference skill names).
 pub const SKILLS_INDEX_NAME: &str = "skills_index";
 
-/// Read `<data_dir>/AGENTS.md` if present.
+/// One loaded `AGENTS.md` source.
+#[derive(Debug)]
+struct AgentsMdSource {
+    scope: &'static str,
+    path: PathBuf,
+    content: String,
+}
+
+/// Read global `<data_dir>/AGENTS.md` plus project-local `AGENTS.md`
+/// files from `cwd` and its ancestors.
 ///
-/// Absent file ⇒ `Ok(None)` (the file is optional). Present but
-/// unreadable ⇒ [`Error::AgentsMdRead`] — a corrupted permission or
-/// disk error here would otherwise produce a silently-degraded
-/// prompt every turn, which is worse than a loud boot failure.
+/// Absent files ⇒ `Ok(None)` (instructions are optional). Present
+/// but unreadable files ⇒ [`Error::AgentsMdRead`] — a corrupted
+/// permission or disk error here would otherwise produce a
+/// silently-degraded prompt every turn, which is worse than a loud
+/// boot failure.
 ///
 /// # Errors
 ///
 /// - [`Error::AgentsMdRead`] when the file exists but cannot be
 ///   read.
-pub fn load_agents_md(data_dir: &Path) -> Result<Option<String>> {
-    let path = data_dir.join(AGENTS_FILENAME);
-    match fs::read_to_string(&path) {
+pub fn load_agents_md(data_dir: &Path, cwd: &Path) -> Result<Option<String>> {
+    let global_path = data_dir.join(AGENTS_FILENAME);
+    let mut sources = Vec::new();
+    if let Some(content) = read_optional_agents_md(&global_path)? {
+        sources.push(AgentsMdSource {
+            scope: "Global Instructions",
+            path: global_path.clone(),
+            content,
+        });
+    }
+
+    for path in project_agents_paths(cwd) {
+        if same_path(&path, &global_path) {
+            continue;
+        }
+        if let Some(content) = read_optional_agents_md(&path)? {
+            sources.push(AgentsMdSource {
+                scope: "Project Instructions",
+                path,
+                content,
+            });
+        }
+    }
+
+    if sources.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(format_agents_md_sources(&sources)))
+    }
+}
+
+fn read_optional_agents_md(path: &Path) -> Result<Option<String>> {
+    match fs::read_to_string(path) {
         Ok(text) => Ok(Some(text)),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(source) => Err(Error::AgentsMdRead { path, source }),
+        Err(source) => Err(Error::AgentsMdRead {
+            path: path.to_path_buf(),
+            source,
+        }),
     }
+}
+
+fn project_agents_paths(cwd: &Path) -> Vec<PathBuf> {
+    let mut paths: Vec<PathBuf> = cwd
+        .ancestors()
+        .map(|ancestor| ancestor.join(AGENTS_FILENAME))
+        .collect();
+    paths.reverse();
+    paths
+}
+
+fn same_path(a: &Path, b: &Path) -> bool {
+    if a == b {
+        return true;
+    }
+    match (fs::canonicalize(a), fs::canonicalize(b)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
+    }
+}
+
+fn format_agents_md_sources(sources: &[AgentsMdSource]) -> String {
+    let mut out = String::new();
+    for (idx, source) in sources.iter().enumerate() {
+        if idx > 0 {
+            out.push_str("\n\n");
+        }
+        writeln!(out, "## {}", source.scope).expect("writing to String is infallible");
+        writeln!(out, "Path: {}", source.path.display()).expect("writing to String is infallible");
+        out.push('\n');
+        out.push_str(source.content.trim_end());
+    }
+    out
 }
 
 /// Wrap `AGENTS.md` content in a [`Section`] under a fixed Markdown
@@ -76,10 +151,7 @@ pub fn load_agents_md(data_dir: &Path) -> Result<Option<String>> {
 pub fn agents_md_section(content: &str) -> Section {
     Section {
         name: AGENTS_MD_NAME,
-        content: format!(
-            "# Project Instructions (AGENTS.md)\n\n{}",
-            content.trim_end()
-        ),
+        content: format!("# Agent Instructions (AGENTS.md)\n\n{}", content.trim_end()),
     }
 }
 
@@ -152,22 +224,44 @@ mod tests {
     #[test]
     fn load_agents_md_returns_none_when_missing() {
         let dir = tempdir();
-        let result = load_agents_md(&dir).unwrap();
+        let result = load_agents_md(&dir, &dir).unwrap();
         assert!(result.is_none());
     }
 
     #[test]
-    fn load_agents_md_returns_content_when_present() {
+    fn load_agents_md_returns_global_content_when_present() {
         let dir = tempdir();
         fs::write(dir.join(AGENTS_FILENAME), "use snake_case.\n").unwrap();
-        let result = load_agents_md(&dir).unwrap();
-        assert_eq!(result, Some("use snake_case.\n".to_string()));
+        let result = load_agents_md(&dir, &dir).unwrap().unwrap();
+        assert!(result.contains("## Global Instructions"));
+        assert!(result.contains("use snake_case."));
+    }
+
+    #[test]
+    fn load_agents_md_stacks_global_then_project_files() {
+        let data = tempdir();
+        let project = tempdir().join("repo").join("nested");
+        fs::create_dir_all(&project).unwrap();
+        fs::write(data.join(AGENTS_FILENAME), "global rule\n").unwrap();
+        fs::write(
+            project.parent().unwrap().join(AGENTS_FILENAME),
+            "repo rule\n",
+        )
+        .unwrap();
+        fs::write(project.join(AGENTS_FILENAME), "nested rule\n").unwrap();
+
+        let result = load_agents_md(&data, &project).unwrap().unwrap();
+        let global = result.find("global rule").unwrap();
+        let repo = result.find("repo rule").unwrap();
+        let nested = result.find("nested rule").unwrap();
+        assert!(global < repo);
+        assert!(repo < nested);
     }
 
     #[test]
     fn agents_md_section_prepends_header_and_trims_trailing_newlines() {
         let s = agents_md_section("project says X\n\n");
-        assert!(s.content.starts_with("# Project Instructions"));
+        assert!(s.content.starts_with("# Agent Instructions"));
         assert!(s.content.ends_with("project says X"));
     }
 

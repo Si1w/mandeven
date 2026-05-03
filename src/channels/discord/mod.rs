@@ -5,8 +5,8 @@
 //! - Listens only to direct messages from users whose Discord user
 //!   id is in the runtime-mutable allow list (mutated via the
 //!   `/discord allow|deny` slash command, persisted to
-//!   `<data_dir>/discord/allowlist.json`). Guild messages and
-//!   non-allowlisted DMs are silently dropped.
+//!   `<data_dir>/channels/discord/allowlist.json`). Guild messages
+//!   and non-allowlisted DMs are silently dropped.
 //! - Outbound `Reply` payloads are chunked to fit Discord's 2000-char
 //!   limit and posted as one or more messages.
 //! - Streaming `ReplyDelta` payloads use a throttled `send-then-edit`
@@ -19,8 +19,8 @@
 //!
 //! Lifecycle: [`DiscordChannel::start`] runs a supervisor loop that
 //! observes a `tokio::sync::watch<bool>` flag. Flipping the flag via
-//! [`DiscordControl::enable`] / [`DiscordControl::disable`] (i.e. the
-//! `/discord enable|disable` commands) opens or closes the gateway
+//! [`DiscordControl::enable`] / [`DiscordControl::disable`] (i.e.
+//! the `/discord` toggle command) opens or closes the gateway
 //! connection without restarting the process.
 //!
 //! Multi-user routing is intentionally not yet supported: the gateway
@@ -35,7 +35,7 @@ mod state;
 pub mod store;
 
 pub use control::{DiscordControl, DiscordStatus};
-pub use store::{ALLOWLIST_FILENAME, DISCORD_SUBDIR, allowlist_path};
+pub use store::{ALLOWLIST_FILENAME, CHANNELS_SUBDIR, DISCORD_SUBDIR, allowlist_path};
 
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -118,7 +118,7 @@ impl Channel for DiscordChannel {
     /// Supervisor loop. Waits for the `active` watch flag to flip
     /// `true`, then opens a serenity gateway connection and races
     /// `Client::start()` against the next `false` transition. When
-    /// the user runs `/discord disable`, the supervisor calls
+    /// the user toggles `/discord` off, the supervisor calls
     /// `shard_manager.shutdown_all()` and loops back to wait. The
     /// loop exits cleanly only when the watch sender is dropped
     /// (i.e. the agent and control are gone — process shutdown).

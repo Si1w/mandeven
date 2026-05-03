@@ -1,7 +1,6 @@
 ---
 name: heartbeat
 description: Periodically review standing reminders, routines, and follow-up checks; notify only when something needs attention.
-user-invocable: true
 allowed-tools: task_* timer_*
 timers: "*/30 * * * *"
 fork: true

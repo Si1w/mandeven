@@ -5,8 +5,8 @@
 //! `agent-examples/claude-code-analysis/src/skills/loadSkillsDir.ts`).
 //!
 //! Frontmatter parsing uses `serde_yaml` because mandeven supports
-//! Claude Code-compatible fields such as `allowed-tools` and
-//! `user-invocable`, plus mandeven's own `timers` extension.
+//! Claude Code-compatible fields such as `allowed-tools`, plus
+//! mandeven's own `timers` extension.
 
 use std::fs;
 use std::path::Path;
@@ -242,6 +242,8 @@ mod tests {
     #[test]
     fn parse_frontmatter_reads_claude_code_style_fields() {
         let path = std::path::PathBuf::from("/tmp/x");
+        // `user-invocable` is intentionally not modeled anymore;
+        // serde ignores it so existing skill files still load.
         let fm = parse_frontmatter(
             &path,
             "# comment\nname: cron\ndescription: ok\nallowed-tools: task_* timer_*\nuser-invocable: false\ntimers: \"0 9 * * *\"\nfork: true\n",
@@ -249,7 +251,6 @@ mod tests {
         .unwrap();
         assert_eq!(fm.name, "cron");
         assert_eq!(fm.allowed_tools, vec!["task_*", "timer_*"]);
-        assert!(!fm.user_invocable);
         assert_eq!(fm.timers.as_deref(), Some("0 9 * * *"));
         assert!(fm.fork);
     }

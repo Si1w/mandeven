@@ -98,7 +98,17 @@ impl Manager {
         if tokio::fs::try_exists(&self.path).await? {
             return Ok(());
         }
-        atomic_write_text(&self.path, EMPTY_MEMORY, AtomicWriteScope::GlobalDataDir).await?;
+        let root = self
+            .path
+            .parent()
+            .unwrap_or_else(|| Path::new("/"))
+            .to_path_buf();
+        atomic_write_text(
+            &self.path,
+            EMPTY_MEMORY,
+            AtomicWriteScope::GlobalDataDir { root },
+        )
+        .await?;
         Ok(())
     }
 

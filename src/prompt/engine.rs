@@ -5,8 +5,8 @@
 //!
 //! - The boot-time global/project `AGENTS.md` string (read once at
 //!   [`PromptEngine::load`]).
-//! - A shared [`SkillIndex`], which can re-read `skills/` on access
-//!   so the `skills_index` section reflects runtime skill edits.
+//! - A shared [`SkillIndex`], whose caller supplies a turn-start
+//!   [`SkillSnapshot`] for the `skills_index` section.
 //! - A [`SectionCache`] keyed by section name so every section of
 //!   [`PromptEngine::iteration_system`] is byte-identical from one call to
 //!   the next, keeping `DeepSeek`'s prefix cache hot.
@@ -25,7 +25,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use crate::llm::Message;
-use crate::skill::SkillIndex;
+use crate::skill::{SkillIndex, SkillSnapshot};
 
 use super::context::{
     AGENTS_MD_NAME, ENV_INFO_NAME, agents_md_section, env_info_section, load_agents_md,
@@ -58,9 +58,8 @@ pub struct PromptContext<'a> {
 pub struct PromptEngine {
     /// `AGENTS.md` body, `None` when the file is absent.
     agents_md: Option<String>,
-    /// Skill catalog. The index reloads from disk on access, so
-    /// changes under `skills/` appear in the prompt on the next
-    /// iteration.
+    /// Skill catalog. Callers refresh it at turn start; this fallback
+    /// handle supports tests and direct `iteration_system` callers.
     skills: Arc<SkillIndex>,
     cache: SectionCache,
 }
@@ -71,9 +70,8 @@ impl PromptEngine {
     /// [`SkillIndex`].
     ///
     /// Reads global + project `AGENTS.md` files once. Skill entries
-    /// are resolved later while building each iteration prompt so
-    /// runtime edits to `SKILL.md` can update `skills_index` without
-    /// restarting.
+    /// are supplied by the agent as a turn snapshot while building
+    /// each iteration prompt.
     ///
     /// # Errors
     ///
@@ -100,7 +98,7 @@ impl PromptEngine {
     /// actions                   ← static, cached
     /// using_tools               ← static, cached
     /// tone                      ← static, cached
-    /// skills_index (optional)   ← live skill index, omitted when no skills
+    /// skills_index (optional)   ← turn skill snapshot, omitted when no skills
     /// agents_md (optional)      ← cached
     /// env_info                  ← cached
     /// ```
@@ -114,8 +112,9 @@ impl PromptEngine {
     /// [`SectionCache`] so their rendered bytes are stable for the
     /// lifetime of the engine — the load-bearing invariant for
     /// `DeepSeek`'s automatic prefix cache. `skills_index` is the
-    /// deliberate exception: it is rebuilt from the live skill index
-    /// so runtime skill edits take effect on the next iteration.
+    /// deliberate exception: it is rebuilt from the turn skill
+    /// snapshot, which the agent refreshes before processing user
+    /// input and then freezes for the turn.
     /// [`Self::clear_cache`] is the one explicit invalidation path,
     /// called from `/compact` after the conversation prefix has been
     /// rewritten or from `/switch` when model metadata changes.
@@ -126,13 +125,24 @@ impl PromptEngine {
     /// compute call — irrecoverable.
     #[must_use]
     pub fn iteration_system(&self, ctx: &PromptContext<'_>) -> SystemPrompt {
+        let skills = self.skills.snapshot();
+        self.iteration_system_with_skills(ctx, &skills)
+    }
+
+    /// Build the system prompt with an explicit skill snapshot.
+    #[must_use]
+    pub fn iteration_system_with_skills(
+        &self,
+        ctx: &PromptContext<'_>,
+        skills: &SkillSnapshot,
+    ) -> SystemPrompt {
         let mut prompt = SystemPrompt::new();
 
         for section in STATIC_SYSTEM_SECTIONS {
             prompt.push(self.cached(section.name, || trim_static(section.content)));
         }
 
-        let entries: Vec<(String, String)> = self.skills.entries().collect();
+        let entries: Vec<(String, String)> = skills.entries().collect();
         if let Some(section) = skills_index_section(&entries) {
             prompt.push(section);
         }

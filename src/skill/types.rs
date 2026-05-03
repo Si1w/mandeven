@@ -2,11 +2,13 @@
 //!
 //! A [`Skill`] is a [`SkillFrontmatter`] (parsed YAML metadata) plus
 //! the markdown body that follows it on disk. The [`SkillIndex`] is a
-//! flat ordered list plus an optional source directory. When a source
-//! directory is known, lookups re-read the directory so runtime edits
-//! to `SKILL.md` files take effect without restarting.
+//! flat ordered list plus an optional source directory. Runtime code
+//! refreshes the source directory once at turn start, then reuses the
+//! resulting [`SkillSnapshot`] for prompt construction and skill
+//! invocation throughout that turn.
 
 use std::path::PathBuf;
+use std::sync::{Arc, RwLock};
 
 use serde::{Deserialize, Deserializer};
 
@@ -58,23 +60,82 @@ pub struct Skill {
     pub source_path: PathBuf,
 }
 
-/// Read-through view of every loaded skill.
+/// Immutable view of loaded skills for one turn.
+#[derive(Clone, Debug, Default)]
+pub struct SkillSnapshot {
+    skills: Vec<Skill>,
+}
+
+impl SkillSnapshot {
+    /// Construct a snapshot from already-loaded skills.
+    #[must_use]
+    pub fn from_skills(skills: Vec<Skill>) -> Self {
+        Self { skills }
+    }
+
+    /// Look up a skill by `name`.
+    #[must_use]
+    pub fn get(&self, name: &str) -> Option<Skill> {
+        self.skills
+            .iter()
+            .find(|skill| skill.frontmatter.name == name)
+            .cloned()
+    }
+
+    /// `true` when no skills are loaded.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.skills.is_empty()
+    }
+
+    /// Number of loaded skills.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.skills.len()
+    }
+
+    /// Iterate `(name, description)` pairs in load order.
+    pub fn entries(&self) -> impl Iterator<Item = (String, String)> + '_ {
+        self.skills.iter().map(|s| {
+            (
+                s.frontmatter.name.clone(),
+                s.frontmatter.description.clone(),
+            )
+        })
+    }
+
+    /// Iterate full skill records in load order.
+    pub fn skills(&self) -> impl Iterator<Item = Skill> + '_ {
+        self.skills.iter().cloned()
+    }
+}
+
+/// Refreshable view of every loaded skill.
 ///
 /// Constructed once by [`crate::skill::load`] at boot and shared via
 /// `Arc<SkillIndex>` between the prompt engine, the `SkillTool`, and
 /// the CLI's slash-command fallback. When `source_dir` is present,
-/// accessors re-read the directory and fall back to the boot
-/// snapshot only if the scan itself fails.
-#[derive(Clone, Debug, Default)]
+/// [`Self::refresh`] re-reads the directory and falls back to the
+/// previous snapshot only if the scan itself fails.
+#[derive(Clone, Debug)]
 pub struct SkillIndex {
     /// Insertion-ordered for stable rendering in the `/skills` overlay
     /// and the system prompt section. Sort order = directory iteration
     /// order at load time, which on most filesystems means
     /// alphabetical.
-    skills: Vec<Skill>,
-    /// Source directory for hot reload. `None` for test-built indexes
-    /// and disabled skill support.
+    skills: Arc<RwLock<Vec<Skill>>>,
+    /// Source directory for explicit refresh. `None` for test-built
+    /// indexes and disabled skill support.
     source_dir: Option<PathBuf>,
+}
+
+impl Default for SkillIndex {
+    fn default() -> Self {
+        Self {
+            skills: Arc::new(RwLock::new(Vec::new())),
+            source_dir: None,
+        }
+    }
 }
 
 impl SkillIndex {
@@ -91,7 +152,7 @@ impl SkillIndex {
     #[must_use]
     pub fn from_skills(skills: Vec<Skill>) -> Self {
         Self {
-            skills,
+            skills: Arc::new(RwLock::new(skills)),
             source_dir: None,
         }
     }
@@ -100,37 +161,81 @@ impl SkillIndex {
     #[must_use]
     pub fn from_source(skills: Vec<Skill>, source_dir: PathBuf) -> Self {
         Self {
-            skills,
+            skills: Arc::new(RwLock::new(skills)),
             source_dir: Some(source_dir),
         }
+    }
+
+    /// Re-scan the source directory and store the result as the
+    /// current snapshot. Non-source indexes just clone their current
+    /// in-memory skills.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the skill index lock was poisoned.
+    #[must_use]
+    pub fn refresh(&self) -> SkillSnapshot {
+        let Some(source_dir) = &self.source_dir else {
+            return self.snapshot();
+        };
+        match crate::skill::loader::load_static(source_dir) {
+            Ok(skills) => {
+                self.skills
+                    .write()
+                    .expect("skill index lock poisoned")
+                    .clone_from(&skills);
+                SkillSnapshot::from_skills(skills)
+            }
+            Err(err) => {
+                eprintln!(
+                    "[skill] refresh failed from {}: {err}; using previous snapshot",
+                    source_dir.display()
+                );
+                self.snapshot()
+            }
+        }
+    }
+
+    /// Clone the current in-memory snapshot without touching disk.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the skill index lock was poisoned.
+    #[must_use]
+    pub fn snapshot(&self) -> SkillSnapshot {
+        SkillSnapshot::from_skills(
+            self.skills
+                .read()
+                .expect("skill index lock poisoned")
+                .clone(),
+        )
     }
 
     /// Look up a skill by `name`. Linear scan — skill counts are in
     /// the dozens at most.
     #[must_use]
     pub fn get(&self, name: &str) -> Option<Skill> {
-        self.current_skills()
-            .into_iter()
-            .find(|s| s.frontmatter.name == name)
+        self.snapshot().get(name)
     }
 
     /// `true` when no skills are loaded.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.current_skills().is_empty()
+        self.snapshot().is_empty()
     }
 
     /// Number of loaded skills.
     #[must_use]
     pub fn len(&self) -> usize {
-        self.current_skills().len()
+        self.snapshot().len()
     }
 
     /// Iterate `(name, description)` pairs in load order. The prompt
     /// engine and the `/skills` overlay both consume this view rather
     /// than touching `Skill` directly.
     pub fn entries(&self) -> impl Iterator<Item = (String, String)> {
-        self.current_skills()
+        self.snapshot()
+            .skills
             .into_iter()
             .map(|s| (s.frontmatter.name, s.frontmatter.description))
     }
@@ -139,23 +244,7 @@ impl SkillIndex {
     /// subsystems that consume optional skill metadata such as
     /// timer declarations.
     pub fn skills(&self) -> impl Iterator<Item = Skill> {
-        self.current_skills().into_iter()
-    }
-
-    fn current_skills(&self) -> Vec<Skill> {
-        let Some(source_dir) = &self.source_dir else {
-            return self.skills.clone();
-        };
-        match crate::skill::loader::load_static(source_dir) {
-            Ok(skills) => skills,
-            Err(err) => {
-                eprintln!(
-                    "[skill] hot reload failed from {}: {err}; using boot snapshot",
-                    source_dir.display()
-                );
-                self.skills.clone()
-            }
-        }
+        self.snapshot().skills.into_iter()
     }
 }
 

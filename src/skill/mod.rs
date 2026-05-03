@@ -38,10 +38,10 @@
 //! All paths share the same source of truth: a single
 //! [`SkillIndex`] rooted at `<data_dir>/skills/`. Built-in skills
 //! are seeded into that same directory when missing, so users can
-//! edit them like any other skill. The index keeps a boot snapshot
-//! for fallback diagnostics but re-reads the directory on access,
-//! so runtime `SKILL.md` edits affect `/skills`, `/<name>`,
-//! `skill_use`, and skill timer execution without restarting.
+//! edit them like any other skill. Runtime turns call
+//! [`SkillIndex::refresh`] before request assembly and then reuse
+//! that snapshot, so `SKILL.md` edits take effect on the next turn
+//! without changing semantics mid-turn.
 //!
 //! ## What v1 deliberately does not do
 //!
@@ -66,7 +66,7 @@ pub mod types;
 pub use builtin::seed as seed_builtins;
 pub use error::{Error, Result};
 pub use loader::{SKILL_FILENAME, load};
-pub use types::{Skill, SkillFrontmatter, SkillIndex};
+pub use types::{Skill, SkillFrontmatter, SkillIndex, SkillSnapshot};
 
 use serde::{Deserialize, Serialize};
 

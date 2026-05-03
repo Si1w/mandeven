@@ -41,7 +41,7 @@ use crate::command::slash::{self, SlashCommand, SwitchCommand};
 use crate::config::{AgentConfig, AppConfig, LLMConfig, LLMProfile};
 use crate::exec;
 use crate::gateway::{ActiveSessions, DispatchReceiver, InboundDispatch};
-use crate::hook::{HookEngine, HookEvent};
+use crate::hook::{HookEngine, HookEvent, HookSnapshot};
 use crate::llm::{
     self, BaseLLMClient, CompactTrigger, FinishReason, Message, Request, ResponseStream, Thinking,
     ToolCall, Usage,
@@ -49,7 +49,7 @@ use crate::llm::{
 use crate::memory;
 use crate::prompt::{PromptContext, PromptEngine};
 use crate::session;
-use crate::skill::SkillIndex;
+use crate::skill::{SkillIndex, SkillSnapshot};
 use crate::task;
 use crate::timer;
 use crate::tools;
@@ -99,6 +99,8 @@ pub struct Agent {
     /// Timer scheduler handle, present iff the timer engine was wired
     /// in.
     timer: Option<Arc<timer::TimerEngine>>,
+    /// Shared timer store used for turn-start skill timer sync.
+    timer_store: Option<Arc<timer::TimerStore>>,
     /// Receiver paired with the timer engine. Timer ticks are the
     /// runtime form of `task + timer` state.
     timer_rx: Option<mpsc::Receiver<timer::TimerTick>>,
@@ -109,9 +111,13 @@ pub struct Agent {
     /// Project-local task manager used by explicit `task_run`
     /// execution.
     tasks: Arc<task::Manager>,
-    /// Live skill index used by global skill timers to expand timer
-    /// ticks into the same body the `/name` slash fallback would send.
+    /// Refreshable skill index used by global skill timers to expand
+    /// timer ticks into the same body the `/name` slash fallback
+    /// would send.
     skills: Arc<SkillIndex>,
+    /// Whether turn-start skill snapshots should synchronize
+    /// frontmatter-declared timers into the timer store.
+    sync_skill_timers: bool,
     /// Machine-readable execution history writer. Timer-triggered
     /// tasks append JSONL events here.
     exec: Arc<exec::Manager>,
@@ -136,16 +142,15 @@ pub struct Agent {
     /// ([`Agent::iteration`]) and the manual `/compact` command
     /// (`dispatch_command`) bump it from `&self` async contexts.
     compact_state: Arc<AsyncMutex<CompactState>>,
-    /// Prompt assembly engine. Owns `AGENTS.md`, the live skill
-    /// index handle, and the section cache; every call site goes
-    /// through it so future per-task prompt changes only touch one
-    /// module.
+    /// Prompt assembly engine. Owns `AGENTS.md`, the skill index
+    /// handle, and the section cache; every call site goes through
+    /// it so future per-task prompt changes only touch one module.
     prompt: Arc<PromptEngine>,
     /// Hook engine. Fired at every lifecycle event (`UserPromptSubmit`,
     /// `Pre/PostToolUse`, `SessionStart`, `Stop`, `Pre/PostCompact`).
     /// When `enabled = false` or no `hooks.json` exists, every fire
-    /// becomes a no-op. When the file changes, the engine reloads it
-    /// on the next fire.
+    /// becomes a no-op. Runtime turns refresh `hooks.json` once and
+    /// reuse that snapshot for all hook events in the turn.
     hook: Arc<HookEngine>,
     /// Process launch directory captured once in `main`. Surfaces in
     /// the per-call `PromptContext.cwd` for `iteration_system` and
@@ -217,6 +222,8 @@ fn parse_profile_id(raw: &str) -> Result<(&str, &str)> {
 pub struct TimerWiring {
     /// Scheduler handle.
     pub engine: Arc<timer::TimerEngine>,
+    /// Shared global timer store used by both scheduler and tools.
+    pub store: Arc<timer::TimerStore>,
     /// Tick stream from the scheduler.
     pub rx: mpsc::Receiver<timer::TimerTick>,
 }
@@ -244,6 +251,12 @@ enum Event {
     Dispatch(Option<InboundDispatch>),
     /// Timer tick fired. `None` means the engine dropped its sender.
     TimerTick(Option<timer::TimerTick>),
+}
+
+#[derive(Clone)]
+struct TurnSnapshot {
+    skills: SkillSnapshot,
+    hooks: HookSnapshot,
 }
 
 async fn recv_enabled<T>(rx: &mut Option<mpsc::Receiver<T>>) -> Option<T> {
@@ -295,9 +308,9 @@ impl Agent {
         let model_catalog = Arc::new(ModelCatalog::from_config(&cfg.llm)?);
         let model = Arc::new(RwLock::new(model_catalog.get(&cfg.llm.default)?));
 
-        let (timer_handle, timer_rx) = match timer {
-            Some(TimerWiring { engine, rx }) => (Some(engine), Some(rx)),
-            None => (None, None),
+        let (timer_handle, timer_store, timer_rx) = match timer {
+            Some(TimerWiring { engine, store, rx }) => (Some(engine), Some(store), Some(rx)),
+            None => (None, None, None),
         };
         let discord_handle = discord.map(|w| w.control);
         let wechat_handle = wechat.map(|w| w.control);
@@ -314,10 +327,12 @@ impl Agent {
             config: cfg.agent.clone(),
             timeout_secs: cfg.llm.timeout_secs,
             timer: timer_handle,
+            timer_store,
             timer_rx,
             memory,
             tasks,
             skills,
+            sync_skill_timers: cfg.agent.skill.enabled,
             exec,
             discord: discord_handle,
             wechat: wechat_handle,
@@ -477,7 +492,8 @@ impl Agent {
         skill: String,
         notify: Option<(ChannelID, SessionID)>,
     ) -> Result<()> {
-        let Some((body, fork)) = self
+        let turn = self.begin_turn_snapshot().await;
+        let Some((body, fork)) = turn
             .skills
             .get(&skill)
             .map(|skill_def| (skill_def.body.clone(), skill_def.frontmatter.fork))
@@ -801,6 +817,18 @@ impl Agent {
         }
     }
 
+    async fn begin_turn_snapshot(&self) -> TurnSnapshot {
+        let skills = self.skills.refresh();
+        if self.sync_skill_timers
+            && let Some(store) = self.timer_store.as_ref()
+            && let Err(err) = timer::sync_skill_timers(store, &skills).await
+        {
+            eprintln!("[timer] failed to sync skill timers: {err}");
+        }
+        let hooks = self.hook.refresh();
+        TurnSnapshot { skills, hooks }
+    }
+
     /// Auto-compact gate. Called by [`Self::iteration`] just before
     /// each LLM call. Returns the (possibly compacted) message list
     /// the call should use. Auto compaction is silent on success per
@@ -810,6 +838,7 @@ impl Agent {
         &self,
         iter: &Iteration,
         messages: Vec<Message>,
+        hooks: &HookSnapshot,
     ) -> Result<Vec<Message>> {
         let model = self.model_snapshot();
         if !compact::should_compact(&messages, &model.profile, &self.compact_config) {
@@ -831,7 +860,8 @@ impl Agent {
         let summary_system = self.prompt.compact_summary_system(None);
         let _ = self
             .hook
-            .fire(
+            .fire_snapshot(
+                hooks,
                 HookEvent::PreCompact,
                 None,
                 serde_json::json!({ "trigger": "auto" }),
@@ -863,7 +893,8 @@ impl Agent {
                 self.prompt.clear_cache();
                 let _ = self
                     .hook
-                    .fire(
+                    .fire_snapshot(
+                        hooks,
                         HookEvent::PostCompact,
                         None,
                         serde_json::json!({ "trigger": "auto" }),
@@ -897,9 +928,11 @@ impl Agent {
         let records = self.sessions.load(&session).await?;
         let messages: Vec<Message> = records.into_iter().map(|r| r.message).collect();
         let summary_system = self.prompt.compact_summary_system(focus.as_deref());
+        let hooks = self.hook.refresh();
         let _ = self
             .hook
-            .fire(
+            .fire_snapshot(
+                &hooks,
                 HookEvent::PreCompact,
                 None,
                 serde_json::json!({ "trigger": "manual" }),
@@ -934,7 +967,8 @@ impl Agent {
                 self.prompt.clear_cache();
                 let _ = self
                     .hook
-                    .fire(
+                    .fire_snapshot(
+                        &hooks,
                         HookEvent::PostCompact,
                         None,
                         serde_json::json!({ "trigger": "manual" }),
@@ -985,12 +1019,14 @@ impl Agent {
     /// persisted assistant reply, covering any number of LLM↔tool
     /// calls.
     async fn iteration(&self, iter: &Iteration, user_text: String) -> Result<String> {
+        let turn = self.begin_turn_snapshot().await;
         // UserPromptSubmit hook fires BEFORE we touch the session —
         // a blocking hook drops the message entirely, the user sees
         // an Error notice, no LLM call is made.
         let pre = self
             .hook
-            .fire(
+            .fire_snapshot(
+                &turn.hooks,
                 HookEvent::UserPromptSubmit,
                 None,
                 serde_json::json!({ "prompt": user_text }),
@@ -1008,7 +1044,7 @@ impl Agent {
             return Ok(String::new());
         }
 
-        self.ensure_session(iter, &user_text).await?;
+        self.ensure_session(iter, &user_text, &turn.hooks).await?;
         self.session_manager(iter)
             .append(&iter.session, Message::User { content: user_text })
             .await?;
@@ -1022,14 +1058,14 @@ impl Agent {
             }
 
             let messages = self.load_history(iter).await?;
-            let messages = self.maybe_auto_compact(iter, messages).await?;
+            let messages = self.maybe_auto_compact(iter, messages, &turn.hooks).await?;
             // Prepend the freshly-built iteration system prompt
             // here rather than persisting it: the system prompt belongs
             // to request assembly, not transcript history. `MEMORY.md`
             // is injected separately as transient user context so edits
             // can take effect on the next request without invalidating
             // the cached system prefix.
-            let messages = self.prepend_iteration_system(messages);
+            let messages = self.prepend_iteration_system(messages, &turn.skills);
             let messages = self.inject_memory_context(messages).await?;
             let outcome = self.call(iter, messages).await?;
             let CallOutcome {
@@ -1057,14 +1093,15 @@ impl Agent {
 
             let no_more_calls = tool_calls.as_ref().is_none_or(Vec::is_empty);
             if no_more_calls {
-                self.fire_stop_hook(iter, &last_assistant_text).await;
+                self.fire_stop_hook(iter, &last_assistant_text, &turn.hooks)
+                    .await;
                 return Ok(last_assistant_text);
             }
             // Safe to unwrap: `no_more_calls` short-circuited.
             let calls = tool_calls.unwrap_or_default();
 
             for call in calls {
-                self.dispatch_one_with_hooks(iter, call).await?;
+                self.dispatch_one_with_hooks(iter, call, &turn).await?;
             }
 
             i = i.saturating_add(1);
@@ -1075,7 +1112,12 @@ impl Agent {
     /// the actual dispatch. A blocked `PreToolUse` skips the call
     /// entirely and persists a synthetic tool-error message so the
     /// model sees its `tool_call_id` resolved on the next turn.
-    async fn dispatch_one_with_hooks(&self, iter: &Iteration, call: ToolCall) -> Result<()> {
+    async fn dispatch_one_with_hooks(
+        &self,
+        iter: &Iteration,
+        call: ToolCall,
+        turn: &TurnSnapshot,
+    ) -> Result<()> {
         let tool_input =
             serde_json::from_str::<serde_json::Value>(&call.arguments).unwrap_or_default();
         if let Some(exec_id) = iter.exec_id.as_ref()
@@ -1098,7 +1140,8 @@ impl Agent {
         });
         let pre = self
             .hook
-            .fire(
+            .fire_snapshot(
+                &turn.hooks,
                 HookEvent::PreToolUse,
                 Some(&call.name),
                 pre_payload,
@@ -1124,7 +1167,7 @@ impl Agent {
         let tool_use_id = call.id.clone();
         let tool_input_raw = call.arguments.clone();
         let messages = if call.name == tools::task::TASK_RUN_TOOL_NAME {
-            self.invoke_task_run_to_messages(iter, &call, &tool_input)
+            self.invoke_task_run_to_messages(iter, &call, &tool_input, &turn.skills)
                 .await
         } else {
             self.tools.invoke_to_messages(call).await
@@ -1169,7 +1212,8 @@ impl Agent {
         // hook can't undo a tool that already ran. Drop the result.
         let _ = self
             .hook
-            .fire(
+            .fire_snapshot(
+                &turn.hooks,
                 HookEvent::PostToolUse,
                 Some(&tool_name),
                 post_payload,
@@ -1210,10 +1254,14 @@ impl Agent {
         iter: &Iteration,
         call: &ToolCall,
         tool_input: &serde_json::Value,
+        skills: &SkillSnapshot,
     ) -> Vec<Message> {
         let content = match serde_json::from_value::<tools::task::TaskRunParams>(tool_input.clone())
         {
-            Ok(params) => self.task_run_observation(iter, &params.task_id).await,
+            Ok(params) => {
+                self.task_run_observation(iter, &params.task_id, skills)
+                    .await
+            }
             Err(err) => serde_json::json!({
                 "ok": false,
                 "observation_type": "execution",
@@ -1228,7 +1276,12 @@ impl Agent {
         }]
     }
 
-    async fn task_run_observation(&self, iter: &Iteration, task_id: &str) -> serde_json::Value {
+    async fn task_run_observation(
+        &self,
+        iter: &Iteration,
+        task_id: &str,
+        skills: &SkillSnapshot,
+    ) -> serde_json::Value {
         let task = match self.tasks.get(task_id).await {
             Ok(Some(task)) => task,
             Ok(None) => {
@@ -1271,7 +1324,7 @@ impl Agent {
         };
 
         match self
-            .execute_task_silent(execution.prompt, exec_id.as_ref())
+            .execute_task_silent(execution.prompt, exec_id.as_ref(), skills)
             .await
         {
             Ok(output) => {
@@ -1320,6 +1373,7 @@ impl Agent {
         &self,
         prompt: String,
         exec_id: Option<&exec::ExecId>,
+        skills: &SkillSnapshot,
     ) -> Result<String> {
         let mut messages = vec![Message::User { content: prompt }];
         let mut i: u8 = 0;
@@ -1331,7 +1385,7 @@ impl Agent {
             }
 
             let request_messages = self
-                .inject_memory_context(self.prepend_iteration_system(messages.clone()))
+                .inject_memory_context(self.prepend_iteration_system(messages.clone(), skills))
                 .await?;
             let model = self.model_snapshot();
             let request = self.build_request(&model.profile, request_messages);
@@ -1414,10 +1468,16 @@ impl Agent {
 
     /// Fire the `Stop` hook with the last assistant text. Outcome
     /// ignored — `Stop` is post-iteration informational only.
-    async fn fire_stop_hook(&self, iter: &Iteration, last_assistant_message: &str) {
+    async fn fire_stop_hook(
+        &self,
+        iter: &Iteration,
+        last_assistant_message: &str,
+        hooks: &HookSnapshot,
+    ) {
         let _ = self
             .hook
-            .fire(
+            .fire_snapshot(
+                hooks,
                 HookEvent::Stop,
                 None,
                 serde_json::json!({
@@ -1442,13 +1502,20 @@ impl Agent {
     /// Render the iteration system prompt and prepend it to
     /// `messages`. Called from [`Self::iteration`] only — the title
     /// prompt and must not see the iteration system block.
-    fn prepend_iteration_system(&self, mut messages: Vec<Message>) -> Vec<Message> {
+    fn prepend_iteration_system(
+        &self,
+        mut messages: Vec<Message>,
+        skills: &SkillSnapshot,
+    ) -> Vec<Message> {
         let model = self.model_snapshot();
         let ctx = PromptContext {
             model_id: &model.profile.model_name,
             cwd: &self.cwd,
         };
-        let system = self.prompt.iteration_system(&ctx).into_message();
+        let system = self
+            .prompt
+            .iteration_system_with_skills(&ctx, skills)
+            .into_message();
         let mut out = Vec::with_capacity(messages.len() + 1);
         out.push(system);
         out.append(&mut messages);
@@ -1549,7 +1616,12 @@ impl Agent {
     /// Create a session on first encounter, generating a short title
     /// from the user's opening message. If title generation fails or
     /// returns empty, falls back to a truncated prefix of the input.
-    async fn ensure_session(&self, iter: &Iteration, first_text: &str) -> Result<()> {
+    async fn ensure_session(
+        &self,
+        iter: &Iteration,
+        first_text: &str,
+        hooks: &HookSnapshot,
+    ) -> Result<()> {
         let sessions = self.session_manager(iter);
         if sessions.metadata(&iter.session).await?.is_some() {
             return Ok(());
@@ -1575,7 +1647,8 @@ impl Agent {
         // an explicit replay if useful).
         let _ = self
             .hook
-            .fire(
+            .fire_snapshot(
+                hooks,
                 HookEvent::SessionStart,
                 None,
                 serde_json::json!({ "source": "startup" }),

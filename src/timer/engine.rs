@@ -15,7 +15,7 @@ use tokio::sync::mpsc;
 use tokio::time::sleep;
 
 use super::error::Result;
-use super::{Store, StoreFile, Timer, TimerTargetRef};
+use super::{StoreFile, StoreMutation, Timer, TimerStore, TimerTargetRef};
 use crate::task;
 
 /// Maximum sleep between timer scans.
@@ -28,7 +28,7 @@ const TICK_QUEUE_CAPACITY: usize = 32;
 /// Timer scheduler.
 #[derive(Debug)]
 pub struct TimerEngine {
-    store: Store,
+    store: Arc<TimerStore>,
     tasks: task::Manager,
     project: String,
     state: Arc<AsyncMutex<EngineState>>,
@@ -85,14 +85,31 @@ impl TimerEngine {
         project_bucket: &Path,
         data_dir: &Path,
     ) -> Result<(Self, mpsc::Receiver<TimerTick>)> {
+        Self::with_store(project_bucket, Arc::new(TimerStore::new(data_dir))).await
+    }
+
+    /// Construct a timer engine over a caller-owned shared store.
+    ///
+    /// # Errors
+    ///
+    /// Returns store errors when existing JSON timers are unreadable
+    /// or invalid.
+    pub async fn with_store(
+        project_bucket: &Path,
+        store: Arc<TimerStore>,
+    ) -> Result<(Self, mpsc::Receiver<TimerTick>)> {
         let project = project_bucket.to_string_lossy().into_owned();
-        let store = Store::new(data_dir);
-        let mut file = store.load().await?;
         let now = Utc::now();
-        let recomputed = recompute_next_fires(&mut file.timers, now);
-        if recomputed > 0 {
-            store.save(&file).await?;
-        }
+        store
+            .mutate(move |file| {
+                let recomputed = recompute_next_fires(&mut file.timers, now);
+                if recomputed > 0 {
+                    Ok(StoreMutation::Changed(()))
+                } else {
+                    Ok(StoreMutation::Unchanged(()))
+                }
+            })
+            .await?;
 
         let (tick_tx, tick_rx) = mpsc::channel(TICK_QUEUE_CAPACITY);
         Ok((
@@ -182,59 +199,78 @@ async fn compute_sleep(engine: &TimerEngine) -> StdDuration {
 async fn collect_and_advance_due(engine: &TimerEngine) -> Result<Vec<TimerTick>> {
     let _guard = engine.state.lock().await;
     let now = Utc::now();
-    let mut file = engine.store.load().await?;
-    let mut due = Vec::new();
-    let mut changed = false;
+    let project = engine.project.clone();
+    let due = engine
+        .store
+        .mutate(move |file| {
+            let mut due = Vec::new();
+            let mut changed = false;
 
-    for timer in &mut file.timers {
-        if !timer.enabled || !is_runnable_by_engine(timer, &engine.project) {
-            continue;
-        }
-        let Some(due_at) = timer.next_fire_at else {
-            continue;
-        };
-        if now < due_at {
-            continue;
-        }
+            for timer in &mut file.timers {
+                if !timer.enabled || !is_runnable_by_engine(timer, &project) {
+                    continue;
+                }
+                let Some(due_at) = timer.next_fire_at else {
+                    continue;
+                };
+                if now < due_at {
+                    continue;
+                }
 
-        match timer.target.clone() {
+                due.push(DueTimer {
+                    timer: timer.clone(),
+                    at: now,
+                });
+                advance_timer(timer, now);
+                changed = true;
+            }
+
+            if changed {
+                Ok(StoreMutation::Changed(due))
+            } else {
+                Ok(StoreMutation::Unchanged(due))
+            }
+        })
+        .await?;
+
+    let mut ticks = Vec::new();
+    for due_timer in due {
+        match due_timer.timer.target.clone() {
             TimerTargetRef::Task { task_id, .. } => {
                 let Some(task) = engine.tasks.get(&task_id).await? else {
                     eprintln!(
                         "[timer] skipping timer {} because task {} is missing",
-                        timer.id, task_id
+                        due_timer.timer.id, task_id
                     );
-                    advance_timer(timer, now);
-                    changed = true;
                     continue;
                 };
 
-                due.push(TimerTick {
-                    timer_id: timer.id.clone(),
+                ticks.push(TimerTick {
+                    timer_id: due_timer.timer.id.clone(),
                     target: TimerTarget::Task {
                         task_id: task.id.clone(),
                         task_subject: task.subject.clone(),
-                        prompt: prompt_for_task(timer, &task),
+                        prompt: prompt_for_task(&due_timer.timer, &task),
                     },
-                    at: now,
+                    at: due_timer.at,
                 });
             }
             TimerTargetRef::Skill { skill } => {
-                due.push(TimerTick {
-                    timer_id: timer.id.clone(),
+                ticks.push(TimerTick {
+                    timer_id: due_timer.timer.id.clone(),
                     target: TimerTarget::Skill { skill },
-                    at: now,
+                    at: due_timer.at,
                 });
             }
         }
-        advance_timer(timer, now);
-        changed = true;
     }
+    Ok(ticks)
+}
 
-    if changed {
-        engine.store.save(&file).await?;
-    }
-    Ok(due)
+#[derive(Clone, Debug)]
+struct DueTimer {
+    timer: Timer,
+    at: DateTime<Utc>,
 }
 
 fn advance_timer(timer: &mut Timer, now: DateTime<Utc>) {
@@ -339,7 +375,14 @@ mod tests {
             created_at: now,
             updated_at: now,
         });
-        engine.store.save(&file).await.unwrap();
+        engine
+            .store
+            .mutate(move |store_file| {
+                *store_file = file;
+                Ok(StoreMutation::Changed(()))
+            })
+            .await
+            .unwrap();
 
         let due = collect_and_advance_due(&engine).await.unwrap();
         assert_eq!(due.len(), 1);

@@ -185,13 +185,13 @@ pub struct AgentConfig {
 
     /// Per-agent skill configuration. Just the on/off switch —
     /// skill definitions live in `~/.mandeven/skills/<name>/SKILL.md`
-    /// and the runtime index can re-read them on access.
+    /// and the runtime index refreshes them before each turn.
     #[serde(default)]
     pub skill: SkillConfig,
 
     /// Per-agent hook configuration. Just the on/off switch — hook
     /// definitions live in `~/.mandeven/hooks.json`, are loaded at
-    /// boot, and are reloaded on hook events after the file changes.
+    /// boot, and are refreshed before each turn.
     #[serde(default)]
     pub hook: HookConfig,
 

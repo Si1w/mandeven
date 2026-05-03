@@ -1,5 +1,6 @@
-//! [`HookEngine`] — loads `hooks.json` at boot, reloads it when the
-//! file changes, then fires matching hooks at lifecycle events.
+//! [`HookEngine`] — loads `hooks.json` at boot, refreshes it when the
+//! caller starts a turn, then fires matching hooks from that frozen
+//! snapshot at lifecycle events.
 //!
 //! Thread model: each `fire()` call runs every matching hook
 //! sequentially within the call. Hooks of the same event from
@@ -73,7 +74,7 @@ impl HookFireResult {
 }
 
 #[derive(Debug, Clone)]
-struct HookSnapshot {
+pub struct HookSnapshot {
     file: HookFile,
     matchers: HashMap<(HookEvent, usize), Regex>,
 }
@@ -84,8 +85,9 @@ struct HookState {
     modified: Option<SystemTime>,
 }
 
-/// Hook engine. Loaded at boot, shared via `Arc<HookEngine>`, and
-/// reloaded on demand when `hooks.json` changes.
+/// Hook engine. Loaded at boot and shared via `Arc<HookEngine>`.
+/// Runtime turns call [`Self::refresh`] once and pass that snapshot
+/// into [`Self::fire_snapshot`] for stable hook behavior mid-turn.
 #[derive(Debug)]
 pub struct HookEngine {
     enabled: bool,
@@ -145,6 +147,24 @@ impl HookEngine {
         &self,
         event: HookEvent,
         target: Option<&str>,
+        payload: Value,
+        session_id: &str,
+        cwd: &Path,
+    ) -> HookFireResult {
+        if !self.enabled {
+            return HookFireResult::default();
+        }
+        let snapshot = self.refresh();
+        self.fire_snapshot(&snapshot, event, target, payload, session_id, cwd)
+            .await
+    }
+
+    /// Fire every matching hook from an explicit snapshot.
+    pub async fn fire_snapshot(
+        &self,
+        snapshot: &HookSnapshot,
+        event: HookEvent,
+        target: Option<&str>,
         mut payload: Value,
         session_id: &str,
         cwd: &Path,
@@ -152,7 +172,6 @@ impl HookEngine {
         if !self.enabled {
             return HookFireResult::default();
         }
-        let snapshot = self.snapshot();
         if snapshot.file.is_empty() {
             return HookFireResult::default();
         }
@@ -193,7 +212,22 @@ impl HookEngine {
         HookFireResult { outcomes }
     }
 
-    fn snapshot(&self) -> HookSnapshot {
+    /// Refresh `hooks.json` when its modification time changed and
+    /// return the current in-memory snapshot.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the hook state mutex was poisoned.
+    #[must_use]
+    pub fn refresh(&self) -> HookSnapshot {
+        if !self.enabled {
+            return self
+                .state
+                .lock()
+                .expect("hook state lock poisoned")
+                .snapshot
+                .clone();
+        }
         let current_modified = file_modified(&self.path).unwrap_or_else(|err| {
             eprintln!(
                 "[hook] failed to stat {} for reload: {err}",
@@ -509,6 +543,26 @@ mod tests {
             .await;
         assert_eq!(result.outcomes.len(), 1);
         assert!(result.outcomes[0].stdout.contains("reloaded"));
+    }
+
+    #[tokio::test]
+    async fn explicit_snapshot_does_not_reload_after_file_changes() {
+        let dir = tempdir();
+        let engine = HookEngine::load(true, &dir).unwrap();
+        let snapshot = engine.refresh();
+
+        write_hooks(&dir, r#"{"Stop":[{"hooks":[{"command":"echo changed"}]}]}"#);
+
+        let result = engine
+            .fire_snapshot(&snapshot, HookEvent::Stop, None, json!({}), "sess", &dir)
+            .await;
+        assert!(result.outcomes.is_empty());
+
+        let result = engine
+            .fire(HookEvent::Stop, None, json!({}), "sess", &dir)
+            .await;
+        assert_eq!(result.outcomes.len(), 1);
+        assert!(result.outcomes[0].stdout.contains("changed"));
     }
 
     #[tokio::test]

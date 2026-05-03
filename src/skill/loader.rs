@@ -41,7 +41,7 @@ pub fn load(skills_dir: &Path) -> Result<SkillIndex> {
 }
 
 /// Discover and parse every skill under `skills_dir` without
-/// attaching reload metadata. Used by [`SkillIndex`] hot reload.
+/// attaching reload metadata. Used by [`SkillIndex::refresh`].
 pub(crate) fn load_static(skills_dir: &Path) -> Result<Vec<Skill>> {
     let entries = match fs::read_dir(skills_dir) {
         Ok(it) => it,
@@ -291,7 +291,7 @@ mod tests {
     }
 
     #[test]
-    fn reloadable_index_sees_runtime_skill_additions() {
+    fn refreshable_index_sees_runtime_skill_additions_after_refresh() {
         let dir = tempdir();
         write_skill(&dir, "alpha", "name: alpha\ndescription: a", "old");
 
@@ -300,6 +300,7 @@ mod tests {
 
         write_skill(&dir, "bravo", "name: bravo\ndescription: b", "new");
 
-        assert_eq!(idx.get("bravo").unwrap().body, "new");
+        let snapshot = idx.refresh();
+        assert_eq!(snapshot.get("bravo").unwrap().body, "new");
     }
 }

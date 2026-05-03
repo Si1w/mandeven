@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use tokio::sync::Mutex;
 
 use super::error::{Error, Result};
 use super::{Schedule, Timer, TimerTargetRef};
@@ -29,6 +30,7 @@ pub struct StoreFile {
 /// Async I/O wrapper around the global JSON timer file.
 #[derive(Debug)]
 pub struct Store {
+    root: PathBuf,
     path: PathBuf,
 }
 
@@ -37,6 +39,7 @@ impl Store {
     #[must_use]
     pub fn new(data_dir: &Path) -> Self {
         Self {
+            root: data_dir.to_path_buf(),
             path: data_dir.join(GLOBAL_TIMER_FILENAME),
         }
     }
@@ -45,6 +48,12 @@ impl Store {
     #[must_use]
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// Root data directory that owns this store.
+    #[must_use]
+    pub fn root(&self) -> &Path {
+        &self.root
     }
 
     /// Load timer JSON. Missing file is an empty store.
@@ -80,10 +89,84 @@ impl Store {
         atomic_write_text(
             &self.path,
             &format!("{raw}\n"),
-            AtomicWriteScope::GlobalDataDir,
+            AtomicWriteScope::GlobalDataDir {
+                root: self.root.clone(),
+            },
         )
         .await?;
         Ok(())
+    }
+}
+
+/// Result of one transactional timer-store mutation.
+#[derive(Debug)]
+pub enum StoreMutation<T> {
+    /// The closure inspected the store but did not change it.
+    Unchanged(T),
+    /// The closure changed the store and it must be persisted.
+    Changed(T),
+}
+
+impl<T> StoreMutation<T> {
+    fn into_parts(self) -> (T, bool) {
+        match self {
+            Self::Unchanged(value) => (value, false),
+            Self::Changed(value) => (value, true),
+        }
+    }
+}
+
+/// Shared, serialized access to the global timer JSON store.
+#[derive(Debug)]
+pub struct TimerStore {
+    store: Store,
+    lock: Mutex<()>,
+}
+
+impl TimerStore {
+    /// Construct a shared timer store rooted at `<data_dir>/timers.json`.
+    #[must_use]
+    pub fn new(data_dir: &Path) -> Self {
+        Self {
+            store: Store::new(data_dir),
+            lock: Mutex::new(()),
+        }
+    }
+
+    /// Path to the canonical timer JSON file.
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        self.store.path()
+    }
+
+    /// Load the current timer file under the store mutex.
+    ///
+    /// # Errors
+    ///
+    /// Returns timer store I/O, JSON, or schema validation errors.
+    pub async fn load(&self) -> Result<StoreFile> {
+        let _guard = self.lock.lock().await;
+        self.store.load().await
+    }
+
+    /// Serialize a load -> mutate -> optional save sequence.
+    ///
+    /// # Errors
+    ///
+    /// Returns timer store I/O, JSON, schema validation, or mutation
+    /// closure errors.
+    pub async fn mutate<T, F>(&self, f: F) -> Result<T>
+    where
+        F: FnOnce(&mut StoreFile) -> Result<StoreMutation<T>>,
+    {
+        let _guard = self.lock.lock().await;
+        let mut file = self.store.load().await?;
+        let mutation = f(&mut file)?;
+        let (value, changed) = mutation.into_parts();
+        if changed {
+            self.store.save(&file).await?;
+        }
+        Ok(value)
     }
 }
 

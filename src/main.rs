@@ -70,36 +70,38 @@ async fn main() -> Result<(), DynError> {
     let sessions = Arc::new(session::Manager::new(project_bucket.clone()).await?);
     let cron_sessions = Arc::new(session::Manager::new(config::cron_bucket()).await?);
 
-    // Skill index roots at ~/.mandeven/skills/<name>/SKILL.md and
-    // re-reads on access. Disabled => empty index and no
-    // skills_index section in the prompt; SkillTool remains
-    // registered but cannot resolve names.
+    // Skill index roots at ~/.mandeven/skills/<name>/SKILL.md.
+    // Disabled => empty index and no skills_index section in the
+    // prompt; SkillTool remains registered but cannot resolve names.
+    // Runtime turns refresh the index once before request assembly.
     let skill_index = if cfg.agent.skill.enabled {
         skill::seed_builtins(&cfg.data_dir())?;
         skill::load(&cfg.data_dir().join(skill::SKILLS_SUBDIR))?
     } else {
         SkillIndex::new()
     };
+    let timer_store = Arc::new(timer::TimerStore::new(&cfg.data_dir()));
     if cfg.agent.skill.enabled {
-        timer::sync_skill_timers(&cfg.data_dir(), &skill_index).await?;
+        let skills = skill_index.refresh();
+        timer::sync_skill_timers(&timer_store, &skills).await?;
     }
     let skill_index = Arc::new(skill_index);
 
     // Prompt engine reads global ~/.mandeven/AGENTS.md plus
     // project-local AGENTS.md files discovered from the launch CWD
-    // upward. It shares the live skill index for the skills_index
-    // section. The section cache fills lazily as iteration_system is
-    // called.
+    // upward. It shares the skill index handle but receives an
+    // explicit turn snapshot for the skills_index section. The
+    // section cache fills lazily as iteration_system is called.
     let prompts = Arc::new(PromptEngine::load(
         &cfg.data_dir(),
         &cwd,
         skill_index.clone(),
     )?);
 
-    // Hook engine reads ~/.mandeven/hooks.json at boot and reloads
-    // it on the next hook event after the file changes. When the
-    // file is absent or `[agent.hook] enabled = false`, the engine
-    // becomes a no-op.
+    // Hook engine reads ~/.mandeven/hooks.json at boot. Runtime
+    // turns refresh it once and freeze that snapshot for all hook
+    // events in the turn. When the file is absent or `[agent.hook]
+    // enabled = false`, the engine becomes a no-op.
     let hooks = Arc::new(HookEngine::load(cfg.agent.hook.enabled, &cfg.data_dir())?);
 
     // Three queues:
@@ -117,10 +119,14 @@ async fn main() -> Result<(), DynError> {
     // currently active TUI session.
     let active_sessions = Arc::new(Mutex::new(HashMap::new()));
 
-    let (engine, rx) = timer::TimerEngine::new(&project_bucket, &cfg.data_dir()).await?;
+    let (engine, rx) = timer::TimerEngine::with_store(&project_bucket, timer_store.clone()).await?;
     let engine = Arc::new(engine);
     engine.start().await;
-    let timer_wiring = Some(TimerWiring { engine, rx });
+    let timer_wiring = Some(TimerWiring {
+        engine,
+        store: timer_store.clone(),
+        rx,
+    });
 
     let memory_manager = Arc::new(memory::Manager::new(&cfg.data_dir()));
     memory_manager.ensure_exists(&cfg.agent.memory).await?;
@@ -128,10 +134,10 @@ async fn main() -> Result<(), DynError> {
     let exec_manager = Arc::new(exec::Manager::new(&project_bucket));
 
     let tool_registry = build_tool_registry(
-        &cfg.data_dir(),
         &project_bucket,
         &skill_index,
         task_manager.clone(),
+        timer_store,
     );
 
     let (discord_channel, discord_wiring) = build_discord(&cfg).await?;
@@ -195,17 +201,17 @@ async fn main() -> Result<(), DynError> {
 }
 
 fn build_tool_registry(
-    data_dir: &Path,
     project_bucket: &Path,
     skill_index: &Arc<SkillIndex>,
     task_manager: Arc<task::Manager>,
+    timer_store: Arc<timer::TimerStore>,
 ) -> tools::Registry {
     let mut registry = tools::Registry::new();
     tools::register_builtins(&mut registry);
     tools::task::register(&mut registry, task_manager);
     tools::timer::register(
         &mut registry,
-        Arc::new(timer::Manager::new(data_dir, project_bucket)),
+        Arc::new(timer::Manager::with_store(timer_store, project_bucket)),
     );
     registry.register(Arc::new(tools::skill::SkillTool::new(skill_index.clone())));
     registry

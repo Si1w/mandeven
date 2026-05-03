@@ -6,7 +6,7 @@
 //! pared down to what mandeven needs today:
 //!
 //! - [`engine::PromptEngine`] — single entry point. Owns the
-//!   boot-time `AGENTS.md` body, live skill index handle, and the
+//!   boot-time `AGENTS.md` body, skill index handle, and the
 //!   [`section::SectionCache`].
 //! - [`section::SystemPrompt`] / [`section::Section`] — named, ordered
 //!   slices that compose into one [`crate::llm::Message::System`].
@@ -16,7 +16,7 @@
 //!   `DeepSeek`'s automatic prefix cache hot.
 //! - [`static_prompt`] — the built-in static system-prompt manifest
 //!   whose prose lives in `src/prompt/static/*.md`.
-//! - [`context`] — boot-time, live, and per-call dynamic content
+//! - [`context`] — boot-time, turn-snapshot, and per-call dynamic content
 //!   (global/project `AGENTS.md`, `skills_index`, `env_info`).
 //! - [`specialized`] — single-purpose prompts (title generation and
 //!   compact summary) that do **not** share sections with the main
@@ -25,12 +25,11 @@
 //! ## Static / dynamic discipline
 //!
 //! [`engine::PromptEngine::iteration_system`] emits built-in static
-//! Markdown sections first, then live skill context, then boot-time
-//! and run-stable dynamic sections. Stable rendered sections go
-//! through [`section::SectionCache`] so the bytes sent to the model
-//! stay stable until an explicit cache clear; `skills_index` is
-//! rebuilt from the live index so runtime skill edits can appear on
-//! the next turn.
+//! Markdown sections first, then turn-snapshot skill context, then
+//! boot-time and run-stable dynamic sections. Stable rendered
+//! sections go through [`section::SectionCache`] so the bytes sent to
+//! the model stay stable until an explicit cache clear; `skills_index`
+//! is rebuilt from the snapshot the agent refreshed before the turn.
 //! Highly mutable context such as `MEMORY.md` is intentionally not part
 //! of this system message; the agent injects it as transient user
 //! context during request assembly.

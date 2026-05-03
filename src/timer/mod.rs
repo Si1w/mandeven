@@ -14,18 +14,17 @@ pub mod store;
 pub use engine::{TimerEngine, TimerTarget, TimerTick};
 pub use error::{Error, Result};
 pub use schedule::{Schedule, ScheduleError};
-pub use store::{GLOBAL_TIMER_FILENAME, Store, StoreFile};
+pub use store::{GLOBAL_TIMER_FILENAME, Store, StoreFile, StoreMutation, TimerStore};
 
 use std::collections::BTreeSet;
 use std::path::Path;
+use std::sync::Arc;
 
-use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
-use tokio::sync::Mutex;
-
-use crate::skill::SkillIndex;
+use crate::skill::SkillSnapshot;
 use crate::task;
 use crate::utils::ids;
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 
 /// Timer lifecycle state and schedule binding.
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -130,10 +129,9 @@ pub struct FireOutcome {
 /// Project-scoped view over the global timer store.
 #[derive(Debug)]
 pub struct Manager {
-    store: Store,
+    store: Arc<TimerStore>,
     tasks: task::Manager,
     project: String,
-    lock: Mutex<()>,
 }
 
 impl Manager {
@@ -141,11 +139,16 @@ impl Manager {
     /// while exposing only task timers for the given project bucket.
     #[must_use]
     pub fn new(data_dir: &Path, project_bucket: &Path) -> Self {
+        Self::with_store(Arc::new(TimerStore::new(data_dir)), project_bucket)
+    }
+
+    /// Construct a manager over a caller-owned shared timer store.
+    #[must_use]
+    pub fn with_store(store: Arc<TimerStore>, project_bucket: &Path) -> Self {
         Self {
-            store: Store::new(data_dir),
+            store,
             tasks: task::Manager::new(project_bucket),
             project: project_key(project_bucket),
-            lock: Mutex::new(()),
         }
     }
 
@@ -163,25 +166,27 @@ impl Manager {
     pub async fn create(&self, draft: TimerDraft) -> Result<Timer> {
         validate_task_exists(&self.tasks, &draft.task_id).await?;
 
-        let _guard = self.lock.lock().await;
-        let mut file = self.store.load().await?;
-        let now = Utc::now();
-        let timer = Timer {
-            id: ids::new_timer_id(),
-            target: TimerTargetRef::Task {
-                project: self.project.clone(),
-                task_id: draft.task_id,
-            },
-            enabled: true,
-            next_fire_at: draft.schedule.next_after(now),
-            last_fire_at: None,
-            schedule: draft.schedule,
-            created_at: now,
-            updated_at: now,
-        };
-        file.timers.push(timer.clone());
-        self.store.save(&file).await?;
-        Ok(timer)
+        let project = self.project.clone();
+        self.store
+            .mutate(move |file| {
+                let now = Utc::now();
+                let timer = Timer {
+                    id: ids::new_timer_id(),
+                    target: TimerTargetRef::Task {
+                        project,
+                        task_id: draft.task_id,
+                    },
+                    enabled: true,
+                    next_fire_at: draft.schedule.next_after(now),
+                    last_fire_at: None,
+                    schedule: draft.schedule,
+                    created_at: now,
+                    updated_at: now,
+                };
+                file.timers.push(timer.clone());
+                Ok(StoreMutation::Changed(timer))
+            })
+            .await
     }
 
     /// Read a current-project task timer by id.
@@ -229,30 +234,37 @@ impl Manager {
             validate_task_exists(&self.tasks, task_id).await?;
         }
 
-        let _guard = self.lock.lock().await;
-        let mut file = self.store.load().await?;
-        let Some(index) = find_task_timer_index(&file.timers, id, &self.project) else {
-            return Ok(None);
-        };
-        let fields = apply_update(&mut file.timers[index], update);
-        if !fields.is_empty() {
-            let now = Utc::now();
-            file.timers[index].updated_at = now;
-            if fields
-                .iter()
-                .any(|field| field == "schedule" || field == "enabled")
-            {
-                file.timers[index].next_fire_at = file.timers[index]
-                    .enabled
-                    .then(|| file.timers[index].schedule.next_after(now))
-                    .flatten();
-            }
-            self.store.save(&file).await?;
-        }
-        Ok(Some(UpdateOutcome {
-            timer: file.timers[index].clone(),
-            updated_fields: fields,
-        }))
+        let project = self.project.clone();
+        self.store
+            .mutate(move |file| {
+                let Some(index) = find_task_timer_index(&file.timers, id, &project) else {
+                    return Ok(StoreMutation::Unchanged(None));
+                };
+                let fields = apply_update(&mut file.timers[index], update);
+                if fields.is_empty() {
+                    return Ok(StoreMutation::Unchanged(Some(UpdateOutcome {
+                        timer: file.timers[index].clone(),
+                        updated_fields: fields,
+                    })));
+                }
+
+                let now = Utc::now();
+                file.timers[index].updated_at = now;
+                if fields
+                    .iter()
+                    .any(|field| field == "schedule" || field == "enabled")
+                {
+                    file.timers[index].next_fire_at = file.timers[index]
+                        .enabled
+                        .then(|| file.timers[index].schedule.next_after(now))
+                        .flatten();
+                }
+                Ok(StoreMutation::Changed(Some(UpdateOutcome {
+                    timer: file.timers[index].clone(),
+                    updated_fields: fields,
+                })))
+            })
+            .await
     }
 
     /// Delete a current-project task timer.
@@ -261,16 +273,20 @@ impl Manager {
     ///
     /// Returns store I/O or JSON errors.
     pub async fn delete(&self, id: &str) -> Result<bool> {
-        let _guard = self.lock.lock().await;
-        let mut file = self.store.load().await?;
-        let before = file.timers.len();
-        file.timers
-            .retain(|timer| !(timer.id == id && self.is_current_project_task_timer(timer)));
-        if file.timers.len() == before {
-            return Ok(false);
-        }
-        self.store.save(&file).await?;
-        Ok(true)
+        let project = self.project.clone();
+        self.store
+            .mutate(move |file| {
+                let before = file.timers.len();
+                file.timers.retain(|timer| {
+                    !(timer.id == id && is_task_timer_for_project(timer, &project))
+                });
+                if file.timers.len() == before {
+                    Ok(StoreMutation::Unchanged(false))
+                } else {
+                    Ok(StoreMutation::Changed(true))
+                }
+            })
+            .await
     }
 
     /// Mark a task timer as fired now and return the referenced task.
@@ -283,29 +299,34 @@ impl Manager {
     ///
     /// Returns validation, referenced-task, or store errors.
     pub async fn fire_now(&self, id: &str) -> Result<Option<FireOutcome>> {
-        let _guard = self.lock.lock().await;
-        let mut file = self.store.load().await?;
-        let Some(index) = find_task_timer_index(&file.timers, id, &self.project) else {
+        let Some(timer) = self.get(id).await? else {
             return Ok(None);
         };
-        let Some(task_id) = file.timers[index].target.task_id().map(ToOwned::to_owned) else {
+        let Some(task_id) = timer.target.task_id().map(ToOwned::to_owned) else {
             return Ok(None);
         };
         let Some(task) = self.tasks.get(&task_id).await? else {
             return Err(Error::TaskNotFound(task_id));
         };
-        let now = Utc::now();
-        file.timers[index].last_fire_at = Some(now);
-        file.timers[index].next_fire_at = file.timers[index]
-            .enabled
-            .then(|| file.timers[index].schedule.next_after(now))
-            .flatten();
-        file.timers[index].updated_at = now;
-        self.store.save(&file).await?;
-        Ok(Some(FireOutcome {
-            timer: file.timers[index].clone(),
-            task,
-        }))
+
+        let project = self.project.clone();
+        let task_id_for_match = task.id.clone();
+        let timer = self
+            .store
+            .mutate(move |file| {
+                let Some(index) = find_task_timer_index(&file.timers, id, &project) else {
+                    return Ok(StoreMutation::Unchanged(None));
+                };
+                if file.timers[index].target.task_id() != Some(task_id_for_match.as_str()) {
+                    return Ok(StoreMutation::Unchanged(None));
+                }
+                let now = Utc::now();
+                advance_task_timer_after_fire(&mut file.timers[index], now);
+                Ok(StoreMutation::Changed(Some(file.timers[index].clone())))
+            })
+            .await?;
+
+        Ok(timer.map(|timer| FireOutcome { timer, task }))
     }
 
     fn is_current_project_task_timer(&self, timer: &Timer) -> bool {
@@ -322,72 +343,76 @@ impl Manager {
 ///
 /// Returns timer store I/O or JSON errors when the global timer file
 /// cannot be loaded or saved.
-pub async fn sync_skill_timers(data_dir: &Path, skills: &SkillIndex) -> Result<()> {
-    let store = Store::new(data_dir);
-    let mut file = store.load().await?;
-    let now = Utc::now();
-    let mut desired_skills = BTreeSet::new();
-    let mut changed = false;
+pub async fn sync_skill_timers(store: &TimerStore, skills: &SkillSnapshot) -> Result<()> {
+    let skills: Vec<_> = skills.skills().collect();
+    store
+        .mutate(move |file| {
+            let now = Utc::now();
+            let mut desired_skills = BTreeSet::new();
+            let mut changed = false;
 
-    for skill in skills.skills() {
-        let Some(expr) = skill.frontmatter.timers.as_deref() else {
-            continue;
-        };
-        let expr = expr.trim();
-        if expr.is_empty() {
-            continue;
-        }
-        let schedule = match Schedule::cron(expr) {
-            Ok(schedule) => schedule,
-            Err(err) => {
-                eprintln!(
-                    "[timer] skipped invalid timer on skill /{}: {err}",
-                    skill.frontmatter.name
-                );
-                continue;
-            }
-        };
-        let skill_name = skill.frontmatter.name.clone();
-        desired_skills.insert(skill_name.clone());
-        let next_fire_at = schedule.next_after(now);
+            for skill in skills {
+                let Some(expr) = skill.frontmatter.timers.as_deref() else {
+                    continue;
+                };
+                let expr = expr.trim();
+                if expr.is_empty() {
+                    continue;
+                }
+                let schedule = match Schedule::cron(expr) {
+                    Ok(schedule) => schedule,
+                    Err(err) => {
+                        eprintln!(
+                            "[timer] skipped invalid timer on skill /{}: {err}",
+                            skill.frontmatter.name
+                        );
+                        continue;
+                    }
+                };
+                let skill_name = skill.frontmatter.name.clone();
+                desired_skills.insert(skill_name.clone());
+                let next_fire_at = schedule.next_after(now);
 
-        if let Some(existing) = find_skill_timer_mut(&mut file.timers, &skill_name) {
-            if !cron_expr_matches(&existing.schedule, expr) {
-                existing.schedule = schedule;
-                existing.next_fire_at = next_fire_at;
-                existing.updated_at = now;
+                if let Some(existing) = find_skill_timer_mut(&mut file.timers, &skill_name) {
+                    if !cron_expr_matches(&existing.schedule, expr) {
+                        existing.schedule = schedule;
+                        existing.next_fire_at = next_fire_at;
+                        existing.updated_at = now;
+                        changed = true;
+                    }
+                    continue;
+                }
+
+                file.timers.push(Timer {
+                    id: ids::new_timer_id(),
+                    target: TimerTargetRef::Skill { skill: skill_name },
+                    enabled: true,
+                    schedule,
+                    next_fire_at,
+                    last_fire_at: None,
+                    created_at: now,
+                    updated_at: now,
+                });
                 changed = true;
             }
-            continue;
-        }
 
-        file.timers.push(Timer {
-            id: ids::new_timer_id(),
-            target: TimerTargetRef::Skill { skill: skill_name },
-            enabled: true,
-            schedule,
-            next_fire_at,
-            last_fire_at: None,
-            created_at: now,
-            updated_at: now,
-        });
-        changed = true;
-    }
+            let before = file.timers.len();
+            file.timers.retain(|timer| {
+                !matches!(
+                    &timer.target,
+                    TimerTargetRef::Skill { skill } if !desired_skills.contains(skill)
+                )
+            });
+            changed |= file.timers.len() != before;
 
-    let before = file.timers.len();
-    file.timers.retain(|timer| {
-        !matches!(
-            &timer.target,
-            TimerTargetRef::Skill { skill } if !desired_skills.contains(skill)
-        )
-    });
-    changed |= file.timers.len() != before;
-
-    if changed {
-        sort_timers(&mut file.timers);
-        store.save(&file).await?;
-    }
-    Ok(())
+            if changed {
+                sort_timers(&mut file.timers);
+                Ok(StoreMutation::Changed(()))
+            } else {
+                Ok(StoreMutation::Unchanged(()))
+            }
+        })
+        .await
 }
 
 async fn validate_task_exists(tasks: &task::Manager, id: &str) -> Result<()> {
@@ -439,6 +464,15 @@ fn apply_update(timer: &mut Timer, update: TimerUpdate) -> Vec<String> {
         fields.push("schedule".to_string());
     }
     fields
+}
+
+fn advance_task_timer_after_fire(timer: &mut Timer, now: DateTime<Utc>) {
+    timer.last_fire_at = Some(now);
+    timer.next_fire_at = timer
+        .enabled
+        .then(|| timer.schedule.next_after(now))
+        .flatten();
+    timer.updated_at = now;
 }
 
 fn find_task_timer_index(timers: &[Timer], id: &str, project: &str) -> Option<usize> {
@@ -572,7 +606,9 @@ mod tests {
     async fn sync_skill_timers_upserts_short_id_json() {
         let dir = tempdir("global-timer");
         let skills = SkillIndex::from_skills(vec![skill("cron", Some("0 9 * * *"))]);
-        sync_skill_timers(&dir, &skills).await.unwrap();
+        let store = TimerStore::new(&dir);
+        let snapshot = skills.snapshot();
+        sync_skill_timers(&store, &snapshot).await.unwrap();
 
         let file = Store::new(&dir).load().await.unwrap();
         assert_eq!(file.timers.len(), 1);
@@ -581,7 +617,7 @@ mod tests {
         assert!(cron_expr_matches(&file.timers[0].schedule, "0 9 * * *"));
 
         let first_id = file.timers[0].id.clone();
-        sync_skill_timers(&dir, &skills).await.unwrap();
+        sync_skill_timers(&store, &snapshot).await.unwrap();
         let file = Store::new(&dir).load().await.unwrap();
         assert_eq!(file.timers[0].id, first_id);
 

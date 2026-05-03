@@ -515,9 +515,16 @@ async fn edit_managed_memory(p: EditParams, path: &Path) -> Result<ToolOutcome> 
 async fn write_managed_memory_atomic(path: &Path, content: &str) -> Result<()> {
     memory::validate_memory_markdown(content).map_err(|err| exec("file_edit", err.to_string()))?;
     let scope = if memory::is_managed_memory_path(path) {
-        AtomicWriteScope::ManagedMemory
+        AtomicWriteScope::ManagedMemory {
+            path: memory::default_memory_path(),
+        }
     } else {
-        AtomicWriteScope::GlobalDataDir
+        AtomicWriteScope::GlobalDataDir {
+            root: path
+                .parent()
+                .unwrap_or_else(|| Path::new("/"))
+                .to_path_buf(),
+        }
     };
     atomic_write_text(path, content, scope)
         .await
@@ -619,9 +626,15 @@ fn exec(tool: &'static str, message: impl Into<String>) -> Error {
 }
 
 async fn write_file_atomic(tool: &'static str, path: &Path, content: &str) -> Result<()> {
-    atomic_write_text(path, content, AtomicWriteScope::Workspace)
-        .await
-        .map_err(|err| exec(tool, format!("{}: {err}", path.display())))
+    atomic_write_text(
+        path,
+        content,
+        AtomicWriteScope::Workspace {
+            root: workspace::root(),
+        },
+    )
+    .await
+    .map_err(|err| exec(tool, format!("{}: {err}", path.display())))
 }
 
 /// Returns true when `path` references a device file we refuse to

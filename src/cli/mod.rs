@@ -744,7 +744,8 @@ impl CliChannel {
                 true
             }
             SlashCommand::Skills => {
-                let skill_snapshot: Vec<(String, String)> = self.skills.entries().collect();
+                let skills = self.skills.refresh();
+                let skill_snapshot: Vec<(String, String)> = skills.entries().collect();
                 let mut state = self.state.lock().unwrap();
                 state.skills = skill_snapshot;
                 state.open_overlay(Overlay::Skills);
@@ -777,7 +778,8 @@ impl CliChannel {
         body: &str,
         inbound: &InboundSender,
     ) -> bool {
-        if let Some(skill) = self.skills.get(name) {
+        let skills = self.skills.refresh();
+        if let Some(skill) = skills.get(name) {
             // Echo the invocation so the user sees they triggered it,
             // then ship the SKILL.md body as if it were typed.
             {

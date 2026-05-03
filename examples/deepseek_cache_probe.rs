@@ -30,9 +30,11 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     workspace::init(std::fs::canonicalize(&cwd)?);
     SandboxPolicy::init(cfg.sandbox.policy);
 
+    let timer_store = Arc::new(timer::TimerStore::new(&cfg.data_dir()));
     let skills = Arc::new(load_skills(&cfg)?);
+    let skill_snapshot = skills.refresh();
     if cfg.agent.skill.enabled {
-        timer::sync_skill_timers(&cfg.data_dir(), &skills).await?;
+        timer::sync_skill_timers(&timer_store, &skill_snapshot).await?;
     }
     let prompts = PromptEngine::load(&cfg.data_dir(), &cwd, skills.clone())?;
     let mut registry = tools::Registry::new();
@@ -41,15 +43,21 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     tools::task::register(&mut registry, Arc::new(task::Manager::new(&project_bucket)));
     tools::timer::register(
         &mut registry,
-        Arc::new(timer::Manager::new(&cfg.data_dir(), &project_bucket)),
+        Arc::new(timer::Manager::with_store(
+            timer_store.clone(),
+            &project_bucket,
+        )),
     );
     registry.register(Arc::new(tools::skill::SkillTool::new(skills.clone())));
 
     let system = prompts
-        .iteration_system(&PromptContext {
-            model_id: &profile.model_name,
-            cwd: Path::new(&cwd),
-        })
+        .iteration_system_with_skills(
+            &PromptContext {
+                model_id: &profile.model_name,
+                cwd: Path::new(&cwd),
+            },
+            &skill_snapshot,
+        )
         .into_message();
     let tools = registry.schemas();
     println!(

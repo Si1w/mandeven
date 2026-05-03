@@ -40,15 +40,15 @@
 //! ```
 //!
 //! Hook definitions live in `~/.mandeven/hooks.json` so they can be
-//! changed without editing the toml. The engine reloads the file on
-//! the next hook event after its modification time changes; parse
-//! failures keep the previous valid hook set active.
+//! changed without editing the toml. The agent refreshes the file
+//! before each turn and freezes that snapshot for all hook events in
+//! the turn; parse failures keep the previous valid hook set active.
 
 pub mod engine;
 pub mod error;
 pub mod types;
 
-pub use engine::{HookEngine, HookFireResult, HookOutcome};
+pub use engine::{HookEngine, HookFireResult, HookOutcome, HookSnapshot};
 pub use error::{Error, Result};
 pub use types::{CommandHook, HookEvent, HookFile, HookMatcher};
 

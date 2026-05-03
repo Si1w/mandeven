@@ -99,7 +99,7 @@ impl Store {
             let Some(path) = desired_paths.get(&task.id) else {
                 continue;
             };
-            write_task(path, task).await?;
+            write_task(&self.dir, path, task).await?;
         }
 
         for existing_task in existing {
@@ -245,9 +245,16 @@ async fn read_task(path: &Path) -> Result<Option<Task>> {
     Ok(Some(front_matter.into_task(path, subject, description)))
 }
 
-async fn write_task(path: &Path, task: &Task) -> Result<()> {
+async fn write_task(root: &Path, path: &Path, task: &Task) -> Result<()> {
     let content = render_task(task)?;
-    atomic_write_text(path, &content, AtomicWriteScope::ProjectBucket).await?;
+    atomic_write_text(
+        path,
+        &content,
+        AtomicWriteScope::ProjectBucket {
+            root: root.to_path_buf(),
+        },
+    )
+    .await?;
     Ok(())
 }
 

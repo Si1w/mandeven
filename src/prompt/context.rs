@@ -8,9 +8,10 @@
 //! 1. **Boot-time** — global and project-local `AGENTS.md` files,
 //!    read once by [`crate::prompt::PromptEngine::load`] and kept in
 //!    memory for the lifetime of the engine.
-//! 2. **Live** — `skills_index`, rebuilt from the shared
-//!    [`crate::skill::SkillIndex`] so runtime skill edits can appear
-//!    on the next iteration.
+//! 2. **Turn snapshot** — `skills_index`, rebuilt from a
+//!    [`crate::skill::SkillSnapshot`] captured before request
+//!    assembly so runtime skill edits appear on the next turn without
+//!    changing a turn mid-flight.
 //! 3. **Run-stable** — `env_info` (model id, cwd). Computed each call
 //!    from arguments, but the inputs do not change for a given run,
 //!    so the rendered bytes go through [`crate::prompt::SectionCache`]
